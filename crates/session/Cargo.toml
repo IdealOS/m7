@@ -1,0 +1,8 @@
+[package]
+name = "session"
+description = "First userspace process after init: starts and supervises system services."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Boot the image from `tools/build-image qemu`. The serial console (with the
+# session shell) is this terminal; the virtio-gpu display opens in a window.
+# SSH: ssh -p 2222 root@localhost
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="$REPO/image/output/qemu"
+command -v qemu-system-aarch64 >/dev/null || { echo "QEMU is not installed. Run: brew install qemu"; exit 1; }
+[ -f "$OUT/Image" ] && [ -f "$OUT/disk.img" ] || { echo "No QEMU image. Run: tools/build-image qemu"; exit 1; }
+
+# Boot from a scratch copy so the built image stays pristine.
+[ -f "$OUT/run.img" ] || cp "$OUT/disk.img" "$OUT/run.img"
+
+exec qemu-system-aarch64 \
+	-M virt -accel hvf -cpu host -smp 4 -m 4G \
+	-kernel "$OUT/Image" \
+	-append "root=/dev/vda1 rootfstype=ext4 rootwait ro console=tty0 console=ttyAMA0" \
+	-drive file="$OUT/run.img",if=virtio,format=raw \
+	-device virtio-gpu-pci \
+	-display cocoa \
+	-device virtio-keyboard-pci -device virtio-tablet-pci \
+	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0 \
+	-serial mon:stdio

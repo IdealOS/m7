@@ -1,0 +1,26 @@
+# Lima VM used as the Buildroot build box. aarch64, the same architecture as
+# the Pi 4, so Rust builds inside it are native rather than cross-compiled.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+cpus: 8
+memory: "16GiB"
+disk: "100GiB"
+# The repo is copied in with rsync (Buildroot rejects paths with spaces), so the
+# host home directory only needs to be readable.
+mounts:
+  - location: "~"
+    writable: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential git rsync bc cpio unzip file wget python3 libncurses-dev
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux
+      command -v rustup || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal

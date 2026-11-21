@@ -1,0 +1,21 @@
+#!/bin/sh
+# Build device binaries in the VM and push them to a running dev image.
+# Usage: tools/deploy-to-pi HOST [PORT]
+#   Pi:   tools/deploy-to-pi idealos.local
+#   QEMU: tools/deploy-to-pi localhost 2222
+set -eu
+. "$(dirname "$0")/_vm.sh"
+HOST="${1:?usage: tools/deploy-to-pi HOST [PORT]}"
+PORT="${2:-22}"
+
+vm_require
+vm_sync
+vm_run "set -e; cd ~/idealos
+	cargo build --release -p session -p compositor --no-default-features --features compositor/kms"
+vm_fetch "idealos/target/release" "$REPO/target/device"
+
+# Binaries go to the writable /opt/idealos overlay; start-session prefers them over
+# the copies baked into the read-only image. Killing session makes init respawn it.
+scp -P "$PORT" "$REPO/target/device/session" "$REPO/target/device/compositor" "root@$HOST:/opt/idealos/bin/"
+ssh -p "$PORT" "root@$HOST" "killall session || true"
+echo "Deployed to $HOST:$PORT"

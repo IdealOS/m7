@@ -1,0 +1,25 @@
+[package]
+name = "compositor"
+description = "Scene-graph compositor: wgpu renderer, hosted (winit) and KMS backends."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["hosted"]
+# Window on macOS/Linux desktops via winit. Used for day-to-day development.
+hosted = ["dep:winit"]
+# Direct DRM/KMS + libinput output on the device. Linux only; see backend/kms.rs.
+kms = []
+
+[dependencies]
+protocol.workspace = true
+serde_json.workspace = true
+wgpu.workspace = true
+glyphon.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+png.workspace = true
+log.workspace = true
+env_logger.workspace = true
+winit = { workspace = true, optional = true }

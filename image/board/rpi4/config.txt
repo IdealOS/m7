@@ -1,0 +1,8 @@
+# Raspberry Pi 4 firmware config
+arm_64bit=1
+kernel=Image
+# Full KMS driver: the compositor drives the display through DRM/KMS.
+dtoverlay=vc4-kms-v3d-pi4
+max_framebuffers=2
+disable_overscan=1
+enable_uart=1

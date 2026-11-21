@@ -1,0 +1,22 @@
+#!/bin/sh
+# Write the Pi 4 image to an SD card (macOS).
+# Usage: tools/flash-sd /dev/diskN      Find N with: diskutil list external
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+IMG="$REPO/image/output/rpi4/sdcard.img"
+DISK="${1:?usage: tools/flash-sd /dev/diskN (see: diskutil list external)}"
+[ -f "$IMG" ] || { echo "No Pi image. Run: tools/build-image rpi4"; exit 1; }
+
+INFO="$(diskutil info "$DISK")" || exit 1
+echo "$INFO" | grep -Eq "Device Location: +External|Removable Media: +Removable" \
+	|| { echo "$DISK is not an external or removable disk. Refusing."; exit 1; }
+echo "$INFO" | grep -E "Device / Media Name|Disk Size"
+printf "Erase everything on %s and write %s? Type yes: " "$DISK" "$(basename "$IMG")"
+read -r answer
+[ "$answer" = yes ] || { echo "Cancelled."; exit 1; }
+
+RDISK="$(echo "$DISK" | sed 's|/dev/disk|/dev/rdisk|')"
+diskutil unmountDisk "$DISK"
+sudo dd if="$IMG" of="$RDISK" bs=4m status=progress
+sync
+diskutil eject "$DISK"

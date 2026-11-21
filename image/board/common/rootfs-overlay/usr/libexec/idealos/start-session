@@ -1,0 +1,7 @@
+#!/bin/sh
+# Started by init on the console. Prefers a session binary pushed to the dev
+# overlay (/opt/idealos/bin) over the one baked into the read-only image.
+for dir in /opt/idealos/bin /usr/bin; do
+	[ -x "$dir/session" ] && exec "$dir/session" /etc/idealos/session.conf
+done
+echo "start-session: no session binary found"; exec /bin/sh -l

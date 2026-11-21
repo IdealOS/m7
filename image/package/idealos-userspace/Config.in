@@ -1,0 +1,7 @@
+config BR2_PACKAGE_IDEALOS_USERSPACE
+	bool "idealos-userspace"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_RUSTC
+	help
+	  Rust userspace from this repository: session, compositor and
+	  (later) the bus, database and system services.

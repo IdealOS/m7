@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_IDEALOS_PATH/package/idealos-userspace/Config.in"

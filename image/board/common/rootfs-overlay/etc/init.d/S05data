@@ -1,0 +1,20 @@
+#!/bin/sh
+# Mount the writable data partition (the database lives here) and, on dev
+# images, a writable overlay on /opt/idealos for pushing new binaries over SSH.
+
+case "$1" in
+start)
+	dev=$(findfs LABEL=data) || { echo "S05data: no partition labelled data"; exit 1; }
+	mount -t ext4 -o rw,noatime "$dev" /data
+	if [ -e /etc/idealos/dev-image ]; then
+		mkdir -p /data/dev-overlay/upper /data/dev-overlay/work
+		mount -t overlay overlay \
+			-o lowerdir=/opt/idealos,upperdir=/data/dev-overlay/upper,workdir=/data/dev-overlay/work \
+			/opt/idealos
+	fi
+	;;
+stop)
+	umount /opt/idealos 2>/dev/null
+	umount /data
+	;;
+esac

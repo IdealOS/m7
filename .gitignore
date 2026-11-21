@@ -1,0 +1,5 @@
+/target
+node_modules/
+/image/output/
+*.img
+.DS_Store
