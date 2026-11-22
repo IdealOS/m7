@@ -29,18 +29,6 @@ const BUFFERS: usize = 3;
 pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     // First, before wgpu starts any threads; see Signals::block.
     let signals = Signals::block()?;
-    // Declared before the display so it is dropped after it: the console takes the
-    // screen back once the compositor has let go of it.
-    let _console = match Console::mute(console::FOREGROUND) {
-        Ok(c) => {
-            log::info!("console: keyboard and text output off on {}", console::FOREGROUND);
-            Some(c)
-        }
-        Err(e) => {
-            log::warn!("console: {e}; keys typed into the desktop also reach the text console");
-            None
-        }
-    };
     let mut display = Display::open(opts.card.as_deref(), BUFFERS)?;
     let (w, h) = display.size();
     let mut target = Offscreen::new(w, h, RENDER_FORMAT)?;
@@ -52,6 +40,20 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         target.adapter.name,
         target.adapter.backend,
     );
+    // Declared after the GPU, so it is dropped (and the console restored) before the
+    // GPU is torn down: a driver that crashes in teardown (Venus under UTM did) must
+    // not leave the console's keyboard off. The kernel releases the display and its
+    // buffers when the process dies, whatever happens.
+    let _console = match Console::mute(console::FOREGROUND) {
+        Ok(c) => {
+            log::info!("console: keyboard and text output off on {}", console::FOREGROUND);
+            Some(c)
+        }
+        Err(e) => {
+            log::warn!("console: {e}; keys typed into the desktop also reach the text console");
+            None
+        }
+    };
 
     // Without input the desktop still draws; say why and carry on.
     let mut devices = match Devices::open("seat0") {

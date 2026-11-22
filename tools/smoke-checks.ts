@@ -54,6 +54,8 @@ export function evaluate(log: string): Check[] {
   const cacheFiles = Number(f.get("shader-cache-files") ?? 0);
   // Mesa: "Failed to create //.cache for shader cache (Read-only file system)---disabling."
   const cacheOff = /^.*for shader cache.*$/m.exec(log);
+  // wgpu's OpenGL backend probing EGL; the renderer only asks for Vulkan.
+  const egl = /^.*libEGL warning.*$/m.exec(log);
   return [
     {
       name: "session started its shell",
@@ -80,6 +82,11 @@ export function evaluate(log: string): Check[] {
       name: "text console's keyboard off under the compositor",
       ok: /in off mode/.test(keyboard ?? ""),
       detail: keyboard ?? "not reported",
+    },
+    {
+      name: "compositor didn't start OpenGL",
+      ok: !egl,
+      detail: egl?.[0].trim() ?? "no EGL messages",
     },
     {
       name: "Mesa shader cache on /data",

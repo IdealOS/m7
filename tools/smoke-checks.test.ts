@@ -259,3 +259,10 @@ test("a compositor killed without cleanup fails the report", () => {
   assert.deepEqual(failed.map((c) => c.name), ["compositor stopped cleanly and gave the console back"]);
   assert.equal(failed[0].detail, "no clean exit logged, The keyboard is in off mode");
 });
+
+test("wgpu starting OpenGL is reported", () => {
+  // Regression guard: the GL backend's teardown aborted the compositor under UTM.
+  const log = GOOD.replace("Starting syslogd: OK", "Starting syslogd: OK\nlibEGL warning: DRI2: failed to create screen");
+  const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
+  assert.deepEqual(failed, ["compositor didn't start OpenGL"]);
+});

@@ -65,7 +65,9 @@ impl Offscreen {
     }
 
     async fn new_async(width: u32, height: u32, format: wgpu::TextureFormat) -> Result<Offscreen, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        desc.backends = backends(wgpu::Backends::from_env());
+        let instance = wgpu::Instance::new(desc);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -172,11 +174,28 @@ impl Offscreen {
     }
 }
 
+/// The wgpu backends to try: `WGPU_BACKEND` if set, otherwise Vulkan, Metal and DX12.
+/// OpenGL is left out: the renderer doesn't need it, starting it prints EGL warnings
+/// where there is no GL driver (plain QEMU), and where virgl's GL driver exists (UTM)
+/// tearing it down aborted the process at exit.
+fn backends(from_env: Option<wgpu::Backends>) -> wgpu::Backends {
+    from_env.unwrap_or(wgpu::Backends::PRIMARY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::{NodeKind, SceneOp};
     use serde_json::json;
+
+    #[test]
+    fn opengl_is_off_unless_asked_for() {
+        let default = backends(None);
+        assert!(default.contains(wgpu::Backends::VULKAN | wgpu::Backends::METAL));
+        assert!(!default.contains(wgpu::Backends::GL));
+        // WGPU_BACKEND still wins, GL included.
+        assert_eq!(backends(Some(wgpu::Backends::GL)), wgpu::Backends::GL);
+    }
 
     /// Renders a real frame on whatever GPU (or software adapter) is present.
     /// Skips quietly where no adapter exists, such as a bare CI runner.
