@@ -22,6 +22,10 @@ export const GUEST_SCRIPT = [
   'ps | grep -q "[/]usr/bin/session" && echo SMOKE session ok',
   // Still up a few seconds after its first frame, so it didn't crash on the next ones.
   "sleep 3; echo SMOKE compositor-pid $(pidof compositor)",
+  // The compositor turns the text console's keyboard off while it runs.
+  "echo SMOKE console-keyboard $(kbd_mode -C /dev/tty0 2>&1)",
+  // Mesa caches compiled shaders under XDG_CACHE_HOME, which start-session puts on /data.
+  "echo SMOKE shader-cache-files $(find /data/cache -type f 2>/dev/null | wc -l)",
   "echo SMOKE end",
 ];
 
@@ -46,6 +50,10 @@ export function evaluate(log: string): Check[] {
   const s05 = log.split("\n").find((l) => l.startsWith("S05data:"));
   const kms = /kms: (.* on .* @ \d+ Hz).*adapter ([^(]+)/.exec(log);
   const exited = /session: compositor exited.*$/m.exec(log);
+  const keyboard = f.get("console-keyboard");
+  const cacheFiles = Number(f.get("shader-cache-files") ?? 0);
+  // Mesa: "Failed to create //.cache for shader cache (Read-only file system)---disabling."
+  const cacheOff = /^.*for shader cache.*$/m.exec(log);
   return [
     {
       name: "session started its shell",
@@ -67,6 +75,16 @@ export function evaluate(log: string): Check[] {
       name: "compositor still running",
       ok: /^\d+$/.test(f.get("compositor-pid") ?? "") && !exited,
       detail: exited?.[0] ?? (f.get("compositor-pid") ? `pid ${f.get("compositor-pid")}` : "not running"),
+    },
+    {
+      name: "text console's keyboard off under the compositor",
+      ok: /in off mode/.test(keyboard ?? ""),
+      detail: keyboard ?? "not reported",
+    },
+    {
+      name: "Mesa shader cache on /data",
+      ok: cacheFiles > 0 && !cacheOff,
+      detail: cacheOff?.[0].trim() ?? `${cacheFiles} file(s) in /data/cache`,
     },
   ];
 }
@@ -219,6 +237,15 @@ export function evaluateReport(
       name: "benchmarks produced tables",
       ok: has(/\| Operation \| Count \| p50/) && has(/\| Process \| Ready in/),
       detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}`,
+    },
+    {
+      // hw-report stops the desktop's compositor by restarting session, and bounds its
+      // own compositor run with timeout; both send SIGTERM.
+      name: "compositor stopped cleanly and gave the console back",
+      ok: /kms: stopping on SIGTERM/.test(log) && /compositor stopped: The keyboard is in (?!off)/.test(report),
+      detail: `${/kms: stopping on SIGTERM/.test(log) ? "clean exit" : "no clean exit logged"}, ${
+        /compositor stopped: (.*)$/m.exec(report)?.[1] ?? "console keyboard not reported"
+      }`,
     },
     {
       name: "desktop restored after the report",

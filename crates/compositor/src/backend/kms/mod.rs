@@ -7,24 +7,28 @@
 //!
 //! Input comes from libinput ([`input`]), with keymaps from xkbcommon, and feeds the
 //! same [`crate::input::Seat`] as the hosted backend. The pointer is drawn on the
-//! display's cursor plane, so moving it costs no redraw.
+//! display's cursor plane, so moving it costs no redraw. While it runs, the text
+//! console's keyboard is off and the console doesn't draw ([`console`]), and SIGTERM
+//! ends the frame loop normally so both come back ([`signals`]).
 //!
 //! Still to come (milestone M1):
 //!
 //! - **Zero-copy scanout on the Pi (Spike B):** V3DV renders into a texture exported as
 //!   a dmabuf and imported as the KMS framebuffer, with no readback or copy.
 //! - **Region damage:** today any change redraws and copies the whole frame.
-//! - **The console:** the kernel console still receives keystrokes; switching the VT
-//!   to graphics mode and muting its keyboard is still to do.
 //!
 //! [`display`] is shared with `spikes/kms-probe`, which measures the same path.
 
+#[cfg(target_os = "linux")]
+mod console;
 #[cfg(target_os = "linux")]
 pub mod display;
 #[cfg(target_os = "linux")]
 pub mod input;
 #[cfg(target_os = "linux")]
 mod run;
+#[cfg(target_os = "linux")]
+mod signals;
 
 #[cfg(target_os = "linux")]
 pub use run::run;

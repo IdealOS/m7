@@ -2,6 +2,10 @@
 # Started by init on the console. Prefers a session binary pushed to the dev
 # overlay (/opt/idealos/bin) over the one baked into the read-only image, and on dev
 # images a /data/session.conf over /etc/idealos/session.conf.
+# Caches go on /data: the root filesystem and HOME (/) are read-only. Mesa keeps its
+# compiled shaders under here, so the compositor doesn't recompile them every start.
+export XDG_CACHE_HOME=/data/cache
+mkdir -p "$XDG_CACHE_HOME"
 conf=/etc/idealos/session.conf
 [ -e /etc/idealos/dev-image ] && [ -f /data/session.conf ] && conf=/data/session.conf
 for dir in /opt/idealos/bin /usr/bin; do

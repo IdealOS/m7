@@ -78,7 +78,7 @@ docs/               feature list, implementation plan, screenshots
 
 | Item | State |
 | --- | --- |
-| Monorepo, Makefile, CI workflow | Done. CI has not run yet (no remote). |
+| Monorepo, Makefile, CI workflow | Done. CI runs on GitHub (`IdealOS/m7`) and passes. |
 | `protocol`: bus envelope, framing, scene ops | Done, tested against the plan's JSON examples |
 | Compositor scene graph (groups, rects, text, clipping) | Done, tested |
 | Renderer: instanced SDF rounded rects, glyphon text per layer | Done; renders at 60 fps hosted on an M3 |
@@ -86,8 +86,9 @@ docs/               feature list, implementation plan, screenshots
 | Damage tracking | Frame-level only: an idle scene draws nothing. Region damage is still to do. |
 | Headless render to PNG | Done (screenshots, future golden-image tests) |
 | `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. |
-| Images, transforms beyond translation, bundled fonts | Not started. System fonts for now; the compositor panics if none are installed. |
-| KMS backend | **Output and input work** (M1): `compositor --backend kms` draws the scene with three page-flipped dumb buffers (Spike A's copy path), redraws only when the scene changes, and takes keyboard and pointer input through libinput and xkbcommon. The pointer is a hardware cursor, so moving it costs no redraw. It picks the first DRM card with a connected display (on a Pi 4, `vc4`, not `v3d`). Not yet: the zero-copy Pi path (Spike B), muting the kernel console's keyboard, and a visual check of the cursor (QEMU screendumps leave it out). |
+| Bundled UI font | Done: Inter (variable, SIL OFL) is built into the compositor as the sans-serif face on every target; system fonts are only fallbacks for other scripts. |
+| Images, transforms beyond translation | Not started. |
+| KMS backend | **Output and input work** (M1): `compositor --backend kms` draws the scene with three page-flipped dumb buffers (Spike A's copy path), redraws only when the scene changes, and takes keyboard and pointer input through libinput and xkbcommon. The pointer is a hardware cursor, so moving it costs no redraw (checked by eye in QEMU's window; screendumps leave it out). It picks the first DRM card with a connected display (on a Pi 4, `vc4`, not `v3d`). While it runs, the text console's keyboard and drawing are off, so keys don't also reach the console (on the Pi, a root shell); it exits cleanly on SIGTERM and gives them back. Mesa's shader cache lives on `/data/cache`. Not yet: the zero-copy Pi path (Spike B). |
 | Buildroot image for QEMU | **Built and booted** (Buildroot 2026.08.2, kernel 6.12.58). Boots to `session` in ~0.4 s under HVF; `/data` and the dev overlay mount; the compositor shows its first frame on virtio-gpu (lavapipe), finds QEMU's virtio keyboard and tablet, and moves a window dragged by its title bar and raises the next on Alt+Tab. `make smoke-qemu` checks all of this. |
 | Buildroot image for the Pi | **Built** on the first try (~45 min, reusing downloads): Pi kernel `stable_20250916`, V3DV Vulkan driver, firmware with the `vc4-kms-v3d-pi4` overlay, and the dev SSH key, in a 3.3 GB `sdcard.img`. **Never booted**: no Pi on hand yet. |
 | Lima build VM, image build, QEMU boot | Run end to end. |

@@ -4,13 +4,17 @@
 //! page-flip events) until the frame-time readout is due. Input is applied to the
 //! scene as it arrives; a frame is drawn only when the scene changed. All pending
 //! input is read before drawing, so a fast drag costs one frame, not one per event.
+//! A stop signal ends the loop normally, so the console, cursor and buffers are put
+//! back as their owners drop.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
+use super::console::{self, Console};
 use super::display::{Display, RENDER_FORMAT};
 use super::input::Devices;
+use super::signals::Signals;
 use crate::backend::Options;
 use crate::headless::Offscreen;
 use crate::input::{Effect, Seat};
@@ -23,6 +27,20 @@ use crate::{cursor, demo};
 const BUFFERS: usize = 3;
 
 pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
+    // First, before wgpu starts any threads; see Signals::block.
+    let signals = Signals::block()?;
+    // Declared before the display so it is dropped after it: the console takes the
+    // screen back once the compositor has let go of it.
+    let _console = match Console::mute(console::FOREGROUND) {
+        Ok(c) => {
+            log::info!("console: keyboard and text output off on {}", console::FOREGROUND);
+            Some(c)
+        }
+        Err(e) => {
+            log::warn!("console: {e}; keys typed into the desktop also reach the text console");
+            None
+        }
+    };
     let mut display = Display::open(opts.card.as_deref(), BUFFERS)?;
     let (w, h) = display.size();
     let mut target = Offscreen::new(w, h, RENDER_FORMAT)?;
@@ -101,7 +119,13 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
             next_hud.saturating_duration_since(Instant::now())
         };
         let flip_fd = display.flip_pending().then(|| display.fd());
-        let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, timeout)?;
+        let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, signals.fd(), timeout)?;
+        if ready.stop
+            && let Some(name) = signals.take()
+        {
+            log::info!("kms: stopping on {name}");
+            return Ok(());
+        }
         if ready.display {
             display.dispatch_events()?;
         }
@@ -137,28 +161,35 @@ fn report(effect: &Effect, scene: &Scene, display: &Display, seat: &Seat) -> Res
 struct Ready {
     input: bool,
     display: bool,
+    stop: bool,
 }
 
-/// `poll()` the input and DRM fds (either may be absent) for up to `timeout`.
-fn wait(input: Option<BorrowedFd>, display: Option<BorrowedFd>, timeout: Duration) -> Result<Ready, String> {
+/// `poll()` the input and DRM fds (either may be absent) and the stop-signal fd for
+/// up to `timeout`.
+fn wait(
+    input: Option<BorrowedFd>,
+    display: Option<BorrowedFd>,
+    stop: BorrowedFd,
+    timeout: Duration,
+) -> Result<Ready, String> {
     // poll() skips entries with a negative fd.
     let entry = |fd: Option<BorrowedFd>| libc::pollfd {
         fd: fd.map_or(-1, |f| f.as_raw_fd()),
         events: libc::POLLIN,
         revents: 0,
     };
-    let mut fds = [entry(input), entry(display)];
+    let mut fds = [entry(input), entry(display), entry(Some(stop))];
     // Round up, so a wait shorter than a millisecond doesn't spin.
     let ms = timeout.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
-    // SAFETY: `fds` is a valid array of two pollfd structs for the whole call.
+    // SAFETY: `fds` is a valid array of pollfd structs for the whole call.
     let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
     if n < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::Interrupted {
-            return Ok(Ready { input: false, display: false });
+            return Ok(Ready { input: false, display: false, stop: false });
         }
         return Err(format!("poll: {e}"));
     }
     let readable = |p: &libc::pollfd| p.revents & libc::POLLIN != 0;
-    Ok(Ready { input: readable(&fds[0]), display: readable(&fds[1]) })
+    Ok(Ready { input: readable(&fds[0]), display: readable(&fds[1]), stop: readable(&fds[2]) })
 }

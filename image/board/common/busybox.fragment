@@ -5,3 +5,7 @@ CONFIG_FINDFS=y
 # timeout and polls in half seconds.
 CONFIG_TIMEOUT=y
 CONFIG_FLOAT_DURATION=y
+# kbd_mode: read or reset a virtual terminal's keyboard mode. The compositor turns the
+# console's keyboard off while it runs; the smoke test reads that, and
+# `kbd_mode -u -C /dev/tty1` restores it by hand if the compositor was SIGKILLed.
+CONFIG_KBD_MODE=y

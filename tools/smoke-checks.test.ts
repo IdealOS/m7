@@ -26,6 +26,8 @@ const GOOD = [
   "SMOKE vulkan-loader ok",
   "SMOKE session ok",
   "SMOKE compositor-pid 184",
+  "SMOKE console-keyboard The keyboard is in off mode",
+  "SMOKE shader-cache-files 3",
   "SMOKE end",
 ].join("\n");
 
@@ -193,6 +195,7 @@ const REPORT = [
   "## Board", "model:    linux,dummy-virt",
   "## Storage", "## Display", "## Input devices",
   "## Spike A/B: KMS scanout (compositor stopped)",
+  "Text console keyboard with the compositor stopped: The keyboard is in Unicode (UTF-8) mode",
   "Scene: 20 windows, 800 nodes; 2 scanout buffers",
   "Scene: 20 windows, 800 nodes; 3 scanout buffers",
   "[2026-11-22T10:00:00Z INFO  compositor::backend::kms::run] kms: virtio_gpu (virtio GPU) on Virtual-1 at 1280x800 @ 75 Hz; adapter llvmpipe (Vulkan)",
@@ -202,7 +205,11 @@ const REPORT = [
   "## Spike D: QuickJS app processes",
   "| Process | Ready in | RSS | QuickJS heap |",
 ].join("\n");
-const RESTORED = `${GOOD}\n[2026-11-22T10:01:00Z INFO  compositor::backend::kms::run] kms: first frame on screen`;
+const RESTORED = [
+  GOOD,
+  "[2026-11-22T10:00:30Z INFO  compositor::backend::kms::run] kms: stopping on SIGTERM",
+  "[2026-11-22T10:01:00Z INFO  compositor::backend::kms::run] kms: first frame on screen",
+].join("\n");
 
 test("a full report that restores the desktop passes", () => {
   const failed = evaluateReport(REPORT, 0, RESTORED, 1, "session-conf absent").filter((c) => !c.ok);
@@ -220,6 +227,35 @@ test("a missing benchmark binary and a missing section are reported", () => {
 
 test("a report that leaves the compositor off fails", () => {
   // Regression guard: the session config written to stop the compositor must go away.
-  const left = evaluateReport(REPORT, 0, GOOD, 1, "session-conf present").filter((c) => !c.ok).map((c) => c.name);
+  const stopped = `${GOOD}\n[2026-11-22T10:00:30Z INFO  compositor::backend::kms::run] kms: stopping on SIGTERM`;
+  const left = evaluateReport(REPORT, 0, stopped, 1, "session-conf present").filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(left, ["desktop restored after the report"]);
+});
+
+// --- Console and shader cache ---
+
+test("a console keyboard left on is reported", () => {
+  // Regression guard: keys typed into the desktop reached the console (on the Pi, a root shell).
+  const log = GOOD.replace("in off mode", "in Unicode (UTF-8) mode");
+  const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
+  assert.deepEqual(failed, ["text console's keyboard off under the compositor"]);
+});
+
+test("Mesa failing to create its shader cache is reported", () => {
+  const log = GOOD.replace("SMOKE shader-cache-files 3", "SMOKE shader-cache-files 0").replace(
+    "Starting syslogd: OK",
+    "Starting syslogd: OK\nFailed to create //.cache for shader cache (Read-only file system)---disabling.",
+  );
+  const cache = evaluate(log).find((c) => c.name === "Mesa shader cache on /data");
+  assert.equal(cache?.ok, false);
+  assert.match(cache?.detail ?? "", /Read-only file system/);
+});
+
+test("a compositor killed without cleanup fails the report", () => {
+  // No clean-exit line, and the console keyboard is still off once it has stopped.
+  const report = REPORT.replace("Unicode (UTF-8)", "off");
+  const log = RESTORED.replace(/^.*stopping on SIGTERM.*$/m, "");
+  const failed = evaluateReport(report, 0, log, 1, "session-conf absent").filter((c) => !c.ok);
+  assert.deepEqual(failed.map((c) => c.name), ["compositor stopped cleanly and gave the console back"]);
+  assert.equal(failed[0].detail, "no clean exit logged, The keyboard is in off mode");
 });

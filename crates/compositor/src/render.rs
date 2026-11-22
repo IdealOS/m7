@@ -146,7 +146,7 @@ impl Renderer {
             bind_group,
             instances,
             instance_capacity,
-            font_system: FontSystem::new(),
+            font_system: crate::fonts::system(),
             swash_cache: SwashCache::new(),
             viewport,
             atlas,

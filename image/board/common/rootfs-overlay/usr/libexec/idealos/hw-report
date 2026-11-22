@@ -12,6 +12,8 @@ set -u
 QUICK=
 [ "${1:-}" = --quick ] && QUICK=1
 RUN=/usr/libexec/idealos/dev-exec
+# As start-session does, so the compositor run uses the same shader cache as the desktop.
+export XDG_CACHE_HOME=/data/cache
 
 section() { printf '\n## %s\n\n' "$1"; }
 fenced() { echo '```'; cat; echo '```'; }
@@ -125,6 +127,9 @@ kernel_log() {
 kms() {
 	section "Spike A/B: KMS scanout (compositor stopped)"
 	without_compositor
+	# The compositor turns this off while it runs and must give it back when stopped.
+	echo "Text console keyboard with the compositor stopped: $(kbd_mode -C /dev/tty0 2>&1)"
+	echo
 	for buffers in 2 3; do
 		echo "### kms-probe, $buffers buffers"
 		echo
