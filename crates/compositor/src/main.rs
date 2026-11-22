@@ -38,7 +38,7 @@ fn main() -> ExitCode {
             }
             "--scale" => scale = value("--scale").parse().unwrap_or_else(|_| usage("bad --scale")),
             "--continuous" => opts.continuous = true,
-            "--card" => opts.card = value("--card"),
+            "--card" => opts.card = Some(value("--card")),
             "--screenshot" => screenshot = Some(value("--screenshot").into()),
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),

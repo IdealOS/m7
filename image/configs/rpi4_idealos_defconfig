@@ -45,6 +45,8 @@ BR2_PACKAGE_VULKAN_LOADER=y
 BR2_PACKAGE_LIBDRM=y
 BR2_PACKAGE_LIBINPUT=y
 BR2_PACKAGE_LIBXKBCOMMON=y
+# Keymap data (/usr/share/X11/xkb) for xkbcommon; it needs no X server.
+BR2_PACKAGE_XKEYBOARD_CONFIG=y
 # libinput needs udev, and eudev needs the matching /dev management mode.
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_PACKAGE_EUDEV=y

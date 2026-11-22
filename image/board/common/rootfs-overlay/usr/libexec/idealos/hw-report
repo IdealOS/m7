@@ -1,0 +1,172 @@
+#!/bin/sh
+# Hardware report for a first boot on new hardware: what the board is, what the
+# display, GPU and input stacks found, and the Pi numbers for Spikes A/B, C and D.
+# Prints Markdown and saves a copy under /data/reports.
+#
+#   hw-report [--quick]     # --quick skips the database and JavaScript benchmarks
+#
+# Run it over SSH (tools/pi-report does), not from the console: it restarts
+# session without the compositor so kms-probe can take the display, which also
+# restarts the console shell. The original session config comes back on exit.
+set -u
+QUICK=
+[ "${1:-}" = --quick ] && QUICK=1
+RUN=/usr/libexec/idealos/dev-exec
+
+section() { printf '\n## %s\n\n' "$1"; }
+fenced() { echo '```'; cat; echo '```'; }
+readfile() { [ -e "$1" ] && tr -d '\0' <"$1"; }
+
+# --- Session control ---------------------------------------------------------
+# start-session prefers /data/session.conf on dev images. Write one without the
+# compositor, restart session, and put the original back afterwards.
+SAVED=
+SWITCHED=
+restart_session() {
+	old=$(pidof session)
+	[ -n "$old" ] && kill "$old"
+	# session stops its services (up to 2 s), then init starts a new one.
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+		sleep 0.5
+		new=$(pidof session)
+		[ -n "$new" ] && [ "$new" != "$old" ] && return 0
+	done
+	echo "warning: session did not restart"
+}
+without_compositor() {
+	if [ -f /data/session.conf ]; then
+		SAVED=/data/session.conf.hw-report
+		mv /data/session.conf "$SAVED"
+	fi
+	echo "shell always /bin/sh -l" >/data/session.conf
+	SWITCHED=1
+	restart_session
+	for _ in 1 2 3 4 5 6; do pidof compositor >/dev/null || return 0; sleep 0.5; done
+	echo "warning: the compositor is still running"
+}
+restore_session() {
+	[ -n "$SWITCHED" ] || return 0
+	if [ -n "$SAVED" ]; then mv "$SAVED" /data/session.conf; else rm -f /data/session.conf; fi
+	SWITCHED=
+	restart_session
+}
+
+# --- Report sections ---------------------------------------------------------
+board() {
+	section "Board"
+	{
+		echo "model:    $(readfile /proc/device-tree/model || echo unknown)"
+		echo "kernel:   $(uname -r)"
+		khz=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
+		echo "cpus:     $(grep -c ^processor /proc/cpuinfo), max ${khz:+$((khz / 1000)) MHz}${khz:-clock unknown}"
+		echo "memory:   $(awk '/MemTotal/ {printf "%d MiB", $2 / 1024}' /proc/meminfo)"
+		t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null) && echo "temp:     $((t / 1000)) C"
+		# Raspberry Pi firmware: nonzero means under-voltage or throttling happened.
+		th=/sys/devices/platform/soc/soc:firmware/get_throttled
+		[ -e "$th" ] && echo "throttled: $(cat "$th") (0 is good)"
+		echo "uptime:   $(cut -d' ' -f1 /proc/uptime) s"
+		pid=$(pidof session)
+		if [ -n "$pid" ]; then
+			# Field 22 of /proc/PID/stat is the start time in clock ticks (100/s).
+			ticks=$(awk '{print $22}' "/proc/$pid/stat")
+			echo "session:  started $((ticks / 100)).$((ticks % 100)) s after boot" \
+				"(the current one; a restart resets it)"
+		fi
+	} | fenced
+}
+
+storage() {
+	section "Storage"
+	{
+		grep -E ' (/|/data|/opt/idealos) ' /proc/mounts
+		echo
+		df -h / /data 2>/dev/null
+		dev=$(awk '$2 == "/data" {print $1}' /proc/mounts)
+		disk=$(basename "$(readlink -f "/sys/class/block/$(basename "$dev")/..")")
+		if [ -b "/dev/$disk" ]; then
+			echo
+			# BusyBox dd doesn't report a rate, so time it; O_DIRECT skips the page cache.
+			t0=$(cut -d' ' -f1 /proc/uptime)
+			dd if="/dev/$disk" of=/dev/null bs=1M count=128 iflag=direct 2>/dev/null
+			t1=$(cut -d' ' -f1 /proc/uptime)
+			awk -v a="$t0" -v b="$t1" -v d="/dev/$disk" 'BEGIN {
+				s = b - a; if (s < 0.01) s = 0.01
+				printf "sequential read, %s: 128 MiB in %.2f s = %.0f MiB/s\n", d, s, 128 / s }'
+		fi
+	} | fenced
+}
+
+display() {
+	section "Display"
+	{
+		for card in /sys/class/drm/card[0-9]; do
+			[ -e "$card" ] || continue
+			echo "$(basename "$card"): driver $(basename "$(readlink -f "$card/device/driver")")"
+		done
+		for conn in /sys/class/drm/card*-*; do
+			[ -e "$conn/status" ] || continue
+			echo "$(basename "$conn"): $(cat "$conn/status"), modes: $(head -3 "$conn/modes" | tr '\n' ' ')"
+		done
+		echo
+		echo "Vulkan drivers: $(ls /usr/share/vulkan/icd.d 2>/dev/null | tr '\n' ' ')"
+	} | fenced
+}
+
+input() {
+	section "Input devices"
+	grep -E '^(N: Name|H: Handlers)' /proc/bus/input/devices | sed 's/^N: Name=/- /; s/^H: Handlers=/  handlers: /'
+}
+
+kernel_log() {
+	section "Kernel messages about graphics, input and errors"
+	dmesg | grep -iE 'vc4|v3d|drm|hdmi|input:|error|fail|warn' | tail -40 | fenced
+}
+
+kms() {
+	section "Spike A/B: KMS scanout (compositor stopped)"
+	without_compositor
+	for buffers in 2 3; do
+		echo "### kms-probe, $buffers buffers"
+		echo
+		$RUN kms-probe --buffers "$buffers" --frames 300 2>&1
+		echo
+	done
+	echo "### compositor --continuous, 10 s"
+	echo
+	echo "Redraws every frame; frame times are render, readback and copy. Input"
+	echo "devices it found are listed too."
+	echo
+	timeout 10 "$RUN" compositor --backend kms --continuous 2>&1 |
+		sed 's/\x1b\[[0-9;]*m//g' | grep -E 'kms:|input:|frame|WARN|ERROR' | tail -20 | fenced
+	restore_session
+}
+
+benches() {
+	section "Spike C: database (10,000 documents on /data)"
+	$RUN db-bench --docs 10000 --db /data/db-bench.sqlite 2>&1
+	section "Spike D: QuickJS app processes"
+	$RUN js-bench 2>&1
+}
+
+main() {
+	# main runs in the pipeline's subshell, so the traps go here. A dropped SSH
+	# connection shows up as SIGPIPE on the next write; restore quietly then.
+	trap 'trap "" PIPE; restore_session >/dev/null 2>&1' EXIT
+	trap 'exit 130' INT TERM HUP PIPE
+	echo "# idealos hardware report"
+	echo
+	echo "$(date -u '+%Y-%m-%d %H:%M UTC') (the clock may be unset), image: $(cat /etc/issue 2>/dev/null | head -1)"
+	board
+	storage
+	display
+	input
+	kernel_log
+	kms
+	[ -n "$QUICK" ] || benches
+	echo
+	echo "Report saved to $OUT"
+}
+
+mkdir -p /data/reports
+OUT=/data/reports/hw-report-$(date +%Y%m%d-%H%M%S).md
+main 2>&1 | tee "$OUT"

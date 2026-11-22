@@ -5,7 +5,7 @@
 //! which are page-flipped on vblank. It works with any Vulkan driver, lavapipe
 //! included. The zero-copy dmabuf path for V3DV (Spike B) comes after this baseline.
 //!
-//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--card /dev/dri/card0]`
+//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--card /dev/dri/cardN]`
 //! prints a Markdown report. It needs DRM master: run it from a text console with no
 //! display server, as root or a member of the `video` group.
 
@@ -19,18 +19,13 @@ pub struct Options {
     pub windows: usize,
     pub hold: Duration,
     pub buffers: usize,
-    pub card: String,
+    /// `None` picks the first card with a connected display.
+    pub card: Option<String>,
 }
 
 impl Options {
     fn from_args() -> Result<Options, String> {
-        let mut o = Options {
-            frames: 300,
-            windows: 20,
-            hold: Duration::ZERO,
-            buffers: 3,
-            card: "/dev/dri/card0".into(),
-        };
+        let mut o = Options { frames: 300, windows: 20, hold: Duration::ZERO, buffers: 3, card: None };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -40,7 +35,7 @@ impl Options {
                 "--hold" => {
                     o.hold = Duration::from_secs(value()?.parse().map_err(|e| format!("--hold: {e}"))?)
                 }
-                "--card" => o.card = value()?,
+                "--card" => o.card = Some(value()?),
                 "--buffers" => {
                     o.buffers = value()?.parse().map_err(|e| format!("--buffers: {e}"))?;
                     if !(2..=3).contains(&o.buffers) {

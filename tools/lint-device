@@ -1,6 +1,7 @@
 #!/bin/sh
-# Clippy for the Linux-only code (the KMS backend and kms-probe's frame loop), which
-# `make lint` on macOS can't see. Runs in the build VM with its own target directory.
+# Clippy and unit tests for the Linux-only code (the KMS backend and kms-probe's frame
+# loop), which `make lint` on macOS can't see. Runs in the build VM with its own target
+# directory. Only the KMS tests run: the VM has no GPU for the renderer's tests.
 set -eu
 . "$(dirname "$0")/_vm.sh"
 vm_require
@@ -9,4 +10,6 @@ vm_run "set -e; cd ~/idealos
 	rustup component add clippy 2>/dev/null
 	CARGO_TARGET_DIR=\$HOME/lint-target cargo clippy --locked \\
 		-p compositor --no-default-features --features kms -p kms-probe -p session \\
-		--all-targets -- -D warnings"
+		--all-targets -- -D warnings
+	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q \\
+		-p compositor --no-default-features --features kms --lib backend::kms"

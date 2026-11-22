@@ -1,0 +1,36 @@
+#!/bin/sh
+# Run the hardware report on a running dev image and save it under image/output/reports.
+# Usage: tools/pi-report HOST [PORT] [--quick]
+#   Pi:   tools/pi-report idealos.local
+#   QEMU: tools/pi-report localhost 2222
+# Takes about a minute (--quick: ~30 s, without the database and JavaScript
+# benchmarks). The display goes dark while kms-probe runs, then the desktop returns.
+#
+# Runs this checkout's image/.../hw-report rather than the image's copy, so a fix to
+# the script needs no reflash. It still uses the binaries on the device.
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+HOST="${1:?usage: tools/pi-report HOST [PORT] [--quick]}"
+PORT=22
+QUICK=
+shift
+for arg in "$@"; do
+	case "$arg" in
+		--quick) QUICK=--quick ;;
+		*[!0-9]* | "") echo "unknown argument $arg"; exit 2 ;;
+		*) PORT="$arg" ;;
+	esac
+done
+. "$REPO/tools/_device.sh"
+
+SCRIPT="$REPO/image/board/common/rootfs-overlay/usr/libexec/idealos/hw-report"
+mkdir -p "$REPO/image/output/reports"
+OUT="$REPO/image/output/reports/$(printf %s "$HOST" | tr -c 'A-Za-z0-9.-' _)-$(date +%Y%m%d-%H%M%S).md"
+# Copy the script over first: run with `sh -s`, child processes could read the rest
+# of the script from stdin.
+# The pipe to tee would hide a failure, so carry the exit status out in a file.
+{ remote "cat > /tmp/hw-report && sh /tmp/hw-report $QUICK" <"$SCRIPT"; echo $? >"$OUT.status"; } | tee "$OUT"
+status=$(cat "$OUT.status")
+rm -f "$OUT.status"
+echo "Saved $OUT"
+exit "$status"

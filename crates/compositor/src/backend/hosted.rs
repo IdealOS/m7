@@ -8,10 +8,12 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::backend::Options;
 use crate::demo;
+use crate::input::{self, Input, Seat};
 use crate::render::Renderer;
 use crate::scene::{Rgba, Scene};
 use crate::stats::FrameTimer;
@@ -26,7 +28,8 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         scene: Scene::new(),
         wm: WindowManager::default(),
         timer: FrameTimer::default(),
-        cursor: (0.0, 0.0),
+        seat: Seat::new(0.0, 0.0),
+        modifiers: ModifiersState::empty(),
         next_hud: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
@@ -50,7 +53,8 @@ struct App {
     scene: Scene,
     wm: WindowManager,
     timer: FrameTimer,
-    cursor: (f32, f32),
+    seat: Seat,
+    modifiers: ModifiersState,
     next_hud: Instant,
 }
 
@@ -58,6 +62,16 @@ impl App {
     fn logical_size(gpu: &Gpu) -> (f32, f32) {
         let scale = gpu.window.scale_factor() as f32;
         (gpu.config.width as f32 / scale, gpu.config.height as f32 / scale)
+    }
+
+    /// Feed one input to the seat and redraw if the scene changed.
+    fn input(&mut self, input: Input) {
+        self.seat.handle(input, &mut self.scene, &mut self.wm);
+        if self.scene.is_dirty()
+            && let Some(gpu) = &self.gpu
+        {
+            gpu.window.request_redraw();
+        }
     }
 
     fn redraw(&mut self) {
@@ -130,6 +144,7 @@ impl ApplicationHandler for App {
             gpu.config.format
         );
         self.scene.apply_all(demo::build(w, h, self.opts.windows));
+        self.seat.set_bounds(w, h);
         gpu.window.request_redraw();
         self.gpu = Some(gpu);
     }
@@ -144,26 +159,28 @@ impl ApplicationHandler for App {
                 gpu.surface.configure(&gpu.device, &gpu.config);
                 let (w, h) = App::logical_size(gpu);
                 self.scene.apply_all(demo::resize(w, h));
+                self.seat.set_bounds(w, h);
                 gpu.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let Some(gpu) = &self.gpu else { return };
                 let scale = gpu.window.scale_factor();
-                self.cursor = ((position.x / scale) as f32, (position.y / scale) as f32);
-                if self.wm.is_dragging() {
-                    self.wm.pointer_move(&mut self.scene, self.cursor.0, self.cursor.1);
-                    gpu.window.request_redraw();
-                }
+                self.input(Input::MotionTo {
+                    x: (position.x / scale) as f32,
+                    y: (position.y / scale) as f32,
+                });
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                match state {
-                    ElementState::Pressed => {
-                        self.wm.pointer_down(&mut self.scene, self.cursor.0, self.cursor.1)
-                    }
-                    ElementState::Released => self.wm.pointer_up(),
-                }
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
+                self.input(Input::Button { pressed: state == ElementState::Pressed });
+            }
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // Only Tab is a shortcut today. macOS keeps Cmd+Tab for itself, so use Option+Tab.
+                if event.logical_key == Key::Named(NamedKey::Tab)
+                    && let Some(s) =
+                        input::shortcut(input::KEY_TAB, self.modifiers.alt_key(), self.modifiers.super_key())
+                {
+                    self.input(Input::Shortcut(s));
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),

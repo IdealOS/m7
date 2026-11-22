@@ -2,12 +2,13 @@
 
 Results of the early spikes from the implementation plan's "First steps". Each spike is a
 binary under `spikes/` that prints a Markdown report, so the same command can be rerun on
-the Mac, in QEMU and on the Pi and the tables compared.
+the Mac, in QEMU and on the Pi and the tables compared. All three binaries ship in the
+device images, and `make pi-report HOST=...` runs B, C and D on a board in one go.
 
 | Spike | Question | Status |
 | --- | --- | --- |
 | A | wgpu to KMS in QEMU (lavapipe dumb-buffer copy, virgl GLES) | **Done (lavapipe copy path)**, in a stock VM and in the idealos image; virgl not available in Homebrew QEMU |
-| B | wgpu to KMS on the Pi 4 (V3DV with dmabuf import) | Blocked: needs the Pi image |
+| B | wgpu to KMS on the Pi 4 (V3DV with dmabuf import) | Blocked: needs a Pi (the image is built) |
 | C | Loro plus SQLite: writes, JSON copy, FTS5, at 10,000 docs | **Mac done**; Pi pending |
 | D | Memory and startup of 8 rquickjs app processes | **Mac done**; Pi pending |
 | E | Servo on aarch64, rendering offscreen | Not started: hours of build time (disk is no longer the blocker) |

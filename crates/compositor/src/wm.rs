@@ -26,11 +26,12 @@ struct Drag {
 impl WindowManager {
     /// Topmost window under the point, if any.
     pub fn window_at(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
-        scene.top_level().iter().rev().copied().find(|&id| {
-            let node = scene.node(id).expect("top-level ids exist");
-            node.props.get("window").and_then(Value::as_bool) == Some(true)
-                && scene.local_rect(id).is_some_and(|r| r.contains(x, y))
-        })
+        scene
+            .top_level()
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| is_window(scene, id) && scene.local_rect(id).is_some_and(|r| r.contains(x, y)))
     }
 
     pub fn pointer_down(&mut self, scene: &mut Scene, x: f32, y: f32) {
@@ -53,13 +54,29 @@ impl WindowManager {
         }
     }
 
-    pub fn pointer_up(&mut self) {
-        self.drag = None;
+    /// End any drag. Returns the window that was being dragged.
+    pub fn pointer_up(&mut self) -> Option<NodeId> {
+        self.drag.take().map(|d| d.window)
+    }
+
+    /// Raise the bottom-most window, so repeating this visits every window.
+    /// Does nothing during a drag. Returns the window it raised.
+    pub fn raise_next(&mut self, scene: &mut Scene) -> Option<NodeId> {
+        if self.drag.is_some() {
+            return None;
+        }
+        let bottom = scene.top_level().iter().copied().find(|&id| is_window(scene, id))?;
+        scene.raise(bottom);
+        Some(bottom)
     }
 
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
+}
+
+fn is_window(scene: &Scene, id: NodeId) -> bool {
+    scene.node(id).and_then(|n| n.props.get("window")).and_then(Value::as_bool) == Some(true)
 }
 
 #[cfg(test)]

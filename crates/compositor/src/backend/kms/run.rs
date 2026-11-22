@@ -1,19 +1,29 @@
 //! The KMS backend's frame loop.
+//!
+//! One thread waits in `poll()` on the input devices and the DRM device (for
+//! page-flip events) until the frame-time readout is due. Input is applied to the
+//! scene as it arrives; a frame is drawn only when the scene changed. All pending
+//! input is read before drawing, so a fast drag costs one frame, not one per event.
 
+use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 use super::display::{Display, RENDER_FORMAT};
+use super::input::Devices;
 use crate::backend::Options;
-use crate::demo;
 use crate::headless::Offscreen;
+use crate::input::{Effect, Seat};
 use crate::scene::{Rgba, Scene};
 use crate::stats::FrameTimer;
+use crate::wm::WindowManager;
+use crate::{cursor, demo};
 
 /// Scanout buffers. Three let a frame render while the previous flip is pending.
 const BUFFERS: usize = 3;
 
 pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
-    let mut display = Display::open(&opts.card, BUFFERS)?;
+    let mut display = Display::open(opts.card.as_deref(), BUFFERS)?;
     let (w, h) = display.size();
     let mut target = Offscreen::new(w, h, RENDER_FORMAT)?;
     log::info!(
@@ -25,9 +35,25 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         target.adapter.backend,
     );
 
+    // Without input the desktop still draws; say why and carry on.
+    let mut devices = match Devices::open("seat0") {
+        Ok(devices) => Some(devices),
+        Err(e) => {
+            log::warn!("input: {e}; continuing without input");
+            None
+        }
+    };
+    let mut inputs = Vec::new();
+    if let Some(d) = &mut devices {
+        d.read((w, h), &mut inputs)?; // logs the devices found at startup
+    }
+
     let background = Rgba::parse(demo::BACKGROUND).expect("valid color");
     let mut scene = Scene::new();
     scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
+    let mut wm = WindowManager::default();
+    let mut seat = Seat::new(w as f32, h as f32);
+    let arrow = cursor::arrow();
     let mut timer = FrameTimer::default();
     let mut next_hud = Instant::now();
     let mut rows: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
@@ -60,12 +86,79 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
                 // tools/qemu-smoke.ts waits for this line before capturing the display.
                 log::info!("kms: first frame on screen");
                 first = false;
+                // The cursor needs the CRTC that the first flip set up.
+                match display.show_cursor(&arrow) {
+                    Ok(()) => display.move_cursor(seat.cursor().0, seat.cursor().1)?,
+                    Err(e) => log::warn!("kms: {e}; the pointer will be invisible"),
+                }
             }
+        }
+
+        // Sleep until input, a page flip or the readout, unless there is more to draw.
+        let timeout = if scene.is_dirty() || opts.continuous {
+            Duration::ZERO
         } else {
-            // Nothing to draw: let the last flip land, then sleep until the readout
-            // is due. Input (M1) will replace the sleep with poll() on the libinput fd.
-            display.wait_for_flip()?;
-            std::thread::sleep(next_hud.saturating_duration_since(Instant::now()));
+            next_hud.saturating_duration_since(Instant::now())
+        };
+        let flip_fd = display.flip_pending().then(|| display.fd());
+        let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, timeout)?;
+        if ready.display {
+            display.dispatch_events()?;
+        }
+        if ready.input
+            && let Some(d) = &mut devices
+        {
+            d.read((w, h), &mut inputs)?;
+            for input in inputs.drain(..) {
+                let effect = seat.handle(input, &mut scene, &mut wm);
+                report(&effect, &scene, &display, &seat)?;
+            }
         }
     }
+}
+
+/// Act on what one input did: move the hardware cursor and log window actions.
+fn report(effect: &Effect, scene: &Scene, display: &Display, seat: &Seat) -> Result<(), String> {
+    if effect.cursor_moved {
+        display.move_cursor(seat.cursor().0, seat.cursor().1)?;
+    }
+    // One line per finished action, not per motion; tools/smoke-checks.ts reads these.
+    if let Some(id) = effect.dropped
+        && let Some(r) = scene.local_rect(id)
+    {
+        log::info!("wm: dropped window {id} at ({}, {})", r.x, r.y);
+    }
+    if let Some(id) = effect.raised {
+        log::info!("wm: raised window {id} from the keyboard");
+    }
+    Ok(())
+}
+
+struct Ready {
+    input: bool,
+    display: bool,
+}
+
+/// `poll()` the input and DRM fds (either may be absent) for up to `timeout`.
+fn wait(input: Option<BorrowedFd>, display: Option<BorrowedFd>, timeout: Duration) -> Result<Ready, String> {
+    // poll() skips entries with a negative fd.
+    let entry = |fd: Option<BorrowedFd>| libc::pollfd {
+        fd: fd.map_or(-1, |f| f.as_raw_fd()),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut fds = [entry(input), entry(display)];
+    // Round up, so a wait shorter than a millisecond doesn't spin.
+    let ms = timeout.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+    // SAFETY: `fds` is a valid array of two pollfd structs for the whole call.
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+    if n < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::Interrupted {
+            return Ok(Ready { input: false, display: false });
+        }
+        return Err(format!("poll: {e}"));
+    }
+    let readable = |p: &libc::pollfd| p.revents & libc::POLLIN != 0;
+    Ok(Ready { input: readable(&fds[0]), display: readable(&fds[1]) })
 }

@@ -5,18 +5,24 @@
 //! copied into one of three KMS dumb buffers, and that buffer is page-flipped on
 //! vblank. It works with any Vulkan driver, lavapipe included.
 //!
+//! Input comes from libinput ([`input`]), with keymaps from xkbcommon, and feeds the
+//! same [`crate::input::Seat`] as the hosted backend. The pointer is drawn on the
+//! display's cursor plane, so moving it costs no redraw.
+//!
 //! Still to come (milestone M1):
 //!
 //! - **Zero-copy scanout on the Pi (Spike B):** V3DV renders into a texture exported as
 //!   a dmabuf and imported as the KMS framebuffer, with no readback or copy.
-//! - **Input:** libinput (through `input` and `xkbcommon`) feeding the same
-//!   [`crate::wm::WindowManager`] calls the hosted backend makes.
 //! - **Region damage:** today any change redraws and copies the whole frame.
+//! - **The console:** the kernel console still receives keystrokes; switching the VT
+//!   to graphics mode and muting its keyboard is still to do.
 //!
 //! [`display`] is shared with `spikes/kms-probe`, which measures the same path.
 
 #[cfg(target_os = "linux")]
 pub mod display;
+#[cfg(target_os = "linux")]
+pub mod input;
 #[cfg(target_os = "linux")]
 mod run;
 

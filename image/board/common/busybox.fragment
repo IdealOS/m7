@@ -1,3 +1,7 @@
 # Added to Buildroot's default BusyBox config.
 # S05data finds the data partition by label.
 CONFIG_FINDFS=y
+# tools/pi-report's on-device script (hw-report) bounds the compositor run with
+# timeout and polls in half seconds.
+CONFIG_TIMEOUT=y
+CONFIG_FLOAT_DURATION=y

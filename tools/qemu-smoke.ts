@@ -1,10 +1,12 @@
 // Boot the QEMU image headless and check that it came up with the compositor on its
-// display. Exits 1 if any check fails.
+// display, and that it takes input: a title-bar drag and Alt+Tab, sent through QEMU's
+// virtio tablet and keyboard. Exits 1 if any check fails.
 //
 //   node tools/qemu-smoke.ts [--screenshot docs/screenshots/phase0-qemu-image.png] [--deploy]
 //
 // --deploy then pushes target/device (from tools/build-device-bins) with
 // tools/deploy-to-pi over SSH and checks that session restarted from the overlay.
+// --report then runs tools/pi-report, the Pi's first-boot report, against the image.
 //
 // The serial console is driven over a Unix socket and the display is captured
 // over QMP, so no window opens. Boots a scratch copy of the disk image.
@@ -14,20 +16,28 @@ import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { screendump } from "./qmp.ts";
+import { qmp, screendump } from "./qmp.ts";
 import {
   type Check,
   FIRST_FRAME,
   GUEST_SCRIPT,
   deployProbe,
+  type InputPlan,
+  REPORT_PROBE,
   evaluate,
   evaluateDeploy,
+  evaluateInput,
+  evaluateReport,
+  inputPlan,
+  screenSize,
   shellPids,
 } from "./smoke-checks.ts";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(REPO, "image/output/qemu");
 const TIMEOUT_MS = 120_000;
+/** The report runs kms-probe twice, the compositor for 10 s and both benchmarks. */
+const REPORT_TIMEOUT_MS = 240_000;
 
 const args = process.argv.slice(2);
 const shotIndex = args.indexOf("--screenshot");
@@ -37,6 +47,7 @@ if (shotIndex >= 0 && !args[shotIndex + 1]) {
   process.exit(2);
 }
 const deploy = args.includes("--deploy");
+const report = args.includes("--report");
 if (!existsSync(join(OUT, "Image")) || !existsSync(join(OUT, "disk.img"))) {
   console.error("No QEMU image. Run: make image-qemu");
   process.exit(2);
@@ -71,6 +82,7 @@ const qemu = spawn(
     ...["-append", "root=/dev/vda1 rootfstype=ext4 rootwait ro console=tty0 console=ttyAMA0"],
     ...["-drive", `file=${disk},if=virtio,format=raw`],
     ...["-device", "virtio-gpu-pci", "-display", "none"],
+    ...["-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"],
     ...["-netdev", `user,id=net0,hostfwd=tcp:127.0.0.1:${sshPort}-:22`, "-device", "virtio-net-pci,netdev=net0"],
     ...["-chardev", `socket,id=ser,path=${join(work, "serial")},server=on,wait=on`],
     ...["-serial", "chardev:ser"],
@@ -108,6 +120,19 @@ function waitAtMost(pattern: RegExp, ms: number): Promise<boolean> {
 }
 
 let deployResults: Check[] = [];
+let reportResults: Check[] = [];
+let plan: InputPlan | undefined;
+
+/** Drag the top window and press Alt+Tab, then wait for the compositor to log both. */
+async function runInput(): Promise<void> {
+  const size = screenSize(log);
+  if (!size) return; // evaluateInput reports it
+  plan = inputPlan(size.w, size.h);
+  await qmp(join(work, "qmp"), plan.drag);
+  if (!(await waitAtMost(/wm: dropped window/, 10_000))) return;
+  await qmp(join(work, "qmp"), plan.keys);
+  await waitAtMost(/wm: raised window/, 10_000);
+}
 
 /** Push target/device with tools/deploy-to-pi and check the restarted session. */
 async function runDeploy(): Promise<void> {
@@ -121,16 +146,33 @@ async function runDeploy(): Promise<void> {
   // A second "started shell" line means init respawned session and it started again.
   await waitFor(/session: started shell[\s\S]*session: started shell/);
   await waitAtMost(new RegExp(`${FIRST_FRAME.source}[\\s\\S]*${FIRST_FRAME.source}`), 20_000);
-  const probe = spawnSync(
-    "ssh",
-    [
-      ...["-i", join(OUT, "../dev-key"), "-p", String(sshPort), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"],
-      ...["-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${join(work, "known_hosts")}`],
-      ...["root@127.0.0.1", deployProbe(oldShell)],
-    ],
-    { encoding: "utf8" },
-  );
+  const probe = spawnSync("ssh", [...sshArgs(), deployProbe(oldShell)], { encoding: "utf8" });
   deployResults = evaluateDeploy(log, deployed.status, probe.stdout ?? "");
+}
+
+function sshArgs(): string[] {
+  return [
+    ...["-i", join(OUT, "../dev-key"), "-p", String(sshPort), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"],
+    ...["-o", "StrictHostKeyChecking=accept-new", "-o", `UserKnownHostsFile=${join(work, "known_hosts")}`],
+    "root@127.0.0.1",
+  ];
+}
+
+/** Run tools/pi-report against the guest and check it put the desktop back. */
+async function runReport(): Promise<void> {
+  const framesBefore = log.split("\n").filter((l) => FIRST_FRAME.test(l)).length;
+  const env = { ...process.env, KNOWN_HOSTS: join(work, "known_hosts") };
+  // Async, so the serial console keeps being read while the report runs.
+  const child = spawn(join(REPO, "tools/pi-report"), ["127.0.0.1", String(sshPort)], { env });
+  let out = "";
+  child.stdout.on("data", (c: Buffer) => (out += c.toString()));
+  child.stderr.on("data", (c: Buffer) => (out += c.toString()));
+  const exit = await new Promise<number | null>((done) => child.on("exit", done));
+  const again = new RegExp(Array(framesBefore + 1).fill(FIRST_FRAME.source).join("[\\s\\S]*"));
+  await waitAtMost(again, 20_000);
+  const probe = spawnSync("ssh", [...sshArgs(), REPORT_PROBE], { encoding: "utf8" });
+  writeFileSync(join(REPO, "image/output/qemu/smoke-report.md"), out);
+  reportResults = evaluateReport(out, exit, log, framesBefore, probe.stdout ?? "");
 }
 
 async function connectSerial(): Promise<Socket> {
@@ -155,26 +197,33 @@ async function run(): Promise<void> {
     await screendump(join(work, "qmp"), screenshot);
     console.log(`Screenshot: ${screenshot}`);
   }
+  // Before the guest script, so the compositor's "wm:" lines can't split its output.
+  if (FIRST_FRAME.test(log)) await runInput();
   serial.write(GUEST_SCRIPT.join("\n") + "\n");
   await waitFor(/^SMOKE end$/m);
   if (deploy) await runDeploy();
+  if (report) await runReport();
   serial.destroy();
 }
 
 let failed = true;
+const limit = report ? REPORT_TIMEOUT_MS : TIMEOUT_MS;
 const timer = setTimeout(() => {
-  console.error(`Timed out after ${TIMEOUT_MS / 1000} s`);
+  console.error(`Timed out after ${limit / 1000} s`);
   finish();
-}, TIMEOUT_MS);
+}, limit);
 
 function finish(): never {
   clearTimeout(timer);
   qemu.kill();
   writeFileSync(join(REPO, "image/output/qemu/smoke-serial.log"), log);
   rmSync(work, { recursive: true, force: true });
-  const results = [...evaluate(log), ...deployResults];
+  const results = [...evaluate(log), ...evaluateInput(log, plan), ...deployResults, ...reportResults];
   if (deploy && deployResults.length === 0) {
     results.push({ name: "deploy", ok: false, detail: "did not finish" });
+  }
+  if (report && reportResults.length === 0) {
+    results.push({ name: "hardware report", ok: false, detail: "did not finish" });
   }
   for (const c of results) console.log(`${c.ok ? "ok  " : "FAIL"}  ${c.name}: ${c.detail}`);
   failed = failed || results.some((c) => !c.ok);

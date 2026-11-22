@@ -71,6 +71,163 @@ export function evaluate(log: string): Check[] {
   ];
 }
 
+// --- Input ---------------------------------------------------------------------
+//
+// QEMU's virtio tablet and keyboard are driven over QMP (input-send-event). The plan
+// drags the topmost demo window by its title bar, then presses Alt+Tab; the
+// compositor logs one "wm:" line per finished action.
+
+/** Screen size from the compositor's "kms: ... at WxH @ ..." line. */
+export function screenSize(log: string): { w: number; h: number } | undefined {
+  const m = /kms: .* at (\d+)x(\d+) @/.exec(log);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : undefined;
+}
+
+export interface InputPlan {
+  /** QMP commands for the title-bar drag, sent in order. */
+  drag: object[];
+  /** QMP commands for Alt+Tab. Send them only once the drop is logged: libinput
+   * doesn't order events across devices, so keys sent in the same burst as the
+   * button release can arrive mid-drag, when the window manager ignores Alt+Tab. */
+  keys: object[];
+  /** The dragged window and where it must land. */
+  drop: { id: number; x: number; y: number };
+  /** The window Alt+Tab must raise. */
+  raised: number;
+}
+
+/** virtio-tablet axes run 0..32767; libinput maps them to `value * size / 32768`. */
+const ABS_RANGE = 32768;
+const DRAG = { dx: 100, dy: 80, steps: 5 };
+
+/** The input plan for the default 20-window demo scene on a `w` by `h` screen.
+ * Window placement mirrors `add_window` in crates/compositor/src/demo.rs. */
+export function inputPlan(w: number, h: number): InputPlan {
+  const windows = 20;
+  const last = windows - 1;
+  const [ww, wh] = [380, 260];
+  const col = Math.floor(last / 10);
+  const row = last % 10;
+  const x = Math.min(48 + col * 440 + row * 34, Math.max(w - ww, 0));
+  const y = Math.min(52 + row * 30, Math.max(h - wh, 30));
+  const id = 1000 + last * 100;
+  const grab = { x: x + 150, y: y + 18 }; // inside the 36 px title bar
+
+  const abs = (px: number, py: number) => ({
+    execute: "input-send-event",
+    arguments: {
+      events: [
+        { type: "abs", data: { axis: "x", value: Math.round((px * ABS_RANGE) / w) } },
+        { type: "abs", data: { axis: "y", value: Math.round((py * ABS_RANGE) / h) } },
+      ],
+    },
+  });
+  const btn = (down: boolean) => ({
+    execute: "input-send-event",
+    arguments: { events: [{ type: "btn", data: { down, button: "left" } }] },
+  });
+  const key = (qcode: string, down: boolean) => ({
+    execute: "input-send-event",
+    arguments: { events: [{ type: "key", data: { down, key: { type: "qcode", data: qcode } } }] },
+  });
+
+  const drag: object[] = [abs(grab.x, grab.y), btn(true)];
+  for (let i = 1; i <= DRAG.steps; i++) {
+    drag.push(abs(grab.x + (DRAG.dx * i) / DRAG.steps, grab.y + (DRAG.dy * i) / DRAG.steps));
+  }
+  drag.push(btn(false));
+  const keys = [key("alt", true), key("tab", true), key("tab", false), key("alt", false)];
+  // Alt+Tab raises the bottom-most window: the first one the demo created.
+  return { drag, keys, drop: { id, x: x + DRAG.dx, y: y + DRAG.dy }, raised: 1000 };
+}
+
+export function evaluateInput(log: string, plan: InputPlan | undefined): Check[] {
+  const added = [...log.matchAll(/input: added (.*) \((.*)\)/g)];
+  const has = (cap: string) => added.find((m) => m[2].split(", ").includes(cap));
+  const keyboard = has("keyboard");
+  const pointer = has("pointer");
+  const dropped = /wm: dropped window (\d+) at \((-?[\d.]+), (-?[\d.]+)\)/.exec(log);
+  const raised = /wm: raised window (\d+) from the keyboard/.exec(log);
+  // libinput's tablet scaling can land a pixel off.
+  const near = (a: string, b: number) => Math.abs(Number(a) - b) <= 2;
+  const dropOk =
+    plan !== undefined &&
+    dropped !== null &&
+    Number(dropped[1]) === plan.drop.id &&
+    near(dropped[2], plan.drop.x) &&
+    near(dropped[3], plan.drop.y);
+  return [
+    { name: "keyboard found", ok: !!keyboard, detail: keyboard?.[1] ?? "no keyboard device" },
+    { name: "pointer found", ok: !!pointer, detail: pointer?.[1] ?? "no pointer device" },
+    {
+      name: "title-bar drag moved the window",
+      ok: dropOk,
+      detail: dropped
+        ? `window ${dropped[1]} at (${dropped[2]}, ${dropped[3]})` +
+          (plan ? `, wanted ${plan.drop.id} at (${plan.drop.x}, ${plan.drop.y})` : "")
+        : plan
+          ? "no drop logged"
+          : "screen size not logged",
+    },
+    {
+      name: "Alt+Tab raised the next window",
+      ok: plan !== undefined && raised !== null && Number(raised[1]) === plan.raised,
+      detail: raised ? `window ${raised[1]}` : "no raise logged",
+    },
+  ];
+}
+
+// --- Hardware report -------------------------------------------------------------
+//
+// tools/pi-report run against the QEMU image, so the script the Pi's first boot
+// depends on has already run end to end once.
+
+/** Shell command run over SSH after the report: it must have put the session back. */
+export const REPORT_PROBE = "[ -e /data/session.conf ] && echo session-conf present || echo session-conf absent";
+
+/** `report` is pi-report's output, `exit` its exit code, `log` the serial log,
+ * `framesBefore` the compositor's first-frame count before the report started, and
+ * `probe` the output of REPORT_PROBE. */
+export function evaluateReport(
+  report: string,
+  exit: number | null,
+  log: string,
+  framesBefore: number,
+  probe: string,
+): Check[] {
+  const has = (re: RegExp) => re.test(report);
+  const errors = report.split("\n").filter((l) => /^(kms-probe|db-bench|js-bench|dev-exec): /.test(l));
+  const sections = ["Board", "Storage", "Display", "Input devices", "Spike A/B", "Spike C", "Spike D"];
+  const missing = sections.filter((name) => !report.includes(`## ${name}`));
+  const frames = log.split("\n").filter((l) => FIRST_FRAME.test(l)).length;
+  const conf = /session-conf (\w+)/.exec(probe)?.[1];
+  return [
+    { name: "report exited 0", ok: exit === 0, detail: `exit ${exit}` },
+    { name: "report has every section", ok: missing.length === 0, detail: missing.length ? `missing ${missing.join(", ")}` : "yes" },
+    { name: "report tools all ran", ok: errors.length === 0, detail: errors[0] ?? "no errors" },
+    {
+      name: "kms-probe ran with 2 and 3 buffers",
+      ok: has(/2 scanout buffers/) && has(/3 scanout buffers/),
+      detail: `${has(/2 scanout buffers/) ? "2" : "-"} / ${has(/3 scanout buffers/) ? "3" : "-"}`,
+    },
+    {
+      name: "report's compositor run found input",
+      ok: has(/kms: .* adapter/) && has(/input: added .*\(.*keyboard/),
+      detail: has(/input: added/) ? "yes" : has(/kms: /) ? "no input devices" : "compositor did not start",
+    },
+    {
+      name: "benchmarks produced tables",
+      ok: has(/\| Operation \| Count \| p50/) && has(/\| Process \| Ready in/),
+      detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}`,
+    },
+    {
+      name: "desktop restored after the report",
+      ok: frames > framesBefore && conf === "absent",
+      detail: `${frames - framesBefore} new first frame(s), /data/session.conf ${conf ?? "not checked"}`,
+    },
+  ];
+}
+
 // session and the console shell share the serial console, so session's messages can
 // follow a shell prompt on the same line ("# session: ..."). Don't anchor them to the
 // start of a line.

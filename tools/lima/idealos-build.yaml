@@ -21,6 +21,9 @@ provision:
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
         build-essential git rsync bc cpio unzip file wget python3 libncurses-dev
+      # Headers for tools/lint-device, which builds the compositor's KMS backend natively.
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        pkg-config libinput-dev libudev-dev libxkbcommon-dev
   - mode: user
     script: |
       #!/bin/bash

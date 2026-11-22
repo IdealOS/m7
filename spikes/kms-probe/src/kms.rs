@@ -10,7 +10,7 @@ use compositor::scene::{Rgba, Scene};
 use crate::{Options, Timings, animate};
 
 pub fn run(o: &Options) -> Result<Vec<String>, String> {
-    let mut display = Display::open(&o.card, o.buffers)?;
+    let mut display = Display::open(o.card.as_deref(), o.buffers)?;
     let (w, h) = display.size();
 
     let setup = Instant::now();

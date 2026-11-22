@@ -9,18 +9,10 @@ set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${1:?usage: tools/deploy-to-pi HOST [PORT]}"
 PORT="${2:-22}"
-KEY="$REPO/image/output/dev-key"
 BIN="$REPO/target/device"
-KNOWN_HOSTS="${KNOWN_HOSTS:-$REPO/image/output/known_hosts}"
+. "$REPO/tools/_device.sh"
 
-[ -f "$KEY" ] || { echo "No $KEY. tools/build-image makes it; rebuild and reflash the image."; exit 1; }
 [ -n "${NO_BUILD:-}" ] || "$REPO/tools/build-device-bins"
-
-remote() {
-	ssh -i "$KEY" -p "$PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
-		-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
-		"root@$HOST" "$@"
-}
 
 # Binaries go to the writable /opt/idealos overlay; start-session prefers them over
 # the copies baked into the read-only image. Write to .new and rename, because a

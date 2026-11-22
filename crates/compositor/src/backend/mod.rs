@@ -15,12 +15,12 @@ pub struct Options {
     pub windows: usize,
     /// Redraw every vsync even when nothing changed, to measure frame time.
     pub continuous: bool,
-    /// DRM device for the KMS backend.
-    pub card: String,
+    /// DRM device for the KMS backend; `None` picks the first with a connected display.
+    pub card: Option<String>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { width: 1440, height: 900, windows: 20, continuous: false, card: "/dev/dri/card0".into() }
+        Options { width: 1440, height: 900, windows: 20, continuous: false, card: None }
     }
 }

@@ -9,8 +9,9 @@ license.workspace = true
 default = ["hosted"]
 # Window on macOS/Linux desktops via winit. Used for day-to-day development.
 hosted = ["dep:winit"]
-# Direct DRM/KMS output on the device. Linux only; see backend/kms/mod.rs.
-kms = ["dep:drm"]
+# Direct DRM/KMS output and libinput input on the device. Linux only; see
+# backend/kms/mod.rs. Needs libinput, libudev and libxkbcommon to link.
+kms = ["dep:drm", "dep:input", "dep:xkbcommon", "dep:libc"]
 
 [dependencies]
 protocol.workspace = true
@@ -26,3 +27,6 @@ winit = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = { version = "0.15", optional = true }
+input = { version = "0.10", optional = true, default-features = false, features = ["udev", "libinput_1_21"] }
+xkbcommon = { version = "0.9", optional = true, default-features = false }
+libc = { version = "0.2", optional = true }
