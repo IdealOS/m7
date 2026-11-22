@@ -1,0 +1,17 @@
+[package]
+name = "kms-probe"
+description = "Spike A/B: render the compositor demo with wgpu and scan it out through DRM/KMS"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+compositor = { path = "../../crates/compositor", default-features = false }
+protocol.workspace = true
+serde_json.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+drm = "0.15"

@@ -1,0 +1,39 @@
+# Small aarch64 guest for GPU spikes: QEMU (not vz) with a virtio-gpu display, so
+# the guest sees the same DRM device the idealos QEMU image will. Stock Ubuntu gives
+# us Mesa (lavapipe) from apt, so Spike A does not need a Buildroot build.
+#
+#   limactl start --tty=false --name=idealos-spike tools/lima/idealos-spike.yaml
+#
+# The scanout can be captured from the host through QEMU's QMP socket
+# (~/.lima/idealos-spike/qmp.sock, command "screendump").
+base: template:ubuntu-lts
+vmType: qemu
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+video:
+  display: "vnc"
+# No containers needed; skip the ~250 MB nerdctl download.
+containerd:
+  system: false
+  user: false
+mounts:
+  - location: "~/projects/idealos"
+    writable: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential pkg-config curl ca-certificates \
+        mesa-vulkan-drivers vulkan-tools libvulkan1 libdrm-dev drm-info \
+        fonts-dejavu-core
+      # Let the default user open /dev/dri/card0 without root.
+      usermod -aG video,render "{{.User}}"
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux
+      command -v rustup || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal

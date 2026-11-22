@@ -1,0 +1,35 @@
+#!/bin/sh
+# Spike A: build kms-probe in the QEMU spike VM, run it on the guest's virtio-gpu
+# display, and save what the scanout shows to docs/screenshots/spike-a-qemu-kms.png.
+#
+#   tools/spike-kms [kms-probe args...]     e.g. tools/spike-kms --buffers 2
+set -eu
+VM=idealos-spike
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SSH_CONFIG="$HOME/.lima/$VM/ssh.config"
+
+command -v limactl >/dev/null || { echo "Lima is not installed. Run: brew install lima qemu"; exit 1; }
+if ! limactl list -q 2>/dev/null | grep -qx "$VM"; then
+	limactl start --tty=false --name="$VM" "$REPO/tools/lima/idealos-spike.yaml"
+fi
+limactl start "$VM" >/dev/null 2>&1 || true
+
+# The 9p mount caches aggressively and can serve stale files, so copy the repo in.
+rsync -a --delete -e "ssh -F $SSH_CONFIG" \
+	--exclude target --exclude node_modules --exclude image/output --exclude .git \
+	"$REPO/" "lima-$VM:idealos/"
+limactl shell "$VM" bash -lc 'cd ~/idealos && CARGO_TARGET_DIR=$HOME/target cargo build --release --locked -p kms-probe'
+
+# Hold the last frame and capture it from the host over QMP once the probe says so.
+log="$(mktemp)"
+limactl shell "$VM" bash -lc "sudo \$HOME/target/release/kms-probe --hold 4 $*" 2>"$log" &
+probe=$!
+while kill -0 "$probe" 2>/dev/null && ! grep -q "holding the last frame" "$log"; do sleep 0.5; done
+if grep -q "holding the last frame" "$log"; then
+	node "$REPO/tools/qmp-screendump.ts" "$HOME/.lima/$VM/qmp.sock" "$REPO/docs/screenshots/spike-a-qemu-kms.png"
+fi
+status=0
+wait "$probe" || status=$?
+grep -v "holding the last frame" "$log" >&2 || true
+rm -f "$log"
+exit "$status"

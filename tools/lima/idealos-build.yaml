@@ -3,8 +3,10 @@
 images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
-cpus: 8
-memory: "16GiB"
+cpus: 6
+# 10 GiB leaves room for macOS on a 24 GiB Mac; more pushes the host into swap,
+# which comes out of free disk.
+memory: "10GiB"
 disk: "100GiB"
 # The repo is copied in with rsync (Buildroot rejects paths with spaces), so the
 # host home directory only needs to be readable.

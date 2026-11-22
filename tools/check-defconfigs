@@ -1,0 +1,12 @@
+#!/bin/sh
+# Load each defconfig in the build VM and fail if Buildroot silently dropped any
+# option. Kconfig drops a "BR2_FOO=y" whose dependencies are unmet without an
+# error, so a typo or a missing dependency only shows up as a missing feature on
+# the device. Runs in seconds; no packages are built.
+#
+#   tools/check-defconfigs
+set -eu
+. "$(dirname "$0")/_vm.sh"
+vm_require
+vm_sync
+vm_run "BUILDROOT_VERSION=${BUILDROOT_VERSION:-2026.08.2} sh ~/idealos/tools/vm/check-defconfigs.sh"

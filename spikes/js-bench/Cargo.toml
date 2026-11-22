@@ -1,0 +1,15 @@
+[package]
+name = "js-bench"
+description = "Spike D: memory and startup time of QuickJS app processes"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rquickjs.workspace = true
+
+[dev-dependencies]
+protocol.workspace = true
+serde_json.workspace = true

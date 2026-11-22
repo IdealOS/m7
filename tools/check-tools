@@ -1,0 +1,8 @@
+#!/bin/sh
+# Type-check (strict) and unit-test the TypeScript tools in tools/. TypeScript and
+# Node's types come from npx's cache, so nothing is added to the repo.
+set -eu
+cd "$(dirname "$0")"
+npx --yes -p typescript@5.9 -p @types/node@24 sh -c \
+	'tsc -p . --typeRoots "$(dirname "$(dirname "$(command -v tsc)")")/@types"'
+node --test .

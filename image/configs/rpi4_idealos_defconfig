@@ -2,12 +2,16 @@
 BR2_aarch64=y
 BR2_cortex_a72=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+# Kernel headers come from the kernel below, so Buildroot must be told its series;
+# otherwise it assumes 2.6 headers, falls back to uClibc and drops the Rust packages.
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/patches"
 
 BR2_TARGET_GENERIC_HOSTNAME="idealos"
 BR2_TARGET_GENERIC_ISSUE="idealos (Phase 0, Raspberry Pi 4)"
 BR2_INIT_BUSYBOX=y
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/busybox.fragment"
 BR2_SYSTEM_DHCP="eth0"
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/post-build.sh"
@@ -36,9 +40,13 @@ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VC4=y
 BR2_PACKAGE_MESA3D_VULKAN_DRIVER_BROADCOM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
+# wgpu loads Vulkan through the loader (libvulkan.so.1), which finds the driver.
+BR2_PACKAGE_VULKAN_LOADER=y
 BR2_PACKAGE_LIBDRM=y
 BR2_PACKAGE_LIBINPUT=y
 BR2_PACKAGE_LIBXKBCOMMON=y
+# libinput needs udev, and eudev needs the matching /dev management mode.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_PACKAGE_EUDEV=y
 
 BR2_PACKAGE_DROPBEAR=y
@@ -58,3 +66,6 @@ BR2_PACKAGE_HOST_MTOOLS=y
 # Read-only root; session owns the console instead of a getty.
 # BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
 # BR2_TARGET_GENERIC_GETTY is not set
+# The compositor shapes text with cosmic-text, which panics with no fonts installed.
+# Bundled fonts are still an open M1 item; DejaVu covers it until then.
+BR2_PACKAGE_DEJAVU=y

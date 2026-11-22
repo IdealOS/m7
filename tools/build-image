@@ -6,21 +6,27 @@ set -eu
 BOARD="${1:?usage: tools/build-image qemu|rpi4}"
 shift
 case "$BOARD" in
-	qemu) DEFCONFIG=qemu_aarch64_os_defconfig ;;
-	rpi4) DEFCONFIG=rpi4_os_defconfig ;;
+	qemu) DEFCONFIG=qemu_aarch64_idealos_defconfig ;;
+	rpi4) DEFCONFIG=rpi4_idealos_defconfig ;;
 	*) echo "unknown board: $BOARD"; exit 2 ;;
 esac
-BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02}"
+# 2026.08 or newer: the 2026.02 LTS branch ships Rust 1.88, older than the workspace needs.
+BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.08.2}"
 
 vm_require
 vm_sync
+# Source downloads live outside the Buildroot tree so they survive version bumps.
+# idealos-userspace is a local package: Buildroot copies it once and never notices
+# later edits, so clean it each time to build the repo as it is now.
 vm_run "set -e
 	cd ~
+	export BR2_DL_DIR=\$HOME/br-dl
 	if [ ! -d buildroot-$BUILDROOT_VERSION ]; then
 		wget -q https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.gz
 		tar xf buildroot-$BUILDROOT_VERSION.tar.gz
 	fi
 	make -C buildroot-$BUILDROOT_VERSION O=\$HOME/out/$BOARD BR2_EXTERNAL=\$HOME/idealos/image $DEFCONFIG
+	make -C \$HOME/out/$BOARD idealos-userspace-dirclean
 	make -C \$HOME/out/$BOARD $*"
 vm_fetch "out/$BOARD/images" "$REPO/image/output/$BOARD"
 echo "Images in image/output/$BOARD"

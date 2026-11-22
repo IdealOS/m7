@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/compositor", "crates/session"]
+members = ["crates/protocol", "crates/compositor", "crates/session", "spikes/db-bench", "spikes/js-bench", "spikes/kms-probe"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.90"
 
 [workspace.dependencies]
 protocol = { path = "crates/protocol" }
@@ -20,6 +20,10 @@ bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 log = "0.4"
 env_logger = "0.11"
+loro = "1.18"
+rusqlite = { version = "0.43", features = ["bundled"] }
+rquickjs = "0.14"
+uuid = { version = "1.29", features = ["v7"] }
 
 [profile.dev.package."*"]
 # Dependencies (wgpu, naga, cosmic-text) are slow in debug builds; optimize them

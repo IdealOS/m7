@@ -1,0 +1,14 @@
+[package]
+name = "db-bench"
+description = "Spike C: Loro documents with a SQLite JSON copy and FTS5 index"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+loro.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

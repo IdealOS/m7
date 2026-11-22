@@ -3,12 +3,16 @@
 BR2_aarch64=y
 BR2_cortex_a72=y
 BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+# Kernel headers come from the kernel below, so Buildroot must be told its series;
+# otherwise it assumes 2.6 headers, falls back to uClibc and drops the Rust packages.
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/patches"
 
 BR2_TARGET_GENERIC_HOSTNAME="idealos"
 BR2_TARGET_GENERIC_ISSUE="idealos (Phase 0, QEMU)"
 BR2_INIT_BUSYBOX=y
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/busybox.fragment"
 BR2_SYSTEM_DHCP="eth0"
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/post-build.sh"
@@ -20,18 +24,26 @@ BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.58"
 BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/linux.fragment $(BR2_EXTERNAL_IDEALOS_PATH)/board/qemu/linux.fragment"
+# arm64 defconfig builds certs/extract-cert, which needs OpenSSL headers on the build host.
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
 # Graphics: lavapipe (software Vulkan) always works on plain virtio-gpu;
 # virgl gives accelerated GLES when the host provides it (UTM).
 BR2_PACKAGE_MESA3D=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SWRAST=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
+# lavapipe needs LLVM, which is most of the build time.
+BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_VULKAN_DRIVER_SWRAST=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
+# wgpu loads Vulkan through the loader (libvulkan.so.1), which finds the driver.
+BR2_PACKAGE_VULKAN_LOADER=y
 BR2_PACKAGE_LIBDRM=y
 BR2_PACKAGE_LIBINPUT=y
 BR2_PACKAGE_LIBXKBCOMMON=y
+# libinput needs udev, and eudev needs the matching /dev management mode.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_PACKAGE_EUDEV=y
 
 # Dev image extras.
@@ -50,3 +62,6 @@ BR2_PACKAGE_HOST_GENIMAGE=y
 # Read-only root; session owns the console instead of a getty.
 # BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
 # BR2_TARGET_GENERIC_GETTY is not set
+# The compositor shapes text with cosmic-text, which panics with no fonts installed.
+# Bundled fonts are still an open M1 item; DejaVu covers it until then.
+BR2_PACKAGE_DEJAVU=y

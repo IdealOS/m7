@@ -1,5 +1,6 @@
 # BusyBox init. `session` owns the console and supervises everything else.
 ::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/hostname -F /etc/hostname
 ::sysinit:/bin/mkdir -p /dev/pts /dev/shm
 ::sysinit:/bin/mount -a
 ::sysinit:/etc/init.d/rcS

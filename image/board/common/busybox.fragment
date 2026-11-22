@@ -1,0 +1,3 @@
+# Added to Buildroot's default BusyBox config.
+# S05data finds the data partition by label.
+CONFIG_FINDFS=y
