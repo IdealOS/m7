@@ -139,6 +139,48 @@ LLVM, which is built twice (for the host and the target). The build output is ab
 31 GB in the VM, plus 2 GB of downloads. A 16 GiB VM on a 24 GiB Mac pushed macOS into swap, which comes out of
 free disk, so the VM is now 10 GiB.
 
+### GPU acceleration in QEMU with Venus (branch `spike/venus-qemu`)
+
+Homebrew's QEMU has no virglrenderer, so on the Mac the guest renders with lavapipe.
+Venus forwards the guest's Vulkan calls over virtio-gpu to the host, where
+virglrenderer and MoltenVK run them on the Mac's GPU. UTM 5.0.8 ships a QEMU with
+Venus, but that QEMU is sandboxed and only runs inside UTM. `make utm-venus` builds a
+UTM bundle (`tools/utm-bundle.ts`) that boots the QEMU image with `virtio-gpu-gl-pci`,
+and the image includes Mesa's Venus driver (`BR2_PACKAGE_MESA3D_VULKAN_DRIVER_VIRTIO`).
+
+Measured on an M3 (UTM 5.0.8, Mesa 26.1.8, 1280x800), with the compositor running
+flat out:
+
+| | lavapipe (plain QEMU) | Venus (UTM) |
+| --- | --- | --- |
+| Adapter wgpu picks | llvmpipe | Virtio-GPU Venus (Apple M3) |
+| Whole frame (render, readback, copy) | ~11.5 ms, ~85 fps | ~5.3 ms, ~190 fps |
+
+wgpu prefers Venus over lavapipe without code changes, and plain QEMU (no Venus device)
+still falls back to lavapipe.
+
+It isn't reliable enough to use yet:
+
+- **The host stops answering.** The first Vulkan process after the VM starts works.
+  Later ones, including kms-probe and any compositor started after another Venus
+  process exits, log `stuck in ring seqno wait` and then
+  `aborting on ring fatal error`. Venus aborts on purpose when the host marks the ring
+  fatal. UTM's render server process logs neither to `Data/debug.log` nor to the system
+  log, so the host-side cause is unknown. Restarting the VM recovers.
+- **Process exit aborts too.** The compositor aborts in GPU teardown after SIGTERM, which
+  showed that the console has to be restored before the GPU is torn down (fixed on
+  `main`).
+- **The 16 KiB alignment patch is wrong here.** Rounding Venus blobs up to Apple
+  Silicon's 16 KiB page size (a patch from osy's Dec 2025 guide) makes UTM's host refuse
+  to map the ring's shared memory, so no instance can be created. UTM's host already
+  handles alignment.
+- **wgpu's GL backend aborts at exit** when virgl's GL driver is present, even with
+  lavapipe for Vulkan. The compositor never uses GL (now limited on `main`).
+
+Worth retrying when UTM updates, or with libkrun/krunkit, which implement the same
+host side differently. Upstream QEMU patches for Venus without an OpenGL display
+(v5, March 2026) are unmerged.
+
 ## Spike C: Loro plus SQLite
 
 `make spike-db` (or `db-bench --docs N --updates N --body-bytes N --db PATH --keep`).

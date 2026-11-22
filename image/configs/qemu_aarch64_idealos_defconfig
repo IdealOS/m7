@@ -35,6 +35,10 @@ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VIRGL=y
 # lavapipe needs LLVM, which is most of the build time.
 BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_VULKAN_DRIVER_SWRAST=y
+# Venus: Vulkan forwarded to the host GPU over virtio-gpu (UTM's virtio-gpu-gl-pci
+# with venus=on, or a QEMU built with Venus). wgpu prefers it over lavapipe when
+# the host offers it; on plain virtio-gpu it finds no device and lavapipe is used.
+BR2_PACKAGE_MESA3D_VULKAN_DRIVER_VIRTIO=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 # wgpu loads Vulkan through the loader (libvulkan.so.1), which finds the driver.

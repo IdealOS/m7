@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk tools-check
+.PHONY: hosted bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu utm-venus smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -53,6 +53,10 @@ image-rpi4:
 
 qemu:              ## Boot the QEMU image (needs: brew install qemu)
 	tools/run-qemu
+
+utm-venus:         ## Boot the QEMU image in UTM with Venus (Vulkan on the Mac's GPU)
+	node tools/utm-bundle.ts $(if $(FORCE),--force)
+	open image/output/qemu/idealos-venus.utm
 
 smoke-qemu:        ## Boot the QEMU image headless and check it (session, /data, compositor on KMS, input)
 	node tools/qemu-smoke.ts --screenshot docs/screenshots/m1-kms-qemu.png
