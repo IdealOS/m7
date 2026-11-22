@@ -9,6 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # kms-probe turns on the compositor's KMS backend, which links libinput,
+      # libudev and libxkbcommon (the same packages tools/lima/idealos-build.yaml installs).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libinput-dev libudev-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
