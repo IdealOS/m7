@@ -13,6 +13,9 @@ Targets: Raspberry Pi 4 (8 GB) and an aarch64 QEMU VM on Apple Silicon.
 
 ![Phase 0 compositor demo](docs/screenshots/phase0.png)
 
+The same compositor on the QEMU image, through its KMS backend:
+[docs/screenshots/m1-kms-qemu.png](docs/screenshots/m1-kms-qemu.png).
+
 ## Quick start (macOS)
 
 ```sh
@@ -24,6 +27,7 @@ make spike-kms     # Spike A: wgpu -> KMS on virtio-gpu in a QEMU VM (needs lima
 make screenshot    # render the demo offscreen to docs/screenshots/phase0.png
 make test          # all Rust tests (includes a real GPU render-and-readback test)
 make lint          # rustfmt, clippy, and the device-only compositor build
+make lint-device   # clippy on the Linux-only KMS code, in the build VM
 make sdk           # type-check the TypeScript SDK
 make tools-check   # type-check and unit-test the TypeScript tools in tools/
 ```
@@ -34,13 +38,20 @@ Device images need two extra tools: `brew install lima qemu`.
 make vm            # create the aarch64 Linux build VM (once)
 make check-defconfigs  # seconds: fail if Buildroot would silently drop a defconfig option
 make image-qemu    # Buildroot image for QEMU  -> image/output/qemu (first build ~3 h)
-make smoke-qemu    # boot it headless and check it (~10 s); exits 1 on any failure
+make smoke-qemu    # boot it headless and check it (~15 s); exits 1 on any failure
+make smoke-deploy  # ...then rebuild the binaries, deploy them over SSH, check the restart
 make qemu          # boot it; serial console here, display in a window
 make image-rpi4    # Buildroot image for the Pi -> image/output/rpi4
 tools/flash-sd /dev/diskN
-make deploy HOST=idealos.local          # push new binaries to a running dev image
+make deploy HOST=idealos.local          # rebuild and push binaries to a running dev image
 make deploy HOST=localhost PORT=2222   # ...or to QEMU
 ```
+
+`tools/build-image` makes an SSH key, `image/output/dev-key`, and bakes its public
+half into dev images as root's only login. `make deploy` uses it, so reflash after
+deleting `image/output`. Deploy builds with the image's own Buildroot toolchain
+(`make device-bins`), copies the binaries to the writable `/opt/idealos/bin` overlay,
+and sends `session` SIGTERM; init restarts it and it prefers the overlay's binaries.
 
 ## Layout
 
@@ -66,12 +77,14 @@ docs/               feature list, implementation plan, screenshots
 | Window manager v0: raise on click, drag by title bar | Done, tested |
 | Damage tracking | Frame-level only: an idle scene draws nothing. Region damage is still to do. |
 | Headless render to PNG | Done (screenshots, future golden-image tests) |
-| `session` supervisor with restart backoff | Done, tested on macOS |
+| `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. |
 | Images, transforms beyond translation, bundled fonts | Not started. System fonts for now; the compositor panics if none are installed. |
-| KMS backend | Stub. Spike A proved the QEMU copy path (`spikes/kms-probe`); the zero-copy Pi path waits on Spike B. |
-| Buildroot image for QEMU | **Built and booted** (Buildroot 2026.08.2, kernel 6.12.58). Boots to `session` in ~0.4 s under HVF; `/data` and the dev overlay mount; the compositor renderer reaches the display via `kms-probe`. `make smoke-qemu` checks all of this. |
-| Buildroot image for the Pi | Defconfig passes `make check-defconfigs`, **never built**. The Pi kernel tag is still unconfirmed. |
-| Lima build VM, image build, QEMU boot | Run end to end. Flash and deploy scripts are syntax-checked but **never run**. |
+| KMS backend | **Output works** (M1 started): `compositor --backend kms` draws the scene on the display with three page-flipped dumb buffers (Spike A's copy path) and redraws only when the scene changes. `session` starts it on the image. No input yet; the zero-copy Pi path waits on Spike B. |
+| Buildroot image for QEMU | **Built and booted** (Buildroot 2026.08.2, kernel 6.12.58). Boots to `session` in ~0.4 s under HVF; `/data` and the dev overlay mount; the compositor shows its first frame on virtio-gpu (lavapipe). `make smoke-qemu` checks all of this. |
+| Buildroot image for the Pi | **Built** on the first try (~45 min, reusing downloads): Pi kernel `stable_20250916`, V3DV Vulkan driver, firmware with the `vc4-kms-v3d-pi4` overlay, and the dev SSH key, in a 3.3 GB `sdcard.img`. **Never booted**: no Pi on hand yet. |
+| Lima build VM, image build, QEMU boot | Run end to end. |
+| SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes, and checks that `session` and the compositor restarted from the overlay with the old shell gone. Not yet run against a Pi. |
+| SD card flashing | `tools/flash-sd` is syntax-checked but **never run**. |
 
 ### Spikes
 
@@ -80,7 +93,7 @@ docs/               feature list, implementation plan, screenshots
 | C: Loro + SQLite + FTS5, 10,000 docs | Measured on the Mac: ~0.1 ms per write, copies never diverge; live queries need expression indexes. Pi run pending. |
 | D: 8 QuickJS app processes | Measured on the Mac: ~7.5 MiB and ~10 ms per app; 790k signal updates/s. Pi run pending. |
 | A: wgpu to KMS in QEMU | Done, in a stock Ubuntu VM and in the idealos image: lavapipe + dumb-buffer copy + page flip, ~11 ms/frame at 1280x800 with three buffers. virgl isn't in Homebrew QEMU. |
-| B: wgpu to KMS on the Pi | Needs the Pi image (`kms-probe` is now in every image) |
+| B: wgpu to KMS on the Pi | Needs a Pi. `kms-probe` is in every image; the compositor holds the display, so first write a `/data/session.conf` without it and restart `session`. |
 | E, F: Servo, Gmail OAuth | Not started. Servo needs ~30 GB of free disk; Gmail needs a Google Cloud OAuth client. |
 
 ### Image build notes
@@ -93,6 +106,12 @@ docs/               feature list, implementation plan, screenshots
 - `idealos-userspace` is a local package, so Buildroot doesn't vendor its crates;
   its `.mk` runs `cargo vendor` itself. `tools/build-image` cleans it on every build so
   the image always has the current code.
+- Buildroot's `<pkg>-rebuild` copies a local package's source again but never deletes
+  files, so a moved source file breaks the build. `tools/build-device-bins` mirrors
+  the source with `rsync --delete` first, keeping cargo's `target` directory so the
+  build stays incremental.
+- The root filesystem is read-only, so dropbear's host keys live on `/data`
+  (`/etc/dropbear` is a link). They survive reboots but not a reflash.
 - The workspace needs Rust 1.90 or newer (edition 2024; cosmic-text needs 1.89 and
   ordered-float 1.90). Buildroot 2026.08 ships 1.97; the 2026.02 LTS branch is stuck on
   1.88, so `tools/build-image` defaults to 2026.08.2.

@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench spike-db spike-js spike-kms screenshot test lint fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu deploy sdk tools-check
+.PHONY: hosted bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy device-bins deploy sdk tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -27,6 +27,9 @@ lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo check -p compositor --no-default-features --features kms
 
+lint-device:       ## Clippy on the Linux-only KMS code, in the build VM
+	tools/lint-device
+
 fmt:
 	cargo fmt --all
 
@@ -51,8 +54,15 @@ image-rpi4:
 qemu:              ## Boot the QEMU image (needs: brew install qemu)
 	tools/run-qemu
 
-smoke-qemu:        ## Boot the QEMU image headless and check it (session, /data, kms-probe)
-	node tools/qemu-smoke.ts --screenshot docs/screenshots/phase0-qemu-image.png
+smoke-qemu:        ## Boot the QEMU image headless and check it (session, /data, compositor on KMS)
+	node tools/qemu-smoke.ts --screenshot docs/screenshots/m1-kms-qemu.png
+
+smoke-deploy:      ## smoke-qemu, then deploy fresh binaries to it over SSH and check the restart
+	tools/build-device-bins
+	node tools/qemu-smoke.ts --deploy
+
+device-bins:       ## Build session/compositor/kms-probe with the image toolchain -> target/device
+	tools/build-device-bins
 
 deploy:            ## make deploy HOST=idealos.local [PORT=22]
 	tools/deploy-to-pi $(HOST) $(or $(PORT),22)

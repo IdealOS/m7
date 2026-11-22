@@ -9,8 +9,8 @@ license.workspace = true
 default = ["hosted"]
 # Window on macOS/Linux desktops via winit. Used for day-to-day development.
 hosted = ["dep:winit"]
-# Direct DRM/KMS + libinput output on the device. Linux only; see backend/kms.rs.
-kms = []
+# Direct DRM/KMS output on the device. Linux only; see backend/kms/mod.rs.
+kms = ["dep:drm"]
 
 [dependencies]
 protocol.workspace = true
@@ -23,3 +23,6 @@ png.workspace = true
 log.workspace = true
 env_logger.workspace = true
 winit = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+drm = { version = "0.15", optional = true }

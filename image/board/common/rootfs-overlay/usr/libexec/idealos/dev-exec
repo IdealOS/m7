@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run a system binary, preferring a copy pushed to the dev overlay (/opt/idealos/bin,
+# see tools/deploy-to-pi) over the one in the read-only image.
+# Usage: dev-exec NAME [ARGS...]
+name="$1"
+shift
+for dir in /opt/idealos/bin /usr/bin; do
+	[ -x "$dir/$name" ] && exec "$dir/$name" "$@"
+done
+echo "dev-exec: no $name binary found" >&2
+exit 127

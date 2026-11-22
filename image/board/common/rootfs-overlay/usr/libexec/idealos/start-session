@@ -1,7 +1,10 @@
 #!/bin/sh
 # Started by init on the console. Prefers a session binary pushed to the dev
-# overlay (/opt/idealos/bin) over the one baked into the read-only image.
+# overlay (/opt/idealos/bin) over the one baked into the read-only image, and on dev
+# images a /data/session.conf over /etc/idealos/session.conf.
+conf=/etc/idealos/session.conf
+[ -e /etc/idealos/dev-image ] && [ -f /data/session.conf ] && conf=/data/session.conf
 for dir in /opt/idealos/bin /usr/bin; do
-	[ -x "$dir/session" ] && exec "$dir/session" /etc/idealos/session.conf
+	[ -x "$dir/session" ] && exec "$dir/session" "$conf"
 done
 echo "start-session: no session binary found"; exec /bin/sh -l

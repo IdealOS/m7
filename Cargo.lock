@@ -385,6 +385,7 @@ name = "compositor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "drm",
  "env_logger",
  "glyphon",
  "log",
@@ -1392,7 +1393,6 @@ name = "kms-probe"
 version = "0.1.0"
 dependencies = [
  "compositor",
- "drm",
  "protocol",
  "serde_json",
  "wgpu",
@@ -2852,6 +2852,9 @@ dependencies = [
 [[package]]
 name = "session"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "sharded-slab"

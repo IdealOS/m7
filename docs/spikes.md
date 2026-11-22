@@ -91,9 +91,11 @@ Setting up the wgpu device on lavapipe takes 20–40 ms.
 
 ### In the idealos QEMU image
 
-`kms-probe` ships in every image, and `make smoke-qemu` runs it on each boot check. On
-the Buildroot 2026.08.2 image (kernel 6.12.58, Mesa 26.1.8, LLVM 22.1.8, lavapipe),
-three buffers:
+`kms-probe` ships in every image. These numbers come from running it on the
+Buildroot 2026.08.2 image (kernel 6.12.58, Mesa 26.1.8, LLVM 22.1.8, lavapipe),
+three buffers, before the compositor's KMS backend took over the display (its
+display code is now shared with the probe, and `make smoke-qemu` checks the
+compositor instead):
 
 | Stage | p50 | p99 |
 | --- | --- | --- |

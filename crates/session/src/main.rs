@@ -11,8 +11,13 @@
 //! shell        always    /bin/sh -l
 //! compositor   always    /usr/bin/compositor --backend kms
 //! ```
+//!
+//! On SIGTERM it stops every service (SIGTERM, then SIGKILL after a grace period)
+//! and exits, so init can respawn a fresh session without leaving old services
+//! running. `tools/deploy-to-pi` relies on this.
 
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const DEFAULT_CONFIG: &str = "/etc/idealos/session.conf";
@@ -20,6 +25,20 @@ const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A service that stays up this long is considered healthy again.
 const HEALTHY_AFTER: Duration = Duration::from_secs(60);
+/// How long services get to exit after SIGTERM before they are killed.
+/// Interactive shells ignore SIGTERM, so the shell always takes this long.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigterm(_: libc::c_int) {
+    STOP.store(true, Ordering::Relaxed);
+}
+
+fn install_sigterm_handler() {
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe { libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t) };
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Restart {
@@ -98,6 +117,33 @@ impl Service {
         self.backoff = next_backoff(self.backoff, ran_for);
         self.next_start = Instant::now() + self.backoff;
     }
+
+    fn running(&mut self) -> bool {
+        self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+}
+
+/// Ask every running service to exit, wait up to `STOP_GRACE`, then kill the rest.
+fn stop_all(services: &mut [Service]) {
+    for svc in services.iter_mut() {
+        if let Some(child) = &svc.child {
+            // SAFETY: plain kill(2) on a pid we spawned and have not yet reaped.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        }
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    while Instant::now() < deadline && services.iter_mut().any(Service::running) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for svc in services.iter_mut() {
+        if let Some(mut child) = svc.child.take() {
+            if matches!(child.try_wait(), Ok(None)) {
+                eprintln!("session: killing {}", svc.spec.name);
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
 }
 
 fn main() {
@@ -111,6 +157,7 @@ fn main() {
         std::process::exit(1);
     });
 
+    install_sigterm_handler();
     let now = Instant::now();
     let mut services: Vec<Service> = specs
         .into_iter()
@@ -127,6 +174,11 @@ fn main() {
     // A polling loop is enough for a handful of services. M2 replaces it with an
     // event loop (signalfd + the bus socket).
     loop {
+        if STOP.load(Ordering::Relaxed) {
+            eprintln!("session: SIGTERM, stopping services");
+            stop_all(&mut services);
+            return;
+        }
         for svc in &mut services {
             if let Some(child) = &mut svc.child {
                 match child.try_wait() {

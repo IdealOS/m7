@@ -6,6 +6,7 @@
 //! compositor --windows 40            # demo scene size
 //! compositor --screenshot out.png    # render one frame offscreen and exit
 //! compositor --backend kms           # device backend (Linux, feature "kms")
+//! compositor --backend kms --card /dev/dri/card1
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
             }
             "--scale" => scale = value("--scale").parse().unwrap_or_else(|_| usage("bad --scale")),
             "--continuous" => opts.continuous = true,
+            "--card" => opts.card = value("--card"),
             "--screenshot" => screenshot = Some(value("--screenshot").into()),
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
@@ -81,7 +83,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--windows N] [--size WxH] [--continuous]\n                  [--screenshot out.png [--scale S]]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S]]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

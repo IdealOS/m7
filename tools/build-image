@@ -13,6 +13,15 @@ esac
 # 2026.08 or newer: the 2026.02 LTS branch ships Rust 1.88, older than the workspace needs.
 BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.08.2}"
 
+# Dev images let root log in over SSH with this key (tools/deploy-to-pi uses it).
+# The private half stays on this Mac; post-build.sh installs the public half.
+KEY="$REPO/image/output/dev-key"
+if [ ! -f "$KEY" ]; then
+	mkdir -p "$REPO/image/output"
+	ssh-keygen -q -t ed25519 -N "" -C idealos-dev -f "$KEY"
+fi
+cp "$KEY.pub" "$REPO/image/board/common/dev-key.pub"
+
 vm_require
 vm_sync
 # Source downloads live outside the Buildroot tree so they survive version bumps.

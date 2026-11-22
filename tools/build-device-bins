@@ -1,0 +1,33 @@
+#!/bin/sh
+# Rebuild session, compositor and kms-probe with the image's Buildroot toolchain and
+# copy them to target/device. Needs a built image (tools/build-image) for BOARD.
+# Both boards share the toolchain (aarch64 cortex-a72, same glibc), so binaries
+# from either output run on both.
+# Usage: [BOARD=qemu|rpi4] tools/build-device-bins
+set -eu
+. "$(dirname "$0")/_vm.sh"
+BOARD="${BOARD:-qemu}"
+BIN="$REPO/target/device"
+
+vm_require
+vm_sync
+# Plain `make` never notices source changes in a local package, and -rebuild copies
+# the source again without deleting removed files. So mirror the source first,
+# keeping Buildroot's stamp files and cargo's target and vendor directories (which
+# keeps the build incremental), then -rebuild.
+vm_run "set -e
+	[ -d \$HOME/out/$BOARD/target ] || { echo 'No $BOARD build. Run: tools/build-image $BOARD'; exit 1; }
+	for build in \$HOME/out/$BOARD/build/idealos-userspace-*/; do
+		[ -d \"\$build\" ] || continue
+		rsync -a --delete --exclude .git \\
+			--filter='P /target/' --filter='P /vendor/' --filter='P /.cargo/' \\
+			--filter='P /.stamp_*' --filter='P /.files-list*' --filter='P /.applied_patches_list' \\
+			\$HOME/idealos/ \"\$build\"
+	done
+	export BR2_DL_DIR=\$HOME/br-dl
+	make -C \$HOME/out/$BOARD idealos-userspace-rebuild"
+mkdir -p "$BIN"
+for b in session compositor kms-probe; do
+	rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:out/$BOARD/target/usr/bin/$b" "$BIN/$b"
+done
+echo "Device binaries in target/device"

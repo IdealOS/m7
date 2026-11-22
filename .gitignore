@@ -3,3 +3,5 @@ node_modules/
 /image/output/
 *.img
 .DS_Store
+# Public half of image/output/dev-key, made by tools/build-image
+/image/board/common/dev-key.pub

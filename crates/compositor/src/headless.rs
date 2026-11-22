@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::render::Renderer;
+use crate::render::{FrameStats, Renderer};
 use crate::scene::{DrawList, Rgba, Scene};
 
 pub struct Image {
@@ -120,10 +120,19 @@ impl Offscreen {
         scale: f32,
         clear: Rgba,
         mut row: impl FnMut(&[u8]),
-    ) -> Result<(), String> {
+    ) -> Result<FrameStats, String> {
         let (w, h) = (self.width, self.height);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.renderer.render(&self.device, &self.queue, &mut encoder, &self.view, (w, h), scale, list, clear);
+        let stats = self.renderer.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.view,
+            (w, h),
+            scale,
+            list,
+            clear,
+        );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -159,7 +168,7 @@ impl Offscreen {
             }
         }
         self.readback.unmap();
-        Ok(())
+        Ok(stats)
     }
 }
 
