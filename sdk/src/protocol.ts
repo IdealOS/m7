@@ -12,6 +12,12 @@
  */
 export const BROKER = "bus";
 
+/** The name the database service claims. */
+export const DB_SERVICE = "db";
+
+/** The `limit` a query gets when it names none. */
+export const DEFAULT_QUERY_LIMIT = 100;
+
 /**
  * How long the broker waits for a response before answering `timeout` itself, unless the request
  * sets `timeout_ms`.
@@ -32,6 +38,9 @@ export const MAX_NAMES = 64;
  * `limit_exceeded`.
  */
 export const MAX_PENDING_REQUESTS = 1024;
+
+/** Most documents one query returns; a larger `limit` is an error. */
+export const MAX_QUERY_LIMIT = 10000;
 
 /** Most subscription patterns one connection may hold. */
 export const MAX_SUBSCRIPTIONS = 256;
@@ -83,6 +92,27 @@ export type BusError = { code: string; message: string };
 /** Params of a `compositor.commit` request. */
 export type Commit = { window: number; ops: SceneOp[] };
 
+/** Params of `create`. */
+export type CreateParams = { type: string; data?: Record<string, unknown> };
+
+export type Direction = "asc" | "desc";
+
+/** A stored document. */
+export type Doc = {
+  /** A UUIDv7, so ids sort by creation time. */
+  id: string;
+  /** The document's type, such as `Email`. */
+  type: string;
+  /** When it was created, in milliseconds since the Unix epoch. */
+  created: number;
+  /** When it last changed, in milliseconds since the Unix epoch. */
+  updated: number;
+  data: Record<string, unknown>;
+};
+
+/** Result of `query` and `search`. */
+export type DocsResult = { docs: Doc[] };
+
 /** Result of `hello`: who the broker says this connection is. */
 export type HelloResult = {
   /** This connection's number. */
@@ -90,6 +120,9 @@ export type HelloResult = {
   /** How the broker stamps this connection's messages. */
   sender: Sender;
 };
+
+/** Params of `get` and `delete`. */
+export type IdParams = { id: string };
 
 /** Result of `list`. */
 export type ListResult = {
@@ -146,6 +179,26 @@ export type NameParams = {
  */
 export type NodeKind = "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "label" | "button";
 
+/** A sort key: a field path and a direction, written `["date", "desc"]`. */
+export type OrderBy = [string, Direction];
+
+/** A query: documents of one type that match a filter, in order. */
+export type Query = {
+  type: string;
+  /** At most this many documents (default 100, at most 10,000). */
+  limit?: number | null;
+  /** Skip this many matching documents first. */
+  offset?: number | null;
+  /** Sort keys, most significant first. Ties keep creation order. */
+  orderBy?: OrderBy[];
+  /**
+   * Field paths mapped to a value to equal or an object of operators (`$eq`,
+   * `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),
+   * plus `$and`, `$or` and `$not`. Empty matches every document of the type.
+   */
+  where?: Record<string, unknown>;
+};
+
 /** One change to a window's scene graph. */
 export type SceneOp =
   | { op: "create"; id: number; type: NodeKind; props?: Record<string, unknown> }
@@ -155,6 +208,15 @@ export type SceneOp =
   | { op: "remove"; parent: number; child: number }
   | { op: "destroy"; id: number }
   | { op: "listen"; id: number; events: string[] };
+
+/** Params of `search`: documents containing every word of `text`, best first. */
+export type SearchParams = {
+  text: string;
+  /** At most this many (default 100, at most 10,000). */
+  limit?: number | null;
+  /** Only documents of this type. */
+  type?: string | null;
+};
 
 /** Who sent a message, as stamped by the broker. */
 export type Sender =
@@ -185,3 +247,10 @@ export type TapEvent = {
    */
   bus_id?: number | null;
 };
+
+/**
+ * Params of `update`: a JSON merge patch (RFC 7396) for document `id`. A key set
+ * to null is removed, an object merges into the object there, and anything else
+ * replaces the old value.
+ */
+export type UpdateParams = { id: string; patch: Record<string, unknown> };

@@ -1,0 +1,21 @@
+[package]
+name = "dbd"
+description = "The db service: the document store on the bus."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+db = { path = "../db" }
+bus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+busd = { path = "../busd" }

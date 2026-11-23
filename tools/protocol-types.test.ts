@@ -25,6 +25,11 @@ test("scalars, refs, consts and nullable types", () => {
   assert.equal(typeOf({ enum: ["a", "b"], type: "string" }, "#"), '"a" | "b"');
   assert.equal(typeOf({ anyOf: [{ $ref: "#/$defs/X" }, { type: "null" }] }, "#"), "X | null");
   assert.equal(typeOf({ type: "array", items: { type: "string" } }, "#"), "string[]");
+  assert.equal(
+    typeOf({ type: "array", prefixItems: [{ type: "string" }, { $ref: "#/$defs/Direction" }], minItems: 2, maxItems: 2 }, "#"),
+    "[string, Direction]",
+  );
+  assert.throws(() => typeOf({ type: "array", prefixItems: [true], items: true }, "#"), UnsupportedSchema);
   assert.equal(typeOf({ type: "array", items: { anyOf: [{ type: "string" }, { type: "null" }] } }, "#"), "Array<string | null>");
 });
 

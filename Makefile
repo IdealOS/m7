@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench bus bus-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk protocol tools-check
+.PHONY: hosted bench bus bus-bench db spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk protocol tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -9,6 +9,9 @@ bench:             ## Redraw every frame and log frame times
 
 bus:               ## Run the message bus broker here (osctl and services find it with no setup)
 	cargo run --release -p busd
+
+db:                ## Run the database service here, on a running `make bus` (data in ~/.local/share/idealos)
+	cargo run --release -p dbd
 
 bus-bench:         ## Round trip and throughput through a running `make bus`
 	cargo run --release -p osctl -- bus bench

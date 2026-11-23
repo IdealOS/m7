@@ -7,9 +7,11 @@
 export type Schema = boolean | { [key: string]: unknown };
 
 /** Keywords that only describe or constrain values; TypeScript can't express them. */
-const ANNOTATIONS = new Set(["description", "default", "format", "minimum", "maximum", "title"]);
+const ANNOTATIONS = new Set(["description", "default", "format", "minimum", "maximum", "title", "minItems", "maxItems"]);
 /** Keywords this generator turns into types. */
-const HANDLED = new Set(["$ref", "const", "enum", "oneOf", "anyOf", "type", "properties", "required", "items", "additionalProperties"]);
+const HANDLED = new Set([
+  "$ref", "const", "enum", "oneOf", "anyOf", "type", "properties", "required", "items", "prefixItems", "additionalProperties",
+]);
 
 const MAX_LINE = 100;
 
@@ -96,6 +98,12 @@ export function typeOf(schema: Schema, path: string, indent = ""): string {
     case "null":
       return "null";
     case "array": {
+      if (Array.isArray(schema.prefixItems)) {
+        // A tuple, as schemars writes a Rust tuple struct: exactly these items.
+        if (schema.items !== undefined && schema.items !== false) fail(path, "a tuple with extra items");
+        const items = schema.prefixItems.map((s, i) => typeOf(s as Schema, `${path}/prefixItems/${i}`, indent));
+        return `[${items.join(", ")}]`;
+      }
       if (schema.items === undefined) return "unknown[]";
       const item = typeOf(schema.items as Schema, `${path}/items`, indent);
       return /^[A-Za-z0-9_$"]+$/.test(item) ? `${item}[]` : `Array<${item}>`;

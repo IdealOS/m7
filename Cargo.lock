@@ -598,6 +598,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbd"
+version = "0.1.0"
+dependencies = [
+ "bus-client",
+ "busd",
+ "db",
+ "env_logger",
+ "log",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "derive_arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

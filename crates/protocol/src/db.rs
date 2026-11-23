@@ -20,6 +20,83 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The service name `dbd` claims.
+pub const SERVICE: &str = "db";
+
+/// The `db` service's methods.
+///
+/// | method   | params           | result         |
+/// |----------|------------------|----------------|
+/// | `create` | [`CreateParams`] | [`Doc`]        |
+/// | `get`    | [`IdParams`]     | [`Doc`]        |
+/// | `update` | [`UpdateParams`] | [`Doc`]        |
+/// | `delete` | [`IdParams`]     | null           |
+/// | `query`  | [`Query`]        | [`DocsResult`] |
+/// | `search` | [`SearchParams`] | [`DocsResult`] |
+pub mod method {
+    pub const CREATE: &str = "create";
+    pub const GET: &str = "get";
+    pub const UPDATE: &str = "update";
+    pub const DELETE: &str = "delete";
+    pub const QUERY: &str = "query";
+    pub const SEARCH: &str = "search";
+}
+
+/// Error codes the `db` service sends, besides the broker's `bad_request`.
+pub mod code {
+    /// No live document has the id.
+    pub const NOT_FOUND: &str = "not_found";
+    /// The database itself failed (disk, corruption); the request may be fine.
+    pub const INTERNAL: &str = "internal";
+}
+
+/// Params of `create`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CreateParams {
+    #[serde(rename = "type")]
+    pub doc_type: String,
+    #[serde(default)]
+    pub data: Map<String, Value>,
+}
+
+/// Params of `get` and `delete`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct IdParams {
+    pub id: String,
+}
+
+/// Params of `update`: a JSON merge patch (RFC 7396) for document `id`. A key set
+/// to null is removed, an object merges into the object there, and anything else
+/// replaces the old value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UpdateParams {
+    pub id: String,
+    pub patch: Map<String, Value>,
+}
+
+/// Params of `search`: documents containing every word of `text`, best first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SearchParams {
+    pub text: String,
+    /// Only documents of this type.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    /// At most this many (default 100, at most 10,000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of `query` and `search`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DocsResult {
+    pub docs: Vec<Doc>,
+}
+
 /// Most documents one query returns; a larger `limit` is an error.
 pub const MAX_QUERY_LIMIT: u32 = 10_000;
 /// The `limit` a query gets when it names none.
@@ -47,7 +124,9 @@ pub struct Doc {
 pub struct Query {
     #[serde(rename = "type")]
     pub doc_type: String,
-    /// The filter (see the module docs). Empty matches every document of the type.
+    /// Field paths mapped to a value to equal or an object of operators (`$eq`,
+    /// `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),
+    /// plus `$and`, `$or` and `$not`. Empty matches every document of the type.
     #[serde(default, rename = "where", skip_serializing_if = "Map::is_empty")]
     pub filter: Map<String, Value>,
     /// Sort keys, most significant first. Ties keep creation order.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/protocol-schema", "crates/db", "crates/busd", "crates/bus-client", "crates/osctl", "crates/compositor", "crates/session", "spikes/db-bench", "spikes/js-bench", "spikes/kms-probe"]
+members = ["crates/protocol", "crates/protocol-schema", "crates/db", "crates/dbd", "crates/busd", "crates/bus-client", "crates/osctl", "crates/compositor", "crates/session", "spikes/db-bench", "spikes/js-bench", "spikes/kms-probe"]
 
 [workspace.package]
 version = "0.1.0"

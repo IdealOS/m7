@@ -9,6 +9,12 @@
 //! osctl [--socket PATH] bus tap                       print every message the broker sees
 //! osctl [--socket PATH] bus echo NAME                 serve NAME, answering with the params
 //! osctl [--socket PATH] bus bench [--seconds N] [--size BYTES]
+//! osctl [--socket PATH] db create TYPE [JSON]         create a document; prints it
+//! osctl [--socket PATH] db get ID
+//! osctl [--socket PATH] db update ID JSON             apply a JSON merge patch
+//! osctl [--socket PATH] db delete ID
+//! osctl [--socket PATH] db query JSON                 e.g. '{"type": "Note", "where": {"done": false}}'
+//! osctl [--socket PATH] db search WORDS... [--type TYPE] [--limit N]
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -27,7 +33,9 @@ use std::time::Duration;
 use commands::Command;
 
 const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
-| sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])";
+| sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])
+       osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
+| search WORDS... [--type TYPE] [--limit N])";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -62,12 +70,12 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         args.next();
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
-    match args.next().as_deref() {
-        Some("bus") => {}
+    let group = match args.next() {
+        Some(g) if g == "bus" || g == "db" => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
-    }
-    let sub = args.next().ok_or("missing bus subcommand")?;
+    };
+    let sub = args.next().ok_or(format!("missing {group} subcommand"))?;
     // Split the rest into positionals and --flag value pairs.
     let mut positional = Vec::new();
     let mut flags = Vec::new();
@@ -87,7 +95,7 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     };
     let allowed = |names: &[&str]| -> Result<(), String> {
         match flags.iter().find(|(f, _)| !names.contains(&f.as_str())) {
-            Some((f, _)) => Err(format!("bus {sub} has no --{f}")),
+            Some((f, _)) => Err(format!("{group} {sub} has no --{f}")),
             None => Ok(()),
         }
     };
@@ -100,13 +108,16 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     let arity = |min: usize, max: usize| -> Result<(), String> {
         if positional.len() < min || positional.len() > max {
             Err(format!(
-                "bus {sub} takes {} argument(s)",
+                "{group} {sub} takes {} argument(s)",
                 if min == max { min.to_string() } else { format!("{min} to {max}") }
             ))
         } else {
             Ok(())
         }
     };
+    if group == "db" {
+        return Ok((socket, db_command(&sub, &positional, &flags, arity, allowed, json)?));
+    }
     let command = match sub.as_str() {
         "list" => {
             arity(0, 0)?;
@@ -160,6 +171,68 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     Ok((socket, command))
 }
 
+/// `osctl db ...` is shorthand for a request to the db service.
+fn db_command(
+    sub: &str,
+    positional: &[String],
+    flags: &[(String, String)],
+    arity: impl Fn(usize, usize) -> Result<(), String>,
+    allowed: impl Fn(&[&str]) -> Result<(), String>,
+    json: impl Fn(Option<&String>) -> Result<serde_json::Value, String>,
+) -> Result<Command, String> {
+    use protocol::db::method;
+    use serde_json::json;
+    let object = |text: Option<&String>| -> Result<serde_json::Value, String> {
+        match json(text)? {
+            serde_json::Value::Null => Ok(json!({})),
+            v @ serde_json::Value::Object(_) => Ok(v),
+            other => Err(format!("expected a JSON object, not {other}")),
+        }
+    };
+    let (method, params) = match sub {
+        "create" => {
+            arity(1, 2)?;
+            allowed(&[])?;
+            (method::CREATE, json!({"type": positional[0], "data": object(positional.get(1))?}))
+        }
+        "get" | "delete" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            (if sub == "get" { method::GET } else { method::DELETE }, json!({"id": positional[0]}))
+        }
+        "update" => {
+            arity(2, 2)?;
+            allowed(&[])?;
+            (method::UPDATE, json!({"id": positional[0], "patch": object(positional.get(1))?}))
+        }
+        "query" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            (method::QUERY, object(positional.first())?)
+        }
+        "search" => {
+            if positional.is_empty() {
+                return Err("db search needs words to look for".into());
+            }
+            allowed(&["type", "limit"])?;
+            let mut params = json!({"text": positional.join(" ")});
+            for (flag, value) in flags {
+                params[flag.as_str()] = match flag.as_str() {
+                    "limit" => json!(
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| format!("--limit must be a whole number, not {value}"))?
+                    ),
+                    _ => json!(value),
+                };
+            }
+            (method::SEARCH, params)
+        }
+        other => return Err(format!("unknown db subcommand {other}")),
+    };
+    Ok(Command::Call { to: protocol::db::SERVICE.into(), method: method.into(), params, timeout: None })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +270,45 @@ mod tests {
         assert_eq!(parse_str("bus tap").unwrap().1, Command::Tap);
         assert_eq!(parse_str("bus echo e").unwrap().1, Command::Echo { name: "e".into() });
         assert_eq!(parse_str("bus bench --size 1024").unwrap().1, Command::Bench { seconds: 2, size: 1024 });
+    }
+
+    fn db(method: &str, params: serde_json::Value) -> Command {
+        Command::Call { to: "db".into(), method: method.into(), params, timeout: None }
+    }
+
+    #[test]
+    fn db_subcommands_are_requests_to_the_db_service() {
+        assert_eq!(parse_str("db create Note").unwrap().1, db("create", json!({"type": "Note", "data": {}})));
+        assert_eq!(
+            parse_str("db create Note {\"t\":1}").unwrap().1,
+            db("create", json!({"type": "Note", "data": {"t": 1}}))
+        );
+        assert_eq!(parse_str("db get abc").unwrap().1, db("get", json!({"id": "abc"})));
+        assert_eq!(parse_str("db delete abc").unwrap().1, db("delete", json!({"id": "abc"})));
+        assert_eq!(
+            parse_str("db update abc {\"t\":null}").unwrap().1,
+            db("update", json!({"id": "abc", "patch": {"t": null}}))
+        );
+        assert_eq!(
+            parse_str("db query {\"type\":\"Note\"}").unwrap().1,
+            db("query", json!({"type": "Note"}))
+        );
+        assert_eq!(
+            parse_str("db search quarterly report --type Email --limit 5").unwrap().1,
+            db("search", json!({"text": "quarterly report", "type": "Email", "limit": 5}))
+        );
+        for bad in [
+            "db",
+            "db get",
+            "db update abc",
+            "db create Note [1]",
+            "db search",
+            "db search x --limit y",
+            "db drop x",
+            "db get a --type x",
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

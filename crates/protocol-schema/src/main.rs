@@ -5,8 +5,8 @@
 //! Besides the types under `$defs`, the document carries the protocol's constants
 //! under `x-constants`, which JSON Schema has no keyword for.
 
-use protocol::broker;
 use protocol::bus::{self, code};
+use protocol::{broker, db};
 use serde_json::{Value, json};
 
 fn document() -> Value {
@@ -19,6 +19,13 @@ fn document() -> Value {
     g.subschema_for::<broker::AdoptParams>();
     g.subschema_for::<broker::AdoptResult>();
     g.subschema_for::<broker::TapEvent>();
+    g.subschema_for::<db::Doc>();
+    g.subschema_for::<db::Query>();
+    g.subschema_for::<db::CreateParams>();
+    g.subschema_for::<db::IdParams>();
+    g.subschema_for::<db::UpdateParams>();
+    g.subschema_for::<db::SearchParams>();
+    g.subschema_for::<db::DocsResult>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -39,6 +46,9 @@ fn document() -> Value {
         "MAX_PENDING_REQUESTS": constant(bus::MAX_PENDING_REQUESTS.into(), "Most requests one connection may have waiting for an answer at once; past it the broker answers `limit_exceeded`."),
         "MAX_SUBSCRIPTIONS": constant(bus::MAX_SUBSCRIPTIONS.into(), "Most subscription patterns one connection may hold."),
         "MAX_NAMES": constant(bus::MAX_NAMES.into(), "Most service names one connection may claim."),
+        "DB_SERVICE": constant(db::SERVICE.into(), "The name the database service claims."),
+        "MAX_QUERY_LIMIT": constant(db::MAX_QUERY_LIMIT.into(), "Most documents one query returns; a larger `limit` is an error."),
+        "DEFAULT_QUERY_LIMIT": constant(db::DEFAULT_QUERY_LIMIT.into(), "The `limit` a query gets when it names none."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });
@@ -145,6 +155,15 @@ mod tests {
             "AdoptParams",
             "AdoptResult",
             "TapEvent",
+            "Doc",
+            "Query",
+            "OrderBy",
+            "Direction",
+            "CreateParams",
+            "IdParams",
+            "UpdateParams",
+            "SearchParams",
+            "DocsResult",
         ] {
             assert!(defs.contains_key(name), "{name} missing");
         }

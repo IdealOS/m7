@@ -34,6 +34,9 @@ export const GUEST_SCRIPT = [
   `echo SMOKE bus-call $(osctl bus call smoke-echo ping '{"n":1}' 2>&1)`,
   "echo SMOKE bus-bench $(osctl bus bench --seconds 1 2>&1 | grep ^BENCH)",
   "kill $!",
+  // session starts dbd on the bus; a document goes in and comes back out of a query.
+  "echo SMOKE db-file $(ls /data/db/idealos.db 2>&1)",
+  `echo SMOKE db-roundtrip $(osctl db create Smoke '{"n":7}' >/dev/null && osctl db query '{"type":"Smoke","where":{"n":7},"limit":1}' 2>&1 | grep -c '"n":7')`,
   "echo SMOKE end",
 ];
 
@@ -113,6 +116,8 @@ export function evaluate(log: string): Check[] {
     },
     fact("bus-session", "1", "session has its own connection to busd"),
     fact("bus-call", '{"n":1}', "a request went through the bus and back"),
+    fact("db-file", "/data/db/idealos.db", "dbd keeps the database on /data"),
+    fact("db-roundtrip", "1", "a document went into the database and came back from a query"),
     {
       name: "bus benchmark ran",
       ok: rps > 0,
