@@ -366,4 +366,66 @@ mod tests {
         let header = (MAX_FRAME_BYTES + 1).to_be_bytes();
         assert_eq!(decode_frame(&header), Err(FrameError::TooLarge(MAX_FRAME_BYTES + 1)));
     }
+
+    /// Random bytes, and real frames with random damage: decoding never panics,
+    /// never claims more bytes than it was given, and whatever decodes encodes to
+    /// a frame that decodes to the same message. `BUS_FUZZ_SEEDS=n` runs more.
+    #[test]
+    fn damaged_frames_never_panic() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let samples: Vec<Vec<u8>> = [
+            Message::request(1, "db", "query", serde_json::json!({"type": "Note", "n": [1, 2.5, null]})),
+            Message::ok(7, serde_json::json!({"conn": 3, "sender": {"app": {"app": "org.x", "conn": 3}}})),
+            Message::err(2, code::TIMEOUT, "slow \u{1F600} \"quoted\""),
+            Message::Cancel { id: u64::MAX },
+            Message::publish("db.live.1", serde_json::json!({"added": [{}], "s": "\\"})).with_fds(2),
+        ]
+        .iter()
+        .map(|m| encode_frame(m).unwrap())
+        .collect();
+        let seeds: u64 = std::env::var("BUS_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+        for _ in 0..seeds * 100 {
+            let mut buf = if next() % 4 == 0 {
+                (0..next() % 64).map(|_| next() as u8).collect()
+            } else {
+                samples[(next() % samples.len() as u64) as usize].clone()
+            };
+            for _ in 0..1 + next() % 4 {
+                if buf.is_empty() {
+                    break;
+                }
+                let at = (next() % buf.len() as u64) as usize;
+                match next() % 4 {
+                    0 => buf[at] = next() as u8,
+                    1 => buf.truncate(at),
+                    2 => {
+                        let bytes = b"{}[]\",:0e";
+                        buf.insert(at, bytes[(next() % bytes.len() as u64) as usize]);
+                    }
+                    _ => {
+                        buf.remove(at);
+                    }
+                }
+            }
+            match decode_frame(&buf) {
+                Ok((msg, used)) => {
+                    assert!(used <= buf.len(), "{buf:?}");
+                    let again = encode_frame(&msg).unwrap();
+                    assert_eq!(decode_frame(&again).unwrap(), (msg, again.len()), "{buf:?}");
+                }
+                Err(FrameError::Incomplete) => assert!(
+                    buf.len() < 4
+                        || buf.len() < 4 + u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize
+                ),
+                Err(FrameError::TooLarge(n)) => assert!(n > MAX_FRAME_BYTES),
+                Err(FrameError::Json(_)) => {}
+            }
+        }
+    }
 }

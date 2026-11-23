@@ -44,7 +44,7 @@ pub enum Trust {
     Session,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     Opened {
         conn: ConnId,
@@ -138,7 +138,10 @@ impl Router {
         match event {
             Event::Opened { conn, trust, adopted_for } => {
                 self.conns.insert(conn, Conn { trust, names: Vec::new(), subs: Vec::new(), waiting: 0 });
-                if let Some((requester, id)) = adopted_for {
+                // Session may have gone while the connection was being set up.
+                if let Some((requester, id)) = adopted_for
+                    && self.conns.contains_key(&requester)
+                {
                     out.push(Action::Deliver {
                         to: vec![requester],
                         msg: Message::ok(id, to_value(AdoptResult { conn })),
@@ -477,6 +480,10 @@ fn valid_name(name: &str) -> bool {
         && name != BROKER
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
 }
+
+#[cfg(test)]
+#[path = "router_fuzz.rs"]
+mod fuzz;
 
 #[cfg(test)]
 mod tests {

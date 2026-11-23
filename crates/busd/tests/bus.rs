@@ -457,3 +457,62 @@ async fn a_huge_timeout_leaves_the_broker_working() {
     assert!(matches!(&err, Err(CallError::Bus(e)) if e.code == code::TIMEOUT), "{err:?}");
     assert_eq!(client.request("svc", "echo", json!(3)).await.unwrap(), json!(3));
 }
+
+/// Many connections sending garbage at once: random bytes, damaged and oversized
+/// frames, messages declaring descriptors they don't carry, frames cut off
+/// mid-way. The broker keeps serving everyone else, and once the garbage
+/// connections close, none of them is left in its tables.
+#[tokio::test]
+async fn garbage_from_many_connections_leaves_the_broker_working() {
+    use tokio::io::AsyncWriteExt;
+    let bus = Bus::start("garbage");
+    let _svc = echo_service(&bus, "svc").await;
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    };
+    let good =
+        protocol::bus::encode_frame(&protocol::Message::request(1, "svc", "echo", json!([1]))).unwrap();
+    let mut raws = Vec::new();
+    for _ in 0..64 {
+        let mut raw = tokio::net::UnixStream::connect(&bus.path).await.unwrap();
+        let mut bytes = Vec::new();
+        for _ in 0..1 + next() % 4 {
+            match next() % 6 {
+                0 => bytes.extend((0..next() % 200).map(|_| next() as u8)),
+                1 => bytes.extend_from_slice(&u32::MAX.to_be_bytes()),
+                2 => {
+                    let lie = protocol::Message::publish("x", Value::Null).with_fds(1 + (next() % 16) as u32);
+                    bytes.extend(protocol::bus::encode_frame(&lie).unwrap());
+                }
+                3 => bytes.extend_from_slice(&good[..(next() as usize % good.len())]),
+                4 => {
+                    let mut damaged = good.clone();
+                    let at = 4 + next() as usize % (damaged.len() - 4);
+                    damaged[at] = next() as u8;
+                    bytes.extend(damaged);
+                }
+                _ => bytes.extend_from_slice(&good),
+            }
+        }
+        // The broker may hang up partway through; that's fine.
+        let _ = raw.write_all(&bytes).await;
+        raws.push(raw);
+    }
+
+    let client = bus.client().await;
+    assert_eq!(client.request("svc", "echo", json!("still here")).await.unwrap(), json!("still here"));
+    drop(raws);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let connections = client.list().await.unwrap().connections;
+        if connections == 2 {
+            break; // the service and this client
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{connections} connections left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
