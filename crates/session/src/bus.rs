@@ -12,7 +12,8 @@
 //! runs several bus programs one after another only gets the bus in the first.
 //!
 //! session is synchronous, so this speaks the bus protocol directly over a
-//! non-blocking socket instead of using the async client.
+//! non-blocking socket instead of using the async client. Requests to `session`
+//! (launching apps) are collected by [`Link::poll`] for the main loop to answer.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -21,7 +22,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use protocol::broker::{AdoptParams, AdoptResult, NameParams, method};
-use protocol::bus::{BROKER, FrameError, Message, decode_frame, encode_frame};
+use protocol::bus::{BROKER, BusError, FrameError, Message, Sender, decode_frame, encode_frame};
 use protocol::unix::send_with_fds;
 use serde::Deserialize;
 use serde_json::Value;
@@ -74,6 +75,15 @@ impl Inherit {
     }
 }
 
+/// A request someone sent to `session`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Request {
+    pub id: u64,
+    pub from: Option<Sender>,
+    pub method: String,
+    pub params: Value,
+}
+
 /// session's end of its connection to the broker.
 pub struct Link {
     stream: UnixStream,
@@ -81,6 +91,8 @@ pub struct Link {
     /// Requests waiting for an answer, described for the log.
     pending: HashMap<u64, String>,
     buf: Vec<u8>,
+    /// Requests to session, waiting for the main loop.
+    incoming: Vec<Request>,
 }
 
 impl Link {
@@ -89,7 +101,8 @@ impl Link {
     pub fn new() -> io::Result<(Link, Inherit)> {
         let (ours, theirs) = UnixStream::pair()?;
         ours.set_nonblocking(true)?;
-        let mut link = Link { stream: ours, next_id: 1, pending: HashMap::new(), buf: Vec::new() };
+        let mut link =
+            Link { stream: ours, next_id: 1, pending: HashMap::new(), buf: Vec::new(), incoming: Vec::new() };
         let claim = to_value(NameParams { name: "session".into() });
         link.send(Message::request(0, BROKER, method::CLAIM, claim), None, "claim session")?;
         Ok((link, Inherit { env: SESSION_FD_ENV, fd: theirs.into() }))
@@ -111,20 +124,40 @@ impl Link {
         Ok(Inherit { env: BUS_FD_ENV, fd: service_end.into() })
     }
 
+    /// Requests to session that arrived since the last call.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.incoming)
+    }
+
+    /// Answer request `id` from [`Link::take_requests`].
+    pub fn respond(&mut self, id: u64, result: Result<Value, BusError>) -> io::Result<()> {
+        let msg = match result {
+            Ok(v) => Message::ok(id, v),
+            Err(e) => Message::failed(id, e),
+        };
+        self.write(&msg, &[])
+    }
+
     fn send(&mut self, mut msg: Message, fd: Option<std::os::fd::BorrowedFd>, what: &str) -> io::Result<()> {
         let id = self.next_id;
         self.next_id += 1;
         if let Message::Request { id: slot, .. } = &mut msg {
             *slot = id;
         }
-        let frame = encode_frame(&msg).map_err(io::Error::other)?;
         let fds: Vec<_> = fd.into_iter().collect();
+        self.write(&msg, &fds)?;
+        self.pending.insert(id, what.to_owned());
+        Ok(())
+    }
+
+    fn write(&mut self, msg: &Message, fds: &[std::os::fd::BorrowedFd]) -> io::Result<()> {
+        let frame = encode_frame(msg).map_err(io::Error::other)?;
         let mut sent = 0;
         // The broker reads these as soon as it starts; the socket buffer holds
         // them until then. Waiting is only for a broker that has stopped reading.
         let deadline = Instant::now() + Duration::from_secs(1);
         while sent < frame.len() {
-            let attach = if sent == 0 { &fds[..] } else { &[] };
+            let attach = if sent == 0 { fds } else { &[] };
             match send_with_fds(self.stream.as_fd(), &frame[sent..], attach) {
                 Ok(n) => sent += n,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
@@ -133,7 +166,6 @@ impl Link {
                 Err(e) => return Err(e),
             }
         }
-        self.pending.insert(id, what.to_owned());
         Ok(())
     }
 
@@ -169,6 +201,10 @@ impl Link {
     }
 
     fn answer(&mut self, msg: Message) {
+        if let Message::Request { id, from, method, params, .. } = msg {
+            self.incoming.push(Request { id, from, method, params });
+            return;
+        }
         let Message::Response { id, ok, error, result, .. } = msg else { return };
         let what = self.pending.remove(&id).unwrap_or_else(|| format!("request {id}"));
         if ok {

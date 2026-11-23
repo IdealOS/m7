@@ -16,6 +16,9 @@ kms = ["dep:drm", "dep:input", "dep:xkbcommon", "dep:libc"]
 [dependencies]
 protocol.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+bus-client.workspace = true
+tokio.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true
 pollster.workspace = true

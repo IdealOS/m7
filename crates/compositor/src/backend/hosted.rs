@@ -1,5 +1,6 @@
 //! Hosted backend: the compositor runs inside a normal window (macOS or a Linux
-//! desktop) through winit. This is the day-to-day development backend.
+//! desktop) through winit. This is the day-to-day development backend. Apps on the
+//! bus open windows in it; the bus thread wakes the event loop with a user event.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,23 +13,30 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::backend::Options;
+use crate::bus::{self, Bridge};
 use crate::demo;
-use crate::input::{self, Input, Seat};
+use crate::desktop::Desktop;
+use crate::input::{self, Input};
 use crate::render::Renderer;
-use crate::scene::{Rgba, Scene};
+use crate::scene::Rgba;
 use crate::stats::FrameTimer;
-use crate::wm::WindowManager;
+
+/// The bus thread queued requests for the frame loop.
+struct Wake;
 
 pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
+    let bridge = bus::connect(move || {
+        let _ = proxy.send_event(Wake);
+    });
     let mut app = App {
         opts,
         gpu: None,
-        scene: Scene::new(),
-        wm: WindowManager::default(),
+        desktop: Desktop::new(0.0, 0.0),
+        bridge,
         timer: FrameTimer::default(),
-        seat: Seat::new(0.0, 0.0),
         modifiers: ModifiersState::empty(),
         next_hud: Instant::now(),
     };
@@ -50,10 +58,9 @@ struct Gpu {
 struct App {
     opts: Options,
     gpu: Option<Gpu>,
-    scene: Scene,
-    wm: WindowManager,
+    desktop: Desktop,
+    bridge: Option<Bridge>,
     timer: FrameTimer,
-    seat: Seat,
     modifiers: ModifiersState,
     next_hud: Instant,
 }
@@ -64,10 +71,14 @@ impl App {
         (gpu.config.width as f32 / scale, gpu.config.height as f32 / scale)
     }
 
-    /// Feed one input to the seat and redraw if the scene changed.
+    /// Feed one input to the desktop, send apps their events, and redraw if the
+    /// scene changed.
     fn input(&mut self, input: Input) {
-        self.seat.handle(input, &mut self.scene, &mut self.wm);
-        if self.scene.is_dirty()
+        let (_, outs) = self.desktop.input(input);
+        if let Some(b) = &self.bridge {
+            b.send(outs);
+        }
+        if self.desktop.scene.is_dirty()
             && let Some(gpu) = &self.gpu
         {
             gpu.window.request_redraw();
@@ -76,7 +87,7 @@ impl App {
 
     fn redraw(&mut self) {
         let Some(gpu) = &mut self.gpu else { return };
-        if !self.scene.is_dirty() && !self.opts.continuous {
+        if !self.desktop.scene.is_dirty() && !self.opts.continuous {
             return; // frame-level damage tracking: nothing changed, draw nothing
         }
         let frame = match gpu.surface.get_current_texture() {
@@ -102,7 +113,7 @@ impl App {
         let started = Instant::now();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let list = self.scene.draw_list();
+        let list = self.desktop.scene.draw_list();
         let stats = gpu.renderer.render(
             &gpu.device,
             &gpu.queue,
@@ -116,7 +127,7 @@ impl App {
         gpu.queue.submit(Some(encoder.finish()));
         gpu.window.pre_present_notify();
         gpu.queue.present(frame);
-        self.scene.clear_dirty();
+        self.desktop.scene.clear_dirty();
         self.timer.record(started.elapsed(), stats.quads, stats.texts);
 
         if self.opts.continuous {
@@ -125,7 +136,19 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<Wake> for App {
+    fn user_event(&mut self, _: &ActiveEventLoop, _: Wake) {
+        let Some(bridge) = &self.bridge else { return };
+        for call in bridge.calls() {
+            bridge.send(self.desktop.call(call));
+        }
+        if self.desktop.scene.is_dirty()
+            && let Some(gpu) = &self.gpu
+        {
+            gpu.window.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
             return;
@@ -143,8 +166,8 @@ impl ApplicationHandler for App {
             gpu.window.scale_factor(),
             gpu.config.format
         );
-        self.scene.apply_all(demo::build(w, h, self.opts.windows));
-        self.seat.set_bounds(w, h);
+        self.desktop.scene.apply_all(demo::build(w, h, self.opts.windows));
+        self.desktop.seat.set_bounds(w, h);
         gpu.window.request_redraw();
         self.gpu = Some(gpu);
     }
@@ -158,8 +181,8 @@ impl ApplicationHandler for App {
                 gpu.config.height = size.height.max(1);
                 gpu.surface.configure(&gpu.device, &gpu.config);
                 let (w, h) = App::logical_size(gpu);
-                self.scene.apply_all(demo::resize(w, h));
-                self.seat.set_bounds(w, h);
+                self.desktop.scene.apply_all(demo::resize(w, h));
+                self.desktop.seat.set_bounds(w, h);
                 gpu.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -197,7 +220,7 @@ impl ApplicationHandler for App {
             if self.opts.continuous {
                 log::info!("{summary}");
             }
-            self.scene.apply(demo::hud(&summary));
+            self.desktop.scene.apply(demo::hud(&summary));
             self.timer.reset_window();
             self.next_hud = now + Duration::from_secs(1);
             if let Some(gpu) = &self.gpu {

@@ -38,3 +38,7 @@ jobs:
       # Type-checks and tests tools/, including that sdk/src/protocol.ts is
       # current with crates/protocol/schema.json (the rust job checks the schema).
       - run: tools/check-tools
+      # Type-checks the SDK and its tests, and runs them against a fake app-host.
+      - run: sdk/check
+      # Bundles the apps the image ships, as tools/build-image does.
+      - run: node tools/build-app.ts apps/*/

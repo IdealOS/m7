@@ -137,6 +137,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-host"
+version = "0.1.0"
+dependencies = [
+ "bus-client",
+ "busd",
+ "compositor",
+ "db",
+ "dbd",
+ "env_logger",
+ "log",
+ "protocol",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "append-only-bytes"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -410,6 +428,7 @@ dependencies = [
 name = "compositor"
 version = "0.1.0"
 dependencies = [
+ "bus-client",
  "bytemuck",
  "drm",
  "env_logger",
@@ -420,7 +439,9 @@ dependencies = [
  "png",
  "pollster",
  "protocol",
+ "serde",
  "serde_json",
+ "tokio",
  "wgpu",
  "winit",
  "xkbcommon",
@@ -2331,6 +2352,7 @@ dependencies = [
 name = "osctl"
 version = "0.1.0"
 dependencies = [
+ "app-host",
  "bus-client",
  "busd",
  "libc",

@@ -1,8 +1,10 @@
 //! The retained scene graph.
 //!
 //! Apps mutate it with [`SceneOp`]s; each frame the renderer asks for a flattened
-//! [`DrawList`]. Phase 0 positions nodes with absolute `x`/`y`/`w`/`h` props in
-//! logical pixels. Real layout (taffy) arrives with the widget set in M5.
+//! [`DrawList`]. Nodes are positioned with `x`/`y`/`w`/`h` props in logical
+//! pixels, except the children of a `vstack` or `hstack`, which the stack lays out
+//! in a row or column (`gap`, `padding`), sizing each from its own `w`/`h` or its
+//! content. That's enough for M4's apps; real layout (taffy) arrives in M5.
 
 use std::collections::HashMap;
 
@@ -98,6 +100,8 @@ pub struct TextItem {
     pub size: f32,
     pub color: Rgba,
     pub bold: bool,
+    /// Centered in `rect` horizontally (button labels), rather than left-aligned.
+    pub center: bool,
     pub rect: Rect,
     pub clip: Rect,
 }
@@ -266,47 +270,179 @@ impl Scene {
         let mut list = DrawList::default();
         for &child in self.top_level() {
             let mut layer = Layer::default();
-            self.flatten(child, 0.0, 0.0, Rect::INFINITE, &mut layer);
+            self.walk(child, 0.0, 0.0, None, Rect::INFINITE, &mut |id, node, rect, clip| {
+                draw(id, node, rect, clip, &mut layer)
+            });
             list.layers.push(layer);
         }
         list
     }
 
-    fn flatten(&self, id: NodeId, ox: f32, oy: f32, clip: Rect, out: &mut Layer) {
+    /// The topmost node in `root` (a root child, such as a window) under (`x`, `y`)
+    /// for which `wanted` is true, by where it's drawn (stack layout and clipping
+    /// count). Pass the topmost window under the point, so covered nodes can't be hit.
+    pub fn hit(&self, root: NodeId, x: f32, y: f32, wanted: impl Fn(NodeId) -> bool) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(root, 0.0, 0.0, None, Rect::INFINITE, &mut |id, _, rect, clip| {
+            if wanted(id) && rect.intersect(&clip).contains(x, y) {
+                found = Some(id);
+            }
+        });
+        found
+    }
+
+    /// Visit `id` and its descendants in paint order with each one's rectangle on
+    /// screen and its clip. `layout` replaces the node's own rectangle when its
+    /// parent is a stack that placed it.
+    fn walk(
+        &self,
+        id: NodeId,
+        ox: f32,
+        oy: f32,
+        layout: Option<Rect>,
+        clip: Rect,
+        visit: &mut dyn FnMut(NodeId, &Node, Rect, Rect),
+    ) {
         let Some(node) = self.nodes.get(&id) else { return };
         let p = &node.props;
         if p.get("hidden").and_then(Value::as_bool) == Some(true) {
             return;
         }
-        let local = rect_of(p);
+        let local = layout.unwrap_or_else(|| rect_of(p));
         let rect = Rect { x: ox + local.x, y: oy + local.y, ..local };
-        match node.kind {
-            NodeKind::Rect => out.quads.push(QuadItem {
-                rect,
-                color: color(p, "color", Rgba::TRANSPARENT),
-                border_color: color(p, "border_color", Rgba::TRANSPARENT),
-                border_width: num(p, "border_width", 0.0),
-                radius: num(p, "radius", 0.0),
-                clip,
-            }),
-            NodeKind::Text | NodeKind::Label => out.texts.push(TextItem {
-                node: id,
-                text: p.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                size: num(p, "size", 14.0),
-                color: color(p, "color", Rgba::BLACK),
-                bold: p.get("weight").and_then(Value::as_str) == Some("bold"),
-                rect,
-                clip,
-            }),
-            _ => {}
-        }
+        visit(id, node, rect, clip);
         // Groups translate their children; with `clip: true` they also clip them.
         let child_clip =
             if p.get("clip").and_then(Value::as_bool) == Some(true) { clip.intersect(&rect) } else { clip };
+        let vertical = match node.kind {
+            NodeKind::Vstack => true,
+            NodeKind::Hstack => false,
+            _ => {
+                for &c in &node.children {
+                    self.walk(c, rect.x, rect.y, None, child_clip, visit);
+                }
+                return;
+            }
+        };
+        let pad = num(p, "padding", 0.0);
+        let gap = num(p, "gap", 0.0);
+        let mut at = pad;
         for &c in &node.children {
-            self.flatten(c, rect.x, rect.y, child_clip, out);
+            let Some(child) = self.nodes.get(&c) else { continue };
+            if child.props.get("hidden").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let (iw, ih) = self.measure(c);
+            // Across the stack, a child fills it unless it says its own size.
+            let placed = if vertical {
+                let w =
+                    explicit(&child.props, "w").unwrap_or(if rect.w > 0.0 { rect.w - 2.0 * pad } else { iw });
+                Rect { x: pad, y: at, w, h: ih }
+            } else {
+                let h =
+                    explicit(&child.props, "h").unwrap_or(if rect.h > 0.0 { rect.h - 2.0 * pad } else { ih });
+                Rect { x: at, y: pad, w: iw, h }
+            };
+            at += if vertical { placed.h } else { placed.w } + gap;
+            self.walk(c, rect.x, rect.y, Some(placed), child_clip, visit);
         }
     }
+
+    /// A node's size from its `w`/`h` props, or from its content: text by an
+    /// estimate of its width (exact shaping happens in the renderer), stacks from
+    /// their children.
+    pub fn measure(&self, id: NodeId) -> (f32, f32) {
+        let Some(node) = self.nodes.get(&id) else { return (0.0, 0.0) };
+        let p = &node.props;
+        let text = |key: &str| p.get(key).and_then(Value::as_str).unwrap_or_default().chars().count() as f32;
+        let size = num(p, "size", 14.0);
+        let (w, h) = match node.kind {
+            NodeKind::Text | NodeKind::Label => (text("text") * size * 0.6 + 2.0, (size * 1.3).ceil()),
+            NodeKind::Button => (text("label") * size * 0.6 + 28.0, 32.0),
+            NodeKind::Vstack | NodeKind::Hstack => {
+                let vertical = node.kind == NodeKind::Vstack;
+                let pad = num(p, "padding", 0.0);
+                let gap = num(p, "gap", 0.0);
+                let kids: Vec<(f32, f32)> = node
+                    .children
+                    .iter()
+                    .filter(|c| {
+                        self.nodes
+                            .get(c)
+                            .is_some_and(|n| n.props.get("hidden").and_then(Value::as_bool) != Some(true))
+                    })
+                    .map(|&c| self.measure(c))
+                    .collect();
+                let gaps = gap * kids.len().saturating_sub(1) as f32;
+                let (along, across): (f32, f32) = if vertical {
+                    (kids.iter().map(|k| k.1).sum(), kids.iter().map(|k| k.0).fold(0.0, f32::max))
+                } else {
+                    (kids.iter().map(|k| k.0).sum(), kids.iter().map(|k| k.1).fold(0.0, f32::max))
+                };
+                let (along, across) = (along + gaps + 2.0 * pad, across + 2.0 * pad);
+                if vertical { (across, along) } else { (along, across) }
+            }
+            _ => (0.0, 0.0),
+        };
+        (explicit(p, "w").unwrap_or(w), explicit(p, "h").unwrap_or(h))
+    }
+}
+
+/// What one node draws.
+fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, out: &mut Layer) {
+    let p = &node.props;
+    let text = |key: &str| p.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    match node.kind {
+        NodeKind::Rect => out.quads.push(QuadItem {
+            rect,
+            color: color(p, "color", Rgba::TRANSPARENT),
+            border_color: color(p, "border_color", Rgba::TRANSPARENT),
+            border_width: num(p, "border_width", 0.0),
+            radius: num(p, "radius", 0.0),
+            clip,
+        }),
+        NodeKind::Text | NodeKind::Label => out.texts.push(TextItem {
+            node: id,
+            text: text("text"),
+            size: num(p, "size", 14.0),
+            color: color(p, "color", Rgba::BLACK),
+            bold: p.get("weight").and_then(Value::as_str) == Some("bold"),
+            center: p.get("align").and_then(Value::as_str) == Some("center"),
+            rect,
+            clip,
+        }),
+        // A button is a rounded box with its label centered; the compositor sets
+        // `pressed` while the pointer holds it down.
+        NodeKind::Button => {
+            let pressed = p.get("pressed").and_then(Value::as_bool) == Some(true);
+            let fill = if pressed { "#c9d2df" } else { "#eef1f6" };
+            out.quads.push(QuadItem {
+                rect,
+                color: color(p, "color", Rgba::parse(fill).expect("valid color")),
+                border_color: Rgba::parse("#aeb8c6").expect("valid color"),
+                border_width: 1.0,
+                radius: num(p, "radius", 6.0),
+                clip,
+            });
+            let size = num(p, "size", 14.0);
+            let line = (size * 1.3).ceil();
+            out.texts.push(TextItem {
+                node: id,
+                text: text("label"),
+                size,
+                color: color(p, "text_color", Rgba::parse("#1f2937").expect("valid color")),
+                bold: false,
+                center: true,
+                rect: Rect { x: rect.x, y: rect.y + ((rect.h - line) / 2.0).max(0.0), w: rect.w, h: line },
+                clip: clip.intersect(&rect),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn explicit(p: &Props, key: &str) -> Option<f32> {
+    p.get(key).and_then(Value::as_f64).map(|v| v as f32)
 }
 
 pub fn num(p: &Props, key: &str, default: f32) -> f32 {

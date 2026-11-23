@@ -20,6 +20,12 @@
 //! broker exits, those services are stopped too (their connections died with it)
 //! and restart as their `restart` setting says.
 //!
+//! Apps aren't in the config: `launch` requests on the bus (from trusted
+//! connections, such as `osctl app install` or `app-host --install` at boot) start
+//! `app-host --app ID` as a service with an `app:ID` connection, restarted like any
+//! `always` service; `stop` ends one and `apps` lists them (see
+//! `protocol::session`). `IDEALOS_APP_HOST` overrides the app-host command.
+//!
 //! On SIGTERM it stops every service (SIGTERM, then SIGKILL after a grace period)
 //! and exits, so init can respawn a fresh session without leaving old services
 //! running. `tools/deploy-to-pi` relies on this.
@@ -40,6 +46,10 @@ mod bus;
 
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+
+use protocol::bus::{BusError, Sender, code};
+use protocol::session::{AppParams, AppsResult, method};
+use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -85,6 +95,124 @@ struct Service {
     started: Instant,
     backoff: Duration,
     next_start: Instant,
+    /// Start again as soon as it exits, without backoff (a relaunched app).
+    relaunch: bool,
+    /// Forget it once it exits (a stopped app).
+    removed: bool,
+}
+
+impl Service {
+    fn new(spec: ServiceSpec, now: Instant) -> Service {
+        Service {
+            spec,
+            child: None,
+            launched: false,
+            started: now,
+            backoff: Duration::ZERO,
+            next_start: now,
+            relaunch: false,
+            removed: false,
+        }
+    }
+}
+
+/// The command that runs one app, before `--app ID`.
+fn app_host_command() -> Vec<String> {
+    if let Ok(cmd) = std::env::var("IDEALOS_APP_HOST") {
+        return cmd.split_whitespace().map(str::to_owned).collect();
+    }
+    // On the device, dev-exec prefers a freshly deployed binary in /opt/idealos.
+    let dev_exec = "/usr/libexec/idealos/dev-exec";
+    if std::path::Path::new(dev_exec).exists() {
+        return vec![dev_exec.into(), "app-host".into()];
+    }
+    vec!["app-host".into()]
+}
+
+/// What a request to `session` should do.
+#[derive(Debug, PartialEq)]
+enum Action {
+    /// Answered already; nothing to start or stop.
+    None,
+    /// Signal this running service's process to exit.
+    Terminate(usize),
+}
+
+/// Apply request `method` with `params` from `from` to the services: add an app
+/// service, mark one to relaunch or stop. Returns the answer and what to do.
+fn apply_request(
+    services: &mut Vec<Service>,
+    from: Option<&Sender>,
+    method: &str,
+    params: Value,
+    app_host: &[String],
+    now: Instant,
+) -> (Result<Value, BusError>, Action) {
+    let refuse = |code: &str, message: String| (Err(BusError { code: code.into(), message }), Action::None);
+    // Apps may not start or stop each other; system services and tools may.
+    if !matches!(from, Some(Sender::Service(_) | Sender::Conn(_))) {
+        return refuse(code::PERMISSION_DENIED, "only system services and tools may manage apps".into());
+    }
+    let find = |services: &[Service], app: &str| {
+        services.iter().position(|s| s.spec.bus == bus::Role::App(app.into()) && !s.removed)
+    };
+    match method {
+        method::APPS => {
+            let running = services
+                .iter()
+                .filter(|s| matches!(s.spec.bus, bus::Role::App(_)) && !s.removed && s.child.is_some())
+                .map(|s| s.spec.name.clone())
+                .collect();
+            (Ok(serde_json::to_value(AppsResult { running }).expect("serializes")), Action::None)
+        }
+        method::LAUNCH | method::STOP => {
+            let Ok(AppParams { app }) = serde_json::from_value::<AppParams>(params) else {
+                return refuse(code::BAD_REQUEST, format!("{method} takes {{\"app\": \"<app id>\"}}"));
+            };
+            if bus::Role::parse(&format!("app:{app}")).is_err() || !valid_app_id(&app) {
+                return refuse(code::BAD_REQUEST, format!("{app:?} is not an app id"));
+            }
+            let found = find(services, &app);
+            match (method, found) {
+                (method::LAUNCH, Some(i)) => {
+                    let svc = &mut services[i];
+                    svc.backoff = Duration::ZERO;
+                    svc.next_start = now;
+                    if svc.child.is_some() {
+                        svc.relaunch = true;
+                        (Ok(Value::Null), Action::Terminate(i))
+                    } else {
+                        (Ok(Value::Null), Action::None)
+                    }
+                }
+                (method::LAUNCH, None) => {
+                    let mut argv = app_host.to_vec();
+                    argv.extend(["--app".into(), app.clone()]);
+                    let spec = ServiceSpec {
+                        name: app.clone(),
+                        restart: Restart::Always,
+                        bus: bus::Role::App(app),
+                        argv,
+                    };
+                    services.push(Service::new(spec, now));
+                    (Ok(Value::Null), Action::None)
+                }
+                (_, Some(i)) => {
+                    services[i].removed = true;
+                    let running = services[i].child.is_some();
+                    (Ok(Value::Null), if running { Action::Terminate(i) } else { Action::None })
+                }
+                (_, None) => refuse("not_found", format!("app {app} isn't running")),
+            }
+        }
+        other => refuse(code::BAD_REQUEST, format!("session has no method {other:?}")),
+    }
+}
+
+/// Reverse-DNS app ids, as the broker checks them.
+fn valid_app_id(id: &str) -> bool {
+    id.split('.').count() >= 2
+        && id.split('.').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
 fn parse_config(text: &str) -> Result<Vec<ServiceSpec>, String> {
@@ -253,17 +381,8 @@ fn main() {
 
     install_sigterm_handler();
     let now = Instant::now();
-    let mut services: Vec<Service> = specs
-        .into_iter()
-        .map(|spec| Service {
-            spec,
-            child: None,
-            launched: false,
-            started: now,
-            backoff: Duration::ZERO,
-            next_start: now,
-        })
-        .collect();
+    let mut services: Vec<Service> = specs.into_iter().map(|spec| Service::new(spec, now)).collect();
+    let app_host = app_host_command();
 
     // session's connection to the broker, while the broker runs.
     let mut link: Option<bus::Link> = None;
@@ -281,6 +400,30 @@ fn main() {
         if link.as_mut().is_some_and(|l| !l.poll()) {
             link = None;
         }
+        if let Some(l) = link.as_mut() {
+            for req in l.take_requests() {
+                let (answer, action) = apply_request(
+                    &mut services,
+                    req.from.as_ref(),
+                    &req.method,
+                    req.params,
+                    &app_host,
+                    Instant::now(),
+                );
+                if let Action::Terminate(i) = action
+                    && let Some(child) = &services[i].child
+                {
+                    // SAFETY: plain kill(2) on a pid we spawned and have not yet reaped.
+                    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+                }
+                if let Err(e) = &answer {
+                    say!("refused {} from {:?}: {}", req.method, req.from, e.message);
+                }
+                if let Err(e) = l.respond(req.id, answer) {
+                    say!("cannot answer {}: {e}", req.method);
+                }
+            }
+        }
         let mut broker_gone = false;
         for svc in &mut services {
             if let Some(child) = &mut svc.child {
@@ -289,7 +432,10 @@ fn main() {
                         let ran_for = svc.started.elapsed();
                         say!("{} exited ({status}) after {ran_for:?}", svc.spec.name);
                         svc.child = None;
-                        if svc.spec.restart == Restart::Always {
+                        if svc.relaunch {
+                            svc.relaunch = false;
+                            svc.next_start = Instant::now();
+                        } else if svc.spec.restart == Restart::Always && !svc.removed {
                             svc.schedule_restart(ran_for);
                         }
                         if svc.spec.bus == bus::Role::Broker {
@@ -300,6 +446,7 @@ fn main() {
                     Err(e) => say!("wait {}: {e}", svc.spec.name),
                 }
             } else if Instant::now() >= svc.next_start
+                && !svc.removed
                 && (svc.spec.restart == Restart::Always || !svc.launched)
                 // A bus service waits while the broker is down, rather than start
                 // without the connection it needs.
@@ -313,6 +460,7 @@ fn main() {
             link = None;
             stop_bus_services(&mut services);
         }
+        services.retain(|s| !(s.removed && s.child.is_none()));
         std::thread::sleep(Duration::from_millis(200));
     }
 }
@@ -355,6 +503,63 @@ mod tests {
         assert!(parse_config("shell sometimes /bin/sh").is_err());
         assert!(parse_config("shell always").is_err());
         assert!(parse_config("a always x\na always y").is_err());
+    }
+
+    fn tool() -> Option<Sender> {
+        Some(Sender::Conn(4))
+    }
+
+    #[test]
+    fn launch_adds_an_app_service_and_relaunch_and_stop_mark_it() {
+        let now = Instant::now();
+        let mut services = Vec::new();
+        let host = vec!["app-host".to_string()];
+        let launch = serde_json::json!({"app": "org.idealos.notes"});
+        let (r, a) = apply_request(&mut services, tool().as_ref(), "launch", launch.clone(), &host, now);
+        assert_eq!((r, a), (Ok(Value::Null), Action::None));
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].spec.argv, ["app-host", "--app", "org.idealos.notes"]);
+        assert_eq!(services[0].spec.bus, bus::Role::App("org.idealos.notes".into()));
+        assert_eq!(services[0].spec.restart, Restart::Always);
+
+        // Launching again while it runs restarts it at once.
+        services[0].child = Some(Command::new("true").spawn().unwrap());
+        let (_, a) = apply_request(&mut services, tool().as_ref(), "launch", launch.clone(), &host, now);
+        assert_eq!(a, Action::Terminate(0));
+        assert!(services[0].relaunch);
+        assert_eq!(services.len(), 1, "no second copy");
+
+        let (r, _) = apply_request(&mut services, tool().as_ref(), "apps", Value::Null, &host, now);
+        assert_eq!(r.unwrap(), serde_json::json!({"running": ["org.idealos.notes"]}));
+
+        let (_, a) = apply_request(&mut services, tool().as_ref(), "stop", launch.clone(), &host, now);
+        assert_eq!(a, Action::Terminate(0));
+        assert!(services[0].removed);
+        let (r, _) = apply_request(&mut services, tool().as_ref(), "stop", launch, &host, now);
+        assert_eq!(r.unwrap_err().code, "not_found");
+        let _ = services[0].child.take().unwrap().wait();
+    }
+
+    #[test]
+    fn apps_cannot_manage_apps_and_bad_requests_are_refused() {
+        let now = Instant::now();
+        let mut services = Vec::new();
+        let host = vec!["app-host".to_string()];
+        let app = Some(Sender::App { app: "org.x.evil".into(), conn: 9 });
+        let launch = serde_json::json!({"app": "org.idealos.notes"});
+        let (r, _) = apply_request(&mut services, app.as_ref(), "launch", launch, &host, now);
+        assert_eq!(r.unwrap_err().code, code::PERMISSION_DENIED);
+        let (r, _) = apply_request(&mut services, None, "apps", Value::Null, &host, now);
+        assert_eq!(r.unwrap_err().code, code::PERMISSION_DENIED);
+        for bad in
+            [serde_json::json!({}), serde_json::json!({"app": "notes"}), serde_json::json!({"app": "a b.c"})]
+        {
+            let (r, _) = apply_request(&mut services, tool().as_ref(), "launch", bad.clone(), &host, now);
+            assert_eq!(r.unwrap_err().code, code::BAD_REQUEST, "{bad}");
+        }
+        let (r, _) = apply_request(&mut services, tool().as_ref(), "reboot", Value::Null, &host, now);
+        assert_eq!(r.unwrap_err().code, code::BAD_REQUEST);
+        assert!(services.is_empty());
     }
 
     #[test]

@@ -30,9 +30,15 @@ make screenshot    # render the demo offscreen to docs/screenshots/phase0.png
 make test          # all Rust tests (includes a real GPU render-and-readback test)
 make lint          # rustfmt, clippy, and the device-only compositor build
 make lint-device   # clippy on the Linux-only KMS code, in the build VM
-make sdk           # type-check the TypeScript SDK
+make sdk           # type-check the TypeScript SDK and run its tests
+make apps          # bundle the apps in apps/ with esbuild (via npx)
 make tools-check   # type-check and unit-test the TypeScript tools in tools/
 ```
+
+Apps on the Mac, in four terminals: `make bus`, `make db`, `make hosted`, then
+`cargo build -p app-host && cargo run -p osctl -- app install --watch apps/notes`.
+With no session on the bus, `osctl` runs the app itself, and `--watch` rebuilds
+and restarts it whenever the app or the SDK changes.
 
 Device images need two extra tools: `brew install lima qemu`.
 
@@ -69,11 +75,16 @@ on the device in `/data/reports`.
 crates/protocol     bus envelope and scene-graph ops (shared by Rust and, via sdk/, TypeScript)
 crates/busd         message bus broker: routing, pub/sub, sender identity, permission hook
 crates/bus-client   async Rust client for the bus
-crates/osctl        command-line tool: osctl bus list|call|pub|sub|tap|echo|bench
+crates/osctl        command-line tool: osctl bus ..., db ..., app ...
+crates/db           the document store: Loro, SQLite, queries, live queries, links, blobs, schemas
+crates/dbd          the db service on the bus
+crates/app-host     one app's process: its JavaScript in QuickJS, with the bus
 crates/compositor   scene graph, wgpu renderer, window manager, hosted + KMS backends
 crates/session      first process after init: starts and supervises services
 spikes/             db-bench (C), js-bench (D), kms-probe (A/B): benchmarks to rerun on the Pi
-sdk/                @idealos/sdk (wire types today; bus, db, signals and widgets in M4)
+sdk/                @idealos/sdk: bus, database and live queries, signals, windows and widgets
+apps/               the apps that ship with the system (counter, notes)
+schemas/            JSON Schemas for the system document types
 image/              Buildroot external tree: defconfigs, kernel fragments, rootfs overlay
 tools/              build VM, image build, QEMU, SD card, deploy scripts
 docs/               feature list, implementation plan, screenshots
@@ -130,6 +141,19 @@ docs/               feature list, implementation plan, screenshots
 | `osctl db` | `create`, `get`, `update`, `delete`, `query`, `search`, `history`, `at`, `diff`, `changes`, `undo`, `watch` (prints the parts as JSON lines; `--count N` stops after N), `link`, `links`, `schemas`, `snapshot`, `snapshots`, `restore`, `put-blob`, `get-blob`, `blob-info`. |
 | Benchmark (`make db-bench`) | `store-bench` fills a fresh store with 10,000 emails (~2 KB bodies, each linked to a Contact) and times creates, updates, old versions, undo, live query refreshes, queries through the filter language and schema indexes, link queries, search, snapshots and blobs, checking the copies agree. `make pi-report` runs it on the device. Apple M3 Mac: create 0.44 ms and update 0.39 ms p50; inbox query 0.6 ms; all 825 mail from one sender 13 ms; rare-word search 0.3 ms; snapshot of the 96 MB database 0.25 s; blobs at 150 MB/s. The QEMU image on the same Mac (`make smoke-report`, which runs it through the hardware report): create 0.25 ms, update 0.28 ms, live refresh after a write 1.1 ms, all mail from one sender 8.7 ms, snapshot 0.1 s. SQLite's planner needs statistics to pick the right expression index (one query went from 38 ms to 13 ms), so the store runs `PRAGMA optimize` when it opens and dbd hourly. |
 | Not done | The Pi benchmark (no Pi yet). Strings are plain values, not collaborative text, yet. |
+
+### App runtime (M4)
+
+| Item | State |
+| --- | --- |
+| Compositor on the bus | **Works** hosted and in the QEMU image. It claims `compositor` on a bus thread that hands requests to the frame loop and wakes it (a winit user event hosted, a socket pair in the KMS loop's `poll`), so rendering never waits on I/O. `open_window` is a streamed request: its first part names the window, later parts are the window's events, and the window lasts exactly as long as the request, so an app that exits or crashes leaves nothing behind. Each window gets a frame the compositor draws (title, close button) and a content area. Apps name nodes with their own ids, translated per window, so an app reaches only its own nodes; a commit is checked whole before any of it applies, only the window's opener may commit to it, and a window holds at most 20,000 nodes. |
+| Widgets so far | `vstack` and `hstack` lay out their children (`gap`, `padding`, sizes from props or content); `label`; `button`, drawn pressed while held, with clicks sent to the app; `rect`, `text`, `group`. Presses go to the topmost window only. New windows open side by side, then in rows. Real layout (taffy), focus and the rest of the widget set are M5. |
+| `app-host` | One process per app: QuickJS (rquickjs) runs the app's bundle as an ES module after a prelude that provides `console`, timers and `__idealos` (requests, streamed requests and cancels on the bus). Everything runs on one thread; JavaScript and Rust exchange only ids and JSON. It ends when the app exits or has nothing left to wait for; errors in callbacks are logged and the app carries on. 256 MB heap limit. |
+| `@idealos/sdk` | `request`/`stream`; `db` (`query`, `get`, `put`, `update`, `remove`, `search`, and `live`, a signal that follows `watch`); SolidJS-style `signal`, `effect`, `memo`, `batch`, `root`; `openWindow`, `vstack`, `hstack`, `label`, `button`, `rect`, and `each` for keyed lists. UI is built once; function-valued props are reactive, only changed values are sent, and ops go out as one commit per microtask. Tested against a fake app-host (`sdk/check`). |
+| Apps | `apps/counter` and `apps/notes` (a live list of Notes that can add one). `tools/build-app.ts` bundles an app with esbuild (via npx, pinned to 0.28.2, so nothing is installed in the repo) into `dist/app.js` and `dist/manifest.json`. |
+| Installing and launching | An installed app is an `App` document whose bundle is a blob. `osctl app install DIR [--watch]` builds, installs and asks session to `launch` it; session runs `app-host --app ID` with an `app:ID` bus connection and restarts it like a service (`stop` and `apps` too; only trusted connections may call them). The image ships the apps under `/usr/share/idealos/apps`; `app-host --install` puts them in the database at boot and launches the autostart ones. |
+| Tests | An end-to-end test runs a real broker, dbd, the compositor's bus bridge and an app in app-host, clicks the app's button through the compositor's input path and reads the result off the scene. Visual check: `compositor --screenshot out.png --serve-for N --click LABEL` serves app windows on the bus, presses buttons and renders. The QEMU smoke test checks that session runs both apps and that they opened their windows under their own app ids. |
+| Not done | Memory per app process on the Pi (no Pi yet). App bundles aren't signed, and apps have no permissions or sandbox yet (M6). |
 
 ### Spikes
 

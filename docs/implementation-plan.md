@@ -270,7 +270,7 @@ Goal: a TypeScript app runs in its own process and shows a live database query i
 - [ ] `app-host` with rquickjs: ES modules, timers, and an event loop that includes the bus socket.
 - [ ] `@idealos/sdk`: bus client, database API (`query`, `live`, `search`, `put`), permissions, UI.
 - [ ] Signals library: `signal`, `effect`, `memo` in the SolidJS style. UI functions create nodes once, and effects emit `set` ops. Ops are batched into one commit per microtask.
-- [ ] Packaging: esbuild bundles an app; the bundle is a blob and the app is an `App` document holding its manifest.
+- [ ] Packaging: esbuild bundles an app; the bundle is a blob and the app is an `App` document holding its manifest. (Built: `tools/build-app.ts`, with esbuild run through npx.)
 - [ ] `session` starts one `app-host` per app with that app's bus connection.
 - [ ] Compositor: window creation, ownership by connection, and a commit handler for the basic node types (stacks, label, button).
 - [ ] `osctl app install --watch` for hot reload.

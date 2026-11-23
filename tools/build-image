@@ -22,6 +22,9 @@ if [ ! -f "$KEY" ]; then
 fi
 cp "$KEY.pub" "$REPO/image/board/common/dev-key.pub"
 
+# Bundle the apps here: the VM has no Node. The image installs apps/*/dist.
+node "$REPO/tools/build-app.ts" "$REPO"/apps/*/
+
 vm_require
 vm_sync
 # Source downloads live outside the Buildroot tree so they survive version bumps.

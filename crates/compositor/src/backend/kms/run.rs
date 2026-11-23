@@ -6,9 +6,13 @@
 //! input is read before drawing, so a fast drag costs one frame, not one per event.
 //! A stop signal ends the loop normally, so the console, cursor and buffers are put
 //! back as their owners drop.
+//!
+//! Requests from apps arrive on the bus thread, which writes a byte to a socket
+//! pair that's in the same `poll()`, so they're handled as promptly as input.
 
-use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use super::console::{self, Console};
@@ -16,11 +20,12 @@ use super::display::{Display, RENDER_FORMAT};
 use super::input::Devices;
 use super::signals::Signals;
 use crate::backend::Options;
+use crate::bus;
+use crate::desktop::Desktop;
 use crate::headless::Offscreen;
 use crate::input::{Effect, Seat};
 use crate::scene::{Rgba, Scene};
 use crate::stats::FrameTimer;
-use crate::wm::WindowManager;
 use crate::{cursor, demo};
 
 /// Scanout buffers. Three let a frame render while the previous flip is pending.
@@ -68,11 +73,18 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         d.read((w, h), &mut inputs)?; // logs the devices found at startup
     }
 
+    // After Signals::block, so the bus thread inherits the blocked mask.
+    let (mut woken, wake) = UnixStream::pair()?;
+    woken.set_nonblocking(true)?;
+    wake.set_nonblocking(true)?;
+    let bridge = bus::connect(move || {
+        // A full socket buffer already means "wake up"; nothing more to say.
+        let _ = (&wake).write(&[1]);
+    });
+
     let background = Rgba::parse(demo::BACKGROUND).expect("valid color");
-    let mut scene = Scene::new();
-    scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
-    let mut wm = WindowManager::default();
-    let mut seat = Seat::new(w as f32, h as f32);
+    let mut desktop = Desktop::new(w as f32, h as f32);
+    desktop.scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
     let arrow = cursor::arrow();
     let mut timer = FrameTimer::default();
     let mut next_hud = Instant::now();
@@ -88,40 +100,41 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
             if opts.continuous {
                 log::info!("{summary}");
             }
-            scene.apply(demo::hud(&summary));
+            desktop.scene.apply(demo::hud(&summary));
             timer.reset_window();
             next_hud = now + Duration::from_secs(1);
         }
 
-        if scene.is_dirty() || opts.continuous {
+        if desktop.scene.is_dirty() || opts.continuous {
             let started = Instant::now();
             rows.clear();
-            let stats = target.render(&scene.draw_list(), 1.0, background, |r| rows.extend_from_slice(r))?;
+            let stats =
+                target.render(&desktop.scene.draw_list(), 1.0, background, |r| rows.extend_from_slice(r))?;
             display.copy_into_back(&rows)?;
             // Render, readback and copy: the CPU-side cost of a frame on this path.
             timer.record(started.elapsed(), stats.quads, stats.texts);
             display.flip()?;
-            scene.clear_dirty();
+            desktop.scene.clear_dirty();
             if first {
                 // tools/qemu-smoke.ts waits for this line before capturing the display.
                 log::info!("kms: first frame on screen");
                 first = false;
                 // The cursor needs the CRTC that the first flip set up.
                 match display.show_cursor(&arrow) {
-                    Ok(()) => display.move_cursor(seat.cursor().0, seat.cursor().1)?,
+                    Ok(()) => display.move_cursor(desktop.seat.cursor().0, desktop.seat.cursor().1)?,
                     Err(e) => log::warn!("kms: {e}; the pointer will be invisible"),
                 }
             }
         }
 
         // Sleep until input, a page flip or the readout, unless there is more to draw.
-        let timeout = if scene.is_dirty() || opts.continuous {
+        let timeout = if desktop.scene.is_dirty() || opts.continuous {
             Duration::ZERO
         } else {
             next_hud.saturating_duration_since(Instant::now())
         };
         let flip_fd = display.flip_pending().then(|| display.fd());
-        let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, signals.fd(), timeout)?;
+        let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, signals.fd(), woken.as_fd(), timeout)?;
         if ready.stop
             && let Some(name) = signals.take()
         {
@@ -136,8 +149,20 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         {
             d.read((w, h), &mut inputs)?;
             for input in inputs.drain(..) {
-                let effect = seat.handle(input, &mut scene, &mut wm);
-                report(&effect, &scene, &display, &seat)?;
+                let (effect, outs) = desktop.input(input);
+                if let Some(b) = &bridge {
+                    b.send(outs);
+                }
+                report(&effect, &desktop.scene, &display, &desktop.seat)?;
+            }
+        }
+        if ready.wake {
+            let mut sink = [0u8; 256];
+            while matches!(woken.read(&mut sink), Ok(n) if n > 0) {}
+            if let Some(b) = &bridge {
+                for call in b.calls() {
+                    b.send(desktop.call(call));
+                }
             }
         }
     }
@@ -164,14 +189,16 @@ struct Ready {
     input: bool,
     display: bool,
     stop: bool,
+    wake: bool,
 }
 
-/// `poll()` the input and DRM fds (either may be absent) and the stop-signal fd for
-/// up to `timeout`.
+/// `poll()` the input and DRM fds (either may be absent), the stop-signal fd and
+/// the bus thread's wake-up socket for up to `timeout`.
 fn wait(
     input: Option<BorrowedFd>,
     display: Option<BorrowedFd>,
     stop: BorrowedFd,
+    wake: BorrowedFd,
     timeout: Duration,
 ) -> Result<Ready, String> {
     // poll() skips entries with a negative fd.
@@ -180,7 +207,7 @@ fn wait(
         events: libc::POLLIN,
         revents: 0,
     };
-    let mut fds = [entry(input), entry(display), entry(Some(stop))];
+    let mut fds = [entry(input), entry(display), entry(Some(stop)), entry(Some(wake))];
     // Round up, so a wait shorter than a millisecond doesn't spin.
     let ms = timeout.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
     // SAFETY: `fds` is a valid array of pollfd structs for the whole call.
@@ -188,10 +215,15 @@ fn wait(
     if n < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::Interrupted {
-            return Ok(Ready { input: false, display: false, stop: false });
+            return Ok(Ready { input: false, display: false, stop: false, wake: false });
         }
         return Err(format!("poll: {e}"));
     }
     let readable = |p: &libc::pollfd| p.revents & libc::POLLIN != 0;
-    Ok(Ready { input: readable(&fds[0]), display: readable(&fds[1]), stop: readable(&fds[2]) })
+    Ok(Ready {
+        input: readable(&fds[0]),
+        display: readable(&fds[1]),
+        stop: readable(&fds[2]),
+        wake: readable(&fds[3]),
+    })
 }

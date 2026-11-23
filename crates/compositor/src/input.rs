@@ -75,6 +75,11 @@ impl Seat {
         self.cursor
     }
 
+    /// The screen size the cursor is kept inside.
+    pub fn bounds(&self) -> (f32, f32) {
+        self.bounds
+    }
+
     /// The screen changed size; pull the cursor back inside it.
     pub fn set_bounds(&mut self, w: f32, h: f32) {
         self.bounds = (w, h);

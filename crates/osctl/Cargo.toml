@@ -11,6 +11,7 @@ bus-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+app-host = { path = "../app-host" }
 
 [dev-dependencies]
 busd = { path = "../busd" }

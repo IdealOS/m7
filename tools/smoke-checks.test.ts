@@ -42,6 +42,9 @@ const GOOD = [
   "SMOKE db-links 1",
   "SMOKE db-blob smoke-blob 1",
   "SMOKE db-schema 1",
+  "SMOKE apps-running 2",
+  '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
+  '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.notes", conn: 10 }: "Notes"',
   "SMOKE end",
 ].join("\n");
 
@@ -276,7 +279,9 @@ test("a missing database service is reported", () => {
     .replace("SMOKE db-snapshot /data/db/snapshots/snapshot-1795000000000-12.db", "SMOKE db-snapshot osctl: no_such_service: no service named db")
     .replace("SMOKE db-links 1", "SMOKE db-links 0")
     .replace("SMOKE db-blob smoke-blob 1", "SMOKE db-blob osctl: no_such_service: no service named db 0")
-    .replace("SMOKE db-schema 1", "SMOKE db-schema 0");
+    .replace("SMOKE db-schema 1", "SMOKE db-schema 0")
+    .replace("SMOKE apps-running 2", "SMOKE apps-running 0")
+    .replace(/.*apps: opened a window.*\n/g, "");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, [
     "dbd keeps the database on /data",
@@ -287,6 +292,8 @@ test("a missing database service is reported", () => {
     "a link was followed back from its target",
     "a blob went in from a file and came back through a descriptor",
     "the Contact schema refused a contact without a name",
+    "session runs the two bundled apps",
+    "the apps opened their windows under their own ids",
   ]);
 });
 

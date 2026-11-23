@@ -1,8 +1,15 @@
 //! Scene-graph ops: how an app builds and updates its window's UI.
 //!
-//! Apps allocate node ids themselves (per connection) so they never wait on the
+//! Apps allocate node ids themselves (per window) so they never wait on the
 //! compositor. A commit carries a batch of ops that the compositor applies
 //! atomically before the next frame.
+//!
+//! An app opens a window with `open_window`, sent as a streamed request: the first
+//! part says which window it got, later parts are the window's events (clicks on
+//! nodes it listens to, the close button), and the window lasts as long as the
+//! request. Cancelling it, or the app's connection closing, removes the window, so
+//! nothing is left behind by an app that crashes. In a window's commits, node 1 is
+//! the window's content area; every other id is the app's own, created by `create`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -62,6 +69,53 @@ pub enum SceneOp {
         id: NodeId,
         events: Vec<String>,
     },
+}
+
+/// The service name the compositor claims.
+pub const SERVICE: &str = "compositor";
+
+/// The compositor's methods.
+///
+/// | method        | params               | result |
+/// |---------------|----------------------|--------|
+/// | `open_window` | [`OpenWindowParams`] | streamed [`WindowEvent`]s |
+/// | `commit`      | [`Commit`]           | null   |
+pub mod method {
+    pub const OPEN_WINDOW: &str = "open_window";
+    pub const COMMIT: &str = "commit";
+}
+
+/// The node id of a window's content area in that window's commits.
+pub const CONTENT: NodeId = 1;
+
+/// Most nodes one window may hold, so a runaway app can't exhaust the compositor.
+pub const MAX_WINDOW_NODES: usize = 20_000;
+
+/// Params of `open_window`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OpenWindowParams {
+    pub title: String,
+    /// Size of the content area in logical pixels (default 360 by 240).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+/// A part of `open_window`'s streamed answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum WindowEvent {
+    /// The first part: the window's id, for commits, and its content size.
+    Opened { window: u64, width: u32, height: u32 },
+    /// Something happened to node `node` (an id from the app's commits) that the
+    /// app listens for, such as `click`.
+    Event { node: NodeId, event: String },
+    /// The user asked to close the window. It stays until the app cancels the
+    /// request (or answers it).
+    Close,
 }
 
 /// Params of a `compositor.commit` request.

@@ -1,0 +1,24 @@
+[package]
+name = "app-host"
+description = "Runs one app: its JavaScript bundle in QuickJS, with the bus."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+bus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+log.workspace = true
+env_logger.workspace = true
+rquickjs.workspace = true
+
+[dev-dependencies]
+busd = { path = "../busd" }
+dbd = { path = "../dbd" }
+db = { path = "../db" }
+compositor = { path = "../compositor", default-features = false }

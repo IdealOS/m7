@@ -12,6 +12,9 @@
  */
 export const BROKER = "bus";
 
+/** The name the compositor claims. */
+export const COMPOSITOR_SERVICE = "compositor";
+
 /** The name the database service claims. */
 export const DB_SERVICE = "db";
 
@@ -60,8 +63,17 @@ export const MAX_TIMEOUT_MS = 3600000;
 /** Most live queries (`watch`) the database service keeps open at once, across every caller. */
 export const MAX_WATCHES = 4096;
 
+/** Most nodes one window may hold. */
+export const MAX_WINDOW_NODES = 20000;
+
+/** The name session claims. */
+export const SESSION_SERVICE = "session";
+
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
+
+/** The node id of a window's content area in that window's commits. */
+export const WINDOW_CONTENT = 1;
 
 /** An app's connection: its messages are stamped with this reverse-DNS app id. */
 export type AdoptApp = { app: string };
@@ -77,6 +89,15 @@ export type AdoptResult = { conn: number };
 
 /** A system service's connection: it may claim names and tap the bus. */
 export type AdoptSystem = { trust: SystemTrust };
+
+/** Params of `launch` and `stop`. */
+export type AppParams = {
+  /** The app id, such as `org.idealos.notes`. */
+  app: string;
+};
+
+/** Result of `apps`: the apps session is running. */
+export type AppsResult = { running: string[] };
 
 /** Params of `at`: document `id` as it was just after change set `change_set`. */
 export type AtParams = { id: string; change_set: number };
@@ -296,6 +317,14 @@ export type NameParams = {
  */
 export type NodeKind = "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "label" | "button";
 
+/** Params of `open_window`. */
+export type OpenWindowParams = {
+  title: string;
+  height?: number | null;
+  /** Size of the content area in logical pixels (default 360 by 240). */
+  width?: number | null;
+};
+
 /** A sort key: a field path and a direction, written `["date", "desc"]`. */
 export type OrderBy = [string, Direction];
 
@@ -448,3 +477,18 @@ export type WatchEvent =
      */
     order?: string[] | null;
   };
+
+/** A part of `open_window`'s streamed answer. */
+export type WindowEvent =
+  /** The first part: the window's id, for commits, and its content size. */
+  | { kind: "opened"; window: number; width: number; height: number }
+  /**
+   * Something happened to node `node` (an id from the app's commits) that the
+   * app listens for, such as `click`.
+   */
+  | { kind: "event"; node: number; event: string }
+  /**
+   * The user asked to close the window. It stays until the app cancels the
+   * request (or answers it).
+   */
+  | { kind: "close" };

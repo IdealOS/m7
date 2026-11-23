@@ -36,7 +36,7 @@ struct QuadInstance {
 /// A shaped text buffer, reused across frames until its inputs change.
 struct CachedText {
     buffer: Buffer,
-    key: (String, u32, u32, bool),
+    key: (String, u32, u32, bool, bool),
     used: bool,
 }
 
@@ -309,7 +309,7 @@ impl Renderer {
     /// only reshaped when the string, size, width or weight changes. Shaping is in
     /// logical pixels; glyphon applies the display scale at prepare time.
     fn shape(&mut self, t: &TextItem) {
-        let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold);
+        let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold, t.center);
         if let Some(c) = self.texts.get_mut(&t.node)
             && c.key == key
         {
@@ -323,7 +323,8 @@ impl Renderer {
         if t.bold {
             attrs = attrs.weight(Weight::SEMIBOLD);
         }
-        buffer.set_text(&t.text, &attrs, Shaping::Advanced, None);
+        let align = t.center.then_some(glyphon::cosmic_text::Align::Center);
+        buffer.set_text(&t.text, &attrs, Shaping::Advanced, align);
         buffer.shape_until_scroll(&mut self.font_system, false);
         self.texts.insert(t.node, CachedText { buffer, key, used: true });
     }

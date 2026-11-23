@@ -5,3 +5,4 @@ node_modules/
 .DS_Store
 # Public half of image/output/dev-key, made by tools/build-image
 /image/board/common/dev-key.pub
+/apps/*/dist/

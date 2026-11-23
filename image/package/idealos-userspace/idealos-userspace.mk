@@ -20,9 +20,9 @@ IDEALOS_USERSPACE_CARGO_ENV = PKG_CONFIG_ALLOW_CROSS=1
 # backend. `session`, `busd` and `osctl` have no features. kms-probe, db-bench and
 # js-bench (Spikes A/B, C and D) and store-bench (the db crate's benchmark) are dev
 # tools that hw-report runs to measure new hardware.
-IDEALOS_USERSPACE_BINS = session busd dbd osctl compositor kms-probe db-bench js-bench store-bench
+IDEALOS_USERSPACE_BINS = session busd dbd osctl app-host compositor kms-probe db-bench js-bench store-bench
 IDEALOS_USERSPACE_CARGO_BUILD_OPTS = \
-	-p session -p busd -p dbd -p osctl -p db \
+	-p session -p busd -p dbd -p osctl -p db -p app-host \
 	-p compositor --no-default-features --features kms \
 	-p kms-probe -p db-bench -p js-bench
 
@@ -37,11 +37,20 @@ define IDEALOS_USERSPACE_VENDOR_CRATES
 endef
 IDEALOS_USERSPACE_PRE_BUILD_HOOKS += IDEALOS_USERSPACE_VENDOR_CRATES
 
+# The apps that ship with the system, bundled on the host before the build
+# (tools/build-image runs tools/build-app.ts; the VM has no Node). At boot,
+# `app-host --install` puts them in the database and launches the autostart ones.
 define IDEALOS_USERSPACE_INSTALL_TARGET_CMDS
 	$(foreach bin,$(IDEALOS_USERSPACE_BINS),
 		$(INSTALL) -D -m 0755 $(@D)/target/$(RUSTC_TARGET_NAME)/release/$(bin) \
 			$(TARGET_DIR)/usr/bin/$(bin)
 	)
+	for d in $(@D)/apps/*/dist; do \
+		[ -f $$d/manifest.json ] && [ -f $$d/app.js ] || continue; \
+		name=$$(basename $$(dirname $$d)); \
+		$(INSTALL) -D -m 0644 $$d/app.js $(TARGET_DIR)/usr/share/idealos/apps/$$name/app.js; \
+		$(INSTALL) -D -m 0644 $$d/manifest.json $(TARGET_DIR)/usr/share/idealos/apps/$$name/manifest.json; \
+	done
 endef
 
 $(eval $(cargo-package))

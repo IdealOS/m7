@@ -49,6 +49,17 @@ pub enum Command {
     PutBlob {
         file: std::path::PathBuf,
     },
+    /// Build if needed, install and launch the app in `dir`; with `watch`, again on every change.
+    AppInstall {
+        dir: std::path::PathBuf,
+        watch: bool,
+    },
+    AppList,
+    /// `launch` or `stop` an app through session.
+    AppControl {
+        method: &'static str,
+        id: String,
+    },
     /// Write a blob to a file, or standard output.
     GetBlob {
         hash: String,
@@ -120,6 +131,9 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
             echo(bus).await;
             Err("the bus closed the connection".into())
         }
+        Command::AppInstall { dir, watch } => crate::apps::install(bus, &dir, watch, out).await,
+        Command::AppList => crate::apps::list(bus, out).await,
+        Command::AppControl { method, id } => crate::apps::control(bus, method, &id).await,
         Command::PutBlob { file } => {
             let f = std::fs::File::open(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let reply = bus

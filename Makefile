@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk protocol tools-check
+.PHONY: hosted bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk apps app-host protocol tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -49,8 +49,14 @@ protocol:          ## Regenerate crates/protocol/schema.json and sdk/src/protoco
 	cargo run -q -p protocol-schema > crates/protocol/schema.json
 	node tools/gen-protocol.ts
 
-sdk:               ## Type-check the TypeScript SDK
-	cd sdk && npx --yes -p typescript@5.9 tsc --noEmit -p .
+sdk:               ## Type-check the TypeScript SDK and its tests, and run them
+	sdk/check
+
+apps:              ## Bundle every app in apps/ (dist/app.js and dist/manifest.json)
+	node tools/build-app.ts apps/*/
+
+app-host:          ## Build app-host, which session (or osctl app install) runs each app in
+	cargo build -p app-host
 
 tools-check:       ## Type-check and unit-test the TypeScript tools in tools/
 	tools/check-tools

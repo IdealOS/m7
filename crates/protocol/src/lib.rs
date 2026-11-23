@@ -9,7 +9,8 @@ pub mod broker;
 pub mod bus;
 pub mod db;
 pub mod scene;
+pub mod session;
 pub mod unix;
 
 pub use bus::{BROKER, BusError, Message, Sender};
-pub use scene::{Commit, NodeId, NodeKind, Props, SceneOp};
+pub use scene::{Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, WindowEvent};

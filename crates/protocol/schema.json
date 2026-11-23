@@ -52,6 +52,34 @@
       ],
       "type": "object"
     },
+    "AppParams": {
+      "description": "Params of `launch` and `stop`.",
+      "properties": {
+        "app": {
+          "description": "The app id, such as `org.idealos.notes`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app"
+      ],
+      "type": "object"
+    },
+    "AppsResult": {
+      "description": "Result of `apps`: the apps session is running.",
+      "properties": {
+        "running": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "running"
+      ],
+      "type": "object"
+    },
     "AtParams": {
       "description": "Params of `at`: document `id` as it was just after change set `change_set`.",
       "properties": {
@@ -797,6 +825,35 @@
       ],
       "type": "string"
     },
+    "OpenWindowParams": {
+      "description": "Params of `open_window`.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "width": {
+          "description": "Size of the content area in logical pixels (default 360 by 240).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
     "OrderBy": {
       "description": "A sort key: a field path and a direction, written `[\"date\", \"desc\"]`.",
       "maxItems": 2,
@@ -1368,6 +1425,78 @@
           "type": "object"
         }
       ]
+    },
+    "WindowEvent": {
+      "description": "A part of `open_window`'s streamed answer.",
+      "oneOf": [
+        {
+          "description": "The first part: the window's id, for commits, and its content size.",
+          "properties": {
+            "height": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "opened",
+              "type": "string"
+            },
+            "width": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "window",
+            "width",
+            "height"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Something happened to node `node` (an id from the app's commits) that the\napp listens for, such as `click`.",
+          "properties": {
+            "event": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "event",
+              "type": "string"
+            },
+            "node": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "node",
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The user asked to close the window. It stays until the app cancels the\nrequest (or answers it).",
+          "properties": {
+            "kind": {
+              "const": "close",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$id": "idealos:protocol",
@@ -1378,6 +1507,10 @@
     "BROKER": {
       "description": "The broker's own name: `hello`, `claim`, `release` and `list` go to it, and `adopt`, with which session hands it connections for services and apps.",
       "value": "bus"
+    },
+    "COMPOSITOR_SERVICE": {
+      "description": "The name the compositor claims.",
+      "value": "compositor"
     },
     "DB_SERVICE": {
       "description": "The name the database service claims.",
@@ -1431,9 +1564,21 @@
       "description": "Most live queries (`watch`) the database service keeps open at once, across every caller.",
       "value": 4096
     },
+    "MAX_WINDOW_NODES": {
+      "description": "Most nodes one window may hold.",
+      "value": 20000
+    },
+    "SESSION_SERVICE": {
+      "description": "The name session claims.",
+      "value": "session"
+    },
     "TAP_TOPIC": {
       "description": "The broker's trace of every message; only trusted connections may subscribe.",
       "value": "bus.tap"
+    },
+    "WINDOW_CONTENT": {
+      "description": "The node id of a window's content area in that window's commits.",
+      "value": 1
     }
   }
 }

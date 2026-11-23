@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rebuild session, busd, dbd, osctl, compositor and kms-probe with the image's Buildroot toolchain and
+# Rebuild session, busd, dbd, osctl, compositor, kms-probe and app-host with the image's Buildroot toolchain and
 # copy them to target/device. Needs a built image (tools/build-image) for BOARD.
 # Both boards share the toolchain (aarch64 cortex-a72, same glibc), so binaries
 # from either output run on both.
@@ -8,6 +8,9 @@ set -eu
 . "$(dirname "$0")/_vm.sh"
 BOARD="${BOARD:-qemu}"
 BIN="$REPO/target/device"
+
+# Bundle the apps here: the VM has no Node. The image installs apps/*/dist.
+node "$REPO/tools/build-app.ts" "$REPO"/apps/*/
 
 vm_require
 vm_sync
@@ -27,7 +30,7 @@ vm_run "set -e
 	export BR2_DL_DIR=\$HOME/br-dl
 	make -C \$HOME/out/$BOARD idealos-userspace-rebuild"
 mkdir -p "$BIN"
-for b in session busd dbd osctl compositor kms-probe; do
+for b in session busd dbd osctl compositor kms-probe app-host; do
 	rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:out/$BOARD/target/usr/bin/$b" "$BIN/$b"
 done
 echo "Device binaries in target/device"

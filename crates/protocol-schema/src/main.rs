@@ -13,6 +13,10 @@ fn document() -> Value {
     let mut g = schemars::generate::SchemaSettings::draft2020_12().into_generator();
     g.subschema_for::<protocol::Message>();
     g.subschema_for::<protocol::Commit>();
+    g.subschema_for::<protocol::OpenWindowParams>();
+    g.subschema_for::<protocol::WindowEvent>();
+    g.subschema_for::<protocol::session::AppParams>();
+    g.subschema_for::<protocol::session::AppsResult>();
     g.subschema_for::<broker::HelloResult>();
     g.subschema_for::<broker::NameParams>();
     g.subschema_for::<broker::ListResult>();
@@ -70,6 +74,10 @@ fn document() -> Value {
         "DEFAULT_QUERY_LIMIT": constant(db::DEFAULT_QUERY_LIMIT.into(), "The `limit` a query gets when it names none."),
         "MAX_WATCHES": constant(db::MAX_WATCHES.into(), "Most live queries (`watch`) the database service keeps open at once, across every caller."),
         "MAX_BLOB_BYTES": constant(db::MAX_BLOB_BYTES.into(), "Largest blob `put_blob` takes."),
+        "COMPOSITOR_SERVICE": constant(protocol::scene::SERVICE.into(), "The name the compositor claims."),
+        "WINDOW_CONTENT": constant(protocol::scene::CONTENT.into(), "The node id of a window's content area in that window's commits."),
+        "MAX_WINDOW_NODES": constant(protocol::scene::MAX_WINDOW_NODES.into(), "Most nodes one window may hold."),
+        "SESSION_SERVICE": constant(protocol::session::SERVICE.into(), "The name session claims."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

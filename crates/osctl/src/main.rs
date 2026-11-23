@@ -31,6 +31,10 @@
 //! osctl [--socket PATH] db put-blob FILE               store a file as a blob; prints its hash
 //! osctl [--socket PATH] db get-blob HASH [OUT]         write a blob to OUT (default: standard output)
 //! osctl [--socket PATH] db blob-info HASH
+//! osctl [--socket PATH] app install DIR [--watch]     build (if DIR is sources), install and launch an app
+//! osctl [--socket PATH] app list                      installed apps, and which are running
+//! osctl [--socket PATH] app launch ID                 (re)start an installed app through session
+//! osctl [--socket PATH] app stop ID
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -39,6 +43,7 @@
 //! Exit status: 0 on success, 1 when the bus or a service answers with an error or
 //! can't be reached, 2 for bad usage.
 
+mod apps;
 mod bench;
 mod commands;
 
@@ -54,7 +59,8 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
 | search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET \
 | watch JSON [--count N] | diff ID FROM TO | link ID FIELD TARGET | links ID | schemas | snapshot | snapshots \
-| restore NAME | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)";
+| restore NAME | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
+       osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -90,11 +96,18 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if g == "bus" || g == "db" => g,
+        Some(g) if g == "bus" || g == "db" || g == "app" => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
     let sub = args.next().ok_or(format!("missing {group} subcommand"))?;
+    // `--watch` is the one flag that takes no value.
+    let rest: Vec<String> = args.collect();
+    let watch = rest.iter().any(|a| a == "--watch");
+    let mut args = rest.into_iter().filter(|a| a != "--watch");
+    if watch && !(group == "app" && sub == "install") {
+        return Err("only app install takes --watch".into());
+    }
     // Split the rest into positionals and --flag value pairs.
     let mut positional = Vec::new();
     let mut flags = Vec::new();
@@ -135,6 +148,30 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         }
     };
     let count = flags.iter().any(|(f, _)| f == "count").then(|| number("count", 0)).transpose()?;
+    if group == "app" {
+        allowed(&[])?;
+        let command = match sub.as_str() {
+            "install" => {
+                arity(1, 1)?;
+                Command::AppInstall { dir: positional[0].clone().into(), watch }
+            }
+            "list" => {
+                arity(0, 0)?;
+                Command::AppList
+            }
+            "launch" | "stop" => {
+                arity(1, 1)?;
+                let method = if sub == "launch" {
+                    protocol::session::method::LAUNCH
+                } else {
+                    protocol::session::method::STOP
+                };
+                Command::AppControl { method, id: positional[0].clone() }
+            }
+            other => return Err(format!("unknown app subcommand {other}")),
+        };
+        return Ok((socket, command));
+    }
     if group == "db" && sub == "watch" {
         arity(1, 1)?;
         allowed(&["count"])?;
@@ -416,6 +453,15 @@ mod tests {
         );
         assert_eq!(parse_str("db put-blob /tmp/x").unwrap().1, Command::PutBlob { file: "/tmp/x".into() });
         assert_eq!(
+            parse_str("app install apps/notes --watch").unwrap().1,
+            Command::AppInstall { dir: "apps/notes".into(), watch: true }
+        );
+        assert_eq!(parse_str("app list").unwrap().1, Command::AppList);
+        assert_eq!(
+            parse_str("app stop org.idealos.notes").unwrap().1,
+            Command::AppControl { method: "stop", id: "org.idealos.notes".into() }
+        );
+        assert_eq!(
             parse_str("db get-blob abc out.bin").unwrap().1,
             Command::GetBlob { hash: "abc".into(), out: Some("out.bin".into()) }
         );
@@ -450,6 +496,10 @@ mod tests {
             "db search x --limit y",
             "db drop x",
             "db watch",
+            "app install",
+            "app list x",
+            "app reboot",
+            "db get a --watch",
             "db link a b",
             "db diff a b c",
             "db put-blob",
