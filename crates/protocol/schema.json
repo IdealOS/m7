@@ -27,6 +27,10 @@
         {
           "const": "service_gone",
           "description": "The service disconnected before answering."
+        },
+        {
+          "const": "limit_exceeded",
+          "description": "The connection is at one of the broker's per-connection limits (pending requests, subscriptions or names)."
         }
       ]
     },
@@ -510,6 +514,22 @@
     "MAX_FRAME_BYTES": {
       "description": "Largest frame the broker accepts, not counting the 4-byte length prefix.",
       "value": 4194304
+    },
+    "MAX_NAMES": {
+      "description": "Most service names one connection may claim.",
+      "value": 64
+    },
+    "MAX_PENDING_REQUESTS": {
+      "description": "Most requests one connection may have waiting for an answer at once; past it the broker answers `limit_exceeded`.",
+      "value": 1024
+    },
+    "MAX_SUBSCRIPTIONS": {
+      "description": "Most subscription patterns one connection may hold.",
+      "value": 256
+    },
+    "MAX_TIMEOUT_MS": {
+      "description": "Longest `timeout_ms` the broker honors; longer ones are shortened to this.",
+      "value": 3600000
     },
     "TAP_TOPIC": {
       "description": "The broker's trace of every message; only trusted connections may subscribe.",

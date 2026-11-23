@@ -24,6 +24,21 @@ export const MAX_FDS_PER_MESSAGE = 16;
 /** Largest frame the broker accepts, not counting the 4-byte length prefix. */
 export const MAX_FRAME_BYTES = 4194304;
 
+/** Most service names one connection may claim. */
+export const MAX_NAMES = 64;
+
+/**
+ * Most requests one connection may have waiting for an answer at once; past it the broker answers
+ * `limit_exceeded`.
+ */
+export const MAX_PENDING_REQUESTS = 1024;
+
+/** Most subscription patterns one connection may hold. */
+export const MAX_SUBSCRIPTIONS = 256;
+
+/** Longest `timeout_ms` the broker honors; longer ones are shortened to this. */
+export const MAX_TIMEOUT_MS = 3600000;
+
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
 
@@ -40,7 +55,12 @@ export type BrokerErrorCode =
   /** The service didn't answer within the request's timeout. */
   | "timeout"
   /** The service disconnected before answering. */
-  | "service_gone";
+  | "service_gone"
+  /**
+   * The connection is at one of the broker's per-connection limits (pending requests, subscriptions
+   * or names).
+   */
+  | "limit_exceeded";
 
 /** Why a request failed. `code` is one of the broker's codes or a service's own. */
 export type BusError = { code: string; message: string };

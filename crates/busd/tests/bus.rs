@@ -436,3 +436,24 @@ async fn requests_after_the_broker_stops_fail_cleanly() {
     };
     assert_eq!(err, CallError::Disconnected);
 }
+
+/// A request with the largest possible `timeout_ms` leaves the broker's clock
+/// (the router's only deadline, which the shell sleeps until) working.
+#[tokio::test]
+async fn a_huge_timeout_leaves_the_broker_working() {
+    use tokio::io::AsyncWriteExt;
+    let bus = Bus::start("huge-timeout");
+    let _svc = echo_service(&bus, "svc").await;
+    let mut raw = tokio::net::UnixStream::connect(&bus.path).await.unwrap();
+    let mut hang = protocol::Message::request(1, "svc", "hang", Value::Null);
+    if let protocol::Message::Request { timeout_ms, .. } = &mut hang {
+        *timeout_ms = Some(u64::MAX);
+    }
+    raw.write_all(&protocol::bus::encode_frame(&hang).unwrap()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client = bus.client().await;
+    let short = client.request_with("svc", "hang", Value::Null, Vec::new(), Some(Duration::from_millis(100)));
+    let err = tokio::time::timeout(Duration::from_secs(5), short).await.expect("the broker still keeps time");
+    assert!(matches!(&err, Err(CallError::Bus(e)) if e.code == code::TIMEOUT), "{err:?}");
+    assert_eq!(client.request("svc", "echo", json!(3)).await.unwrap(), json!(3));
+}

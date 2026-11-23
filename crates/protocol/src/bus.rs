@@ -23,6 +23,19 @@ pub const TAP_TOPIC: &str = "bus.tap";
 /// unless the request sets `timeout_ms`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+/// Longest `timeout_ms` the broker honors; longer ones are shortened to this.
+pub const MAX_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
+/// Most requests one connection may have waiting for an answer at once. Past it,
+/// the broker answers `limit_exceeded` without forwarding.
+pub const MAX_PENDING_REQUESTS: usize = 1024;
+
+/// Most subscription patterns one connection may hold.
+pub const MAX_SUBSCRIPTIONS: usize = 256;
+
+/// Most service names one connection may claim.
+pub const MAX_NAMES: usize = 64;
+
 /// Error codes the broker itself sends. Services may send their own.
 pub mod code {
     /// Declares each code as a constant, and lists them all with their docs for
@@ -49,6 +62,9 @@ pub mod code {
         TIMEOUT = "timeout";
         /// The service disconnected before answering.
         SERVICE_GONE = "service_gone";
+        /// The connection is at one of the broker's per-connection limits (pending
+        /// requests, subscriptions or names).
+        LIMIT_EXCEEDED = "limit_exceeded";
     }
 }
 

@@ -17,7 +17,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
-use protocol::bus::{self, BROKER, BusError, DEFAULT_TIMEOUT_MS, Message, Sender, TAP_TOPIC, code};
+use protocol::bus::{
+    self, BROKER, BusError, DEFAULT_TIMEOUT_MS, MAX_NAMES, MAX_PENDING_REQUESTS, MAX_SUBSCRIPTIONS,
+    MAX_TIMEOUT_MS, Message, Sender, TAP_TOPIC, code,
+};
 use serde_json::{Value, json};
 
 pub type ConnId = u64;
@@ -83,6 +86,8 @@ struct Conn {
     /// Names this connection claimed, oldest first; the first is how it's stamped.
     names: Vec<String>,
     subs: Vec<String>,
+    /// Requests this connection sent that are still waiting for an answer.
+    waiting: usize,
 }
 
 struct Pending {
@@ -126,7 +131,7 @@ impl Router {
     pub fn handle(&mut self, now: Instant, event: Event, out: &mut Vec<Action>) {
         match event {
             Event::Opened { conn, trust, adopted_for } => {
-                self.conns.insert(conn, Conn { trust, names: Vec::new(), subs: Vec::new() });
+                self.conns.insert(conn, Conn { trust, names: Vec::new(), subs: Vec::new(), waiting: 0 });
                 if let Some((requester, id)) = adopted_for {
                     out.push(Action::Deliver {
                         to: vec![requester],
@@ -179,6 +184,13 @@ impl Router {
                         format!("request {id} is already pending"),
                     ));
                 }
+                if self.conns.get(&conn).is_some_and(|c| c.waiting >= MAX_PENDING_REQUESTS) {
+                    return reply(Message::err(
+                        id,
+                        code::LIMIT_EXCEEDED,
+                        format!("more than {MAX_PENDING_REQUESTS} requests waiting for answers"),
+                    ));
+                }
                 let forwarded = Message::Request {
                     id: self.next_id,
                     to,
@@ -193,8 +205,12 @@ impl Router {
                 }
                 let bus_id = self.next_id;
                 self.next_id += 1;
-                let deadline = now + Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+                // Clamped, so a request can't hold its slot (and the service) forever,
+                // and the deadline stays far from the clock's limits.
+                let wait = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+                let deadline = now + Duration::from_millis(wait);
                 self.pending.insert(bus_id, Pending { requester: conn, client_id: id, service, deadline });
+                self.conns.get_mut(&conn).expect("sender exists").waiting += 1;
                 self.by_client.insert((conn, id), bus_id);
                 self.deadlines.insert((deadline, bus_id));
                 out.push(Action::Deliver { to: vec![service], msg: forwarded });
@@ -225,10 +241,18 @@ impl Router {
                     Message::failed(id, e)
                 } else {
                     let subs = &mut self.conns.get_mut(&conn).expect("sender exists").subs;
-                    if !subs.contains(topic) {
+                    if subs.contains(topic) {
+                        Message::ok(id, Value::Null)
+                    } else if subs.len() >= MAX_SUBSCRIPTIONS {
+                        Message::err(
+                            id,
+                            code::LIMIT_EXCEEDED,
+                            format!("more than {MAX_SUBSCRIPTIONS} subscriptions"),
+                        )
+                    } else {
                         subs.push(topic.clone());
+                        Message::ok(id, Value::Null)
                     }
-                    Message::ok(id, Value::Null)
                 };
                 out.push(Action::Deliver { to: vec![conn], msg: reply });
             }
@@ -300,8 +324,16 @@ impl Router {
                         Message::err(id, code::NAME_TAKEN, format!("{name} is held by connection {owner}"))
                     }
                     None => {
+                        let names = &mut self.conns.get_mut(&conn).expect("sender exists").names;
+                        if names.len() >= MAX_NAMES {
+                            return Message::err(
+                                id,
+                                code::LIMIT_EXCEEDED,
+                                format!("more than {MAX_NAMES} names"),
+                            );
+                        }
+                        names.push(name.to_owned());
                         self.names.insert(name.to_owned(), conn);
-                        self.conns.get_mut(&conn).expect("sender exists").names.push(name.to_owned());
                         Message::ok(id, Value::Null)
                     }
                 }
@@ -369,6 +401,10 @@ impl Router {
     fn finish(&mut self, bus_id: u64) -> Pending {
         let p = self.pending.remove(&bus_id).expect("caller checked");
         self.by_client.remove(&(p.requester, p.client_id));
+        // The requester is already gone when its own close ends the request.
+        if let Some(c) = self.conns.get_mut(&p.requester) {
+            c.waiting -= 1;
+        }
         self.deadlines.remove(&(p.deadline, bus_id));
         p
     }
@@ -519,6 +555,88 @@ mod tests {
         let out = h.send(1, Message::ok(*bus_id, json!({"docs": []})));
         assert_eq!(out, [deliver(2, Message::ok(42, json!({"docs": []})))]);
         assert!(h.router.next_deadline().is_none(), "nothing is left pending");
+    }
+
+    /// A client can't keep a request (and its slot) for longer than an hour.
+    #[test]
+    fn huge_timeouts_are_clamped() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        h.open(2, app("org.example.notes"));
+        h.claim(1, "db");
+        let mut huge = Message::request(7, "db", "slow", Value::Null);
+        if let Message::Request { timeout_ms, .. } = &mut huge {
+            *timeout_ms = Some(u64::MAX);
+        }
+        assert_eq!(h.send(2, huge).len(), 1, "forwarded");
+        assert_eq!(h.router.next_deadline(), Some(h.now + Duration::from_millis(MAX_TIMEOUT_MS)));
+        let out = h.advance(Duration::from_millis(MAX_TIMEOUT_MS));
+        assert_eq!(error_code(&out[0]), code::TIMEOUT);
+    }
+
+    #[test]
+    fn pending_requests_are_limited_per_connection() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        h.open(2, app("org.example.notes"));
+        h.open(3, app("org.example.other"));
+        h.claim(1, "db");
+        let mut forwarded = Vec::new();
+        for id in 0..MAX_PENDING_REQUESTS as u64 {
+            let out = h.request(2, id, "db", "q", Value::Null);
+            let [Action::Deliver { msg: Message::Request { id: bus_id, .. }, .. }] = &out[..] else {
+                panic!("{out:?}")
+            };
+            forwarded.push(*bus_id);
+        }
+        let out = h.request(2, 5000, "db", "q", Value::Null);
+        assert_eq!(out.len(), 1);
+        assert_eq!(error_code(&out[0]), code::LIMIT_EXCEEDED);
+        // The limit is per connection: another app still gets through.
+        assert!(
+            matches!(&h.request(3, 1, "db", "q", Value::Null)[..], [Action::Deliver { to, .. }] if to == &[1])
+        );
+
+        // Every way a request ends frees its slot: an answer, a cancel, a timeout.
+        h.send(1, Message::ok(forwarded[0], Value::Null));
+        assert!(
+            matches!(&h.request(2, 5001, "db", "q", Value::Null)[..], [Action::Deliver { to, .. }] if to == &[1])
+        );
+        h.send(2, Message::Cancel { id: 1 });
+        assert!(
+            matches!(&h.request(2, 5002, "db", "q", Value::Null)[..], [Action::Deliver { to, .. }] if to == &[1])
+        );
+        h.advance(Duration::from_millis(DEFAULT_TIMEOUT_MS));
+        for id in 0..MAX_PENDING_REQUESTS as u64 {
+            let out = h.request(2, 10_000 + id, "db", "q", Value::Null);
+            assert!(matches!(&out[..], [Action::Deliver { to, .. }] if to == &[1]), "{id}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn subscriptions_and_names_are_limited_per_connection() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        for i in 0..MAX_SUBSCRIPTIONS {
+            let out = h.send(1, Message::Subscribe { id: i as u64, topic: format!("t.{i}") });
+            assert_eq!(out, [deliver(1, Message::ok(i as u64, Value::Null))]);
+        }
+        // Subscribing again to a held pattern is still fine; a new one isn't.
+        let out = h.send(1, Message::Subscribe { id: 1, topic: "t.0".into() });
+        assert_eq!(out, [deliver(1, Message::ok(1, Value::Null))]);
+        let out = h.send(1, Message::Subscribe { id: 2, topic: "t.new".into() });
+        assert_eq!(error_code(&out[0]), code::LIMIT_EXCEEDED);
+        h.send(1, Message::Unsubscribe { id: 3, topic: "t.0".into() });
+        let out = h.send(1, Message::Subscribe { id: 4, topic: "t.new".into() });
+        assert_eq!(out, [deliver(1, Message::ok(4, Value::Null))]);
+
+        for i in 0..MAX_NAMES {
+            h.claim(1, &format!("svc-{i}"));
+        }
+        h.claim(1, "svc-0"); // already held
+        let out = h.request(1, 9, BROKER, "claim", json!({"name": "one-more"}));
+        assert_eq!(error_code(&out[0]), code::LIMIT_EXCEEDED);
+        assert!(!h.router.names.contains_key("one-more"));
     }
 
     #[test]

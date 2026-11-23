@@ -28,6 +28,10 @@ fn document() -> Value {
         "BROKER": constant(bus::BROKER.into(), "The broker's own name: `hello`, `claim`, `release` and `list` go to it, and `adopt`, with which session hands it connections for services and apps."),
         "TAP_TOPIC": constant(bus::TAP_TOPIC.into(), "The broker's trace of every message; only trusted connections may subscribe."),
         "DEFAULT_TIMEOUT_MS": constant(bus::DEFAULT_TIMEOUT_MS.into(), "How long the broker waits for a response before answering `timeout` itself, unless the request sets `timeout_ms`."),
+        "MAX_TIMEOUT_MS": constant(bus::MAX_TIMEOUT_MS.into(), "Longest `timeout_ms` the broker honors; longer ones are shortened to this."),
+        "MAX_PENDING_REQUESTS": constant(bus::MAX_PENDING_REQUESTS.into(), "Most requests one connection may have waiting for an answer at once; past it the broker answers `limit_exceeded`."),
+        "MAX_SUBSCRIPTIONS": constant(bus::MAX_SUBSCRIPTIONS.into(), "Most subscription patterns one connection may hold."),
+        "MAX_NAMES": constant(bus::MAX_NAMES.into(), "Most service names one connection may claim."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });
