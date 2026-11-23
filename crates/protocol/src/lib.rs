@@ -7,6 +7,7 @@
 
 pub mod broker;
 pub mod bus;
+pub mod db;
 pub mod scene;
 pub mod unix;
 

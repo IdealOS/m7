@@ -577,6 +577,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "db"
+version = "0.1.0"
+dependencies = [
+ "loro",
+ "protocol",
+ "rusqlite",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "db-bench"
 version = "0.1.0"
 dependencies = [

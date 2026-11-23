@@ -1,0 +1,385 @@
+//! The document store behind the `db` service.
+//!
+//! Each document is a Loro document, the source of truth. SQLite (WAL mode) holds,
+//! all written in one transaction per change:
+//!
+//! - the Loro snapshot (`doc_state`) and a log of incremental updates since it
+//!   (`changes`), folded back into the snapshot every [`COMPACT_AFTER`] updates;
+//! - a JSON copy of the data (`doc_json`), which queries run against;
+//! - a contentless FTS5 row of every string in the document, for search.
+//!
+//! Every write belongs to a change set, which records when it happened and who made
+//! it (`origin`); history and undo build on these.
+//!
+//! Spike C measured this write path at about 0.1 ms per write on a Mac.
+
+mod loro_json;
+pub mod query;
+
+use std::path::Path;
+
+use loro::{ExportMode, LoroDoc};
+use protocol::db::{Doc, Query, valid_type};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::{Map, Value};
+
+/// Updates logged per document before they're folded into its snapshot.
+pub const COMPACT_AFTER: i64 = 64;
+
+/// Most bytes of a document's JSON copy. Bulk data belongs in blobs.
+pub const MAX_DOC_BYTES: usize = 1024 * 1024;
+
+const SCHEMA: &str = "
+CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY) STRICT;
+CREATE TABLE documents (
+    doc     INTEGER PRIMARY KEY,
+    id      TEXT NOT NULL UNIQUE,   -- UUIDv7
+    type    TEXT NOT NULL,
+    created INTEGER NOT NULL,       -- ms since the epoch
+    updated INTEGER NOT NULL,
+    deleted INTEGER                 -- set when deleted; the state stays for history
+) STRICT;
+CREATE TABLE doc_state (
+    doc      INTEGER PRIMARY KEY REFERENCES documents (doc),
+    snapshot BLOB NOT NULL,
+    updates  INTEGER NOT NULL DEFAULT 0  -- rows in changes since the snapshot
+) STRICT;
+-- Only live documents have a JSON copy, so queries never see deleted ones.
+CREATE TABLE doc_json (
+    doc  INTEGER PRIMARY KEY REFERENCES documents (doc),
+    type TEXT NOT NULL,
+    json TEXT NOT NULL
+) STRICT;
+CREATE INDEX doc_json_type ON doc_json (type, doc);
+CREATE TABLE change_sets (
+    id     INTEGER PRIMARY KEY,
+    at     INTEGER NOT NULL,
+    origin TEXT NOT NULL            -- who made it: a service name or app id
+) STRICT;
+-- Loro updates not yet folded into their document's snapshot.
+CREATE TABLE changes (
+    seq        INTEGER PRIMARY KEY,
+    doc        INTEGER NOT NULL REFERENCES documents (doc),
+    change_set INTEGER NOT NULL REFERENCES change_sets (id),
+    bytes      BLOB NOT NULL
+) STRICT;
+CREATE INDEX changes_doc ON changes (doc, seq);
+CREATE VIRTUAL TABLE fts USING fts5 (text, content='', contentless_delete=1);
+";
+
+const SCHEMA_VERSION: i64 = 1;
+
+#[derive(Debug)]
+pub enum Error {
+    /// No live document has this id.
+    NotFound(String),
+    /// The request makes no sense: a bad type name, filter or document.
+    Invalid(String),
+    Sqlite(rusqlite::Error),
+    /// Loro couldn't apply, load or export a document's state.
+    Loro(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::NotFound(id) => write!(f, "no document {id}"),
+            Error::Invalid(why) => f.write_str(why),
+            Error::Sqlite(e) => write!(f, "database: {e}"),
+            Error::Loro(e) => write!(f, "document state: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Error {
+        Error::Sqlite(e)
+    }
+}
+
+impl From<loro::LoroError> for Error {
+    fn from(e: loro::LoroError) -> Error {
+        Error::Loro(e.to_string())
+    }
+}
+
+impl From<loro::LoroEncodeError> for Error {
+    fn from(e: loro::LoroEncodeError) -> Error {
+        Error::Loro(e.to_string())
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+fn invalid<T>(why: impl Into<String>) -> Result<T> {
+    Err(Error::Invalid(why.into()))
+}
+
+pub struct Store {
+    conn: Connection,
+    /// This device's Loro peer id, chosen when the database was created.
+    peer: u64,
+}
+
+impl Store {
+    /// Open the database at `path`, creating it if needed.
+    pub fn open(path: &Path) -> Result<Store> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Store::init(conn)
+    }
+
+    /// A database that lives only as long as this value, for tests.
+    pub fn open_in_memory() -> Result<Store> {
+        Store::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Store> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        match version {
+            0 => {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute_batch(SCHEMA)?;
+                // The random half of a UUIDv7: unique enough to tell devices apart.
+                let peer = uuid::Uuid::now_v7().as_u64_pair().1 >> 1;
+                tx.execute("INSERT INTO meta (key, value) VALUES ('peer', ?1)", [peer as i64])?;
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
+            SCHEMA_VERSION => {}
+            v => {
+                return invalid(format!(
+                    "database schema version {v} is newer than this build ({SCHEMA_VERSION})"
+                ));
+            }
+        }
+        let peer: i64 = conn.query_row("SELECT value FROM meta WHERE key = 'peer'", [], |r| r.get(0))?;
+        Ok(Store { conn, peer: peer as u64 })
+    }
+
+    /// Create a document of `doc_type` holding `data`.
+    pub fn create(&mut self, doc_type: &str, data: &Map<String, Value>, origin: &str) -> Result<Doc> {
+        if !valid_type(doc_type) {
+            return invalid(format!("not a document type: {doc_type:?}"));
+        }
+        let doc = self.new_loro()?;
+        loro_json::create(&doc, data)?;
+        doc.commit();
+        let json = checked_json(&doc)?;
+
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        let id = uuid::Uuid::now_v7().to_string();
+        tx.execute(
+            "INSERT INTO documents (id, type, created, updated) VALUES (?1, ?2, ?3, ?3)",
+            params![id, doc_type, now],
+        )?;
+        let row = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO doc_state (doc, snapshot) VALUES (?1, ?2)",
+            params![row, doc.export(ExportMode::Snapshot)?],
+        )?;
+        change_set(&tx, now, origin)?;
+        write_views(&tx, row, doc_type, &json, false)?;
+        tx.commit()?;
+        Ok(Doc { id, doc_type: doc_type.into(), created: now, updated: now, data: loro_json::read(&doc) })
+    }
+
+    /// Apply a JSON merge patch to document `id`. A patch that changes nothing
+    /// writes nothing.
+    pub fn update(&mut self, id: &str, patch: &Map<String, Value>, origin: &str) -> Result<Doc> {
+        let peer = self.peer;
+        let tx = self.conn.transaction()?;
+        let Some((row, doc_type, created)) = live_row(&tx, id)? else {
+            return Err(Error::NotFound(id.into()));
+        };
+        let doc = load(&tx, row, peer)?;
+        let before = doc.oplog_vv();
+        loro_json::merge(&loro_json::data(&doc), patch)?;
+        doc.commit();
+        let mut updated: i64 =
+            tx.query_row("SELECT updated FROM documents WHERE doc = ?1", [row], |r| r.get(0))?;
+        if doc.oplog_vv() != before {
+            let json = checked_json(&doc)?;
+            updated = now_ms();
+            let set = change_set(&tx, updated, origin)?;
+            let bytes = doc.export(ExportMode::updates(&before))?;
+            tx.execute(
+                "INSERT INTO changes (doc, change_set, bytes) VALUES (?1, ?2, ?3)",
+                params![row, set, bytes],
+            )?;
+            tx.execute("UPDATE documents SET updated = ?2 WHERE doc = ?1", params![row, updated])?;
+            let logged: i64 = tx.query_row(
+                "UPDATE doc_state SET updates = updates + 1 WHERE doc = ?1 RETURNING updates",
+                [row],
+                |r| r.get(0),
+            )?;
+            if logged >= COMPACT_AFTER {
+                compact(&tx, row, &doc)?;
+            }
+            write_views(&tx, row, &doc_type, &json, true)?;
+        }
+        tx.commit()?;
+        Ok(Doc { id: id.into(), doc_type, created, updated, data: loro_json::read(&doc) })
+    }
+
+    /// The live document `id`.
+    pub fn get(&self, id: &str) -> Result<Doc> {
+        self.conn
+            .query_row(
+                "SELECT d.id, d.type, d.created, d.updated, doc_json.json
+                 FROM documents d JOIN doc_json ON doc_json.doc = d.doc WHERE d.id = ?1",
+                [id],
+                doc_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(id.into()))?
+    }
+
+    /// Delete document `id`. Its state and history stay (for undo); it leaves
+    /// queries and search.
+    pub fn delete(&mut self, id: &str, origin: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let Some((row, _, _)) = live_row(&tx, id)? else { return Err(Error::NotFound(id.into())) };
+        let now = now_ms();
+        change_set(&tx, now, origin)?;
+        tx.execute("UPDATE documents SET deleted = ?2, updated = ?2 WHERE doc = ?1", params![row, now])?;
+        tx.execute("DELETE FROM doc_json WHERE doc = ?1", [row])?;
+        tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Documents matching `q` (see [`protocol::db`] for the filter language).
+    pub fn query(&self, q: &Query) -> Result<Vec<Doc>> {
+        let compiled = query::compile(q)?;
+        let mut stmt = self.conn.prepare_cached(&compiled.sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&compiled.params), doc_from_row)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Documents containing every word of `text`, best matches first, optionally
+    /// only of `doc_type`.
+    pub fn search(&self, text: &str, doc_type: Option<&str>, limit: u32) -> Result<Vec<Doc>> {
+        let Some(fts_query) = query::fts_words(text) else { return Ok(Vec::new()) };
+        let limit = limit.min(protocol::db::MAX_QUERY_LIMIT);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT d.id, d.type, d.created, d.updated, doc_json.json
+             FROM fts JOIN doc_json ON doc_json.doc = fts.rowid JOIN documents d ON d.doc = fts.rowid
+             WHERE fts MATCH ?1 AND (?2 IS NULL OR doc_json.type = ?2)
+             ORDER BY fts.rank LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![fts_query, doc_type, limit], doc_from_row)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// The Loro document behind `id`, rebuilt from its snapshot and logged updates.
+    /// For tests and the history API.
+    pub fn loro(&self, id: &str) -> Result<LoroDoc> {
+        let row: i64 = self
+            .conn
+            .query_row("SELECT doc FROM documents WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| Error::NotFound(id.into()))?;
+        let tx = self.conn.unchecked_transaction()?;
+        load(&tx, row, self.peer)
+    }
+
+    /// Run `sql` and return its rows' first column, for tests and `--explain`.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    fn new_loro(&self) -> Result<LoroDoc> {
+        let doc = LoroDoc::new();
+        doc.set_peer_id(self.peer)?;
+        Ok(doc)
+    }
+}
+
+/// A live document's row number, type and creation time.
+fn live_row(tx: &Transaction, id: &str) -> Result<Option<(i64, String, i64)>> {
+    Ok(tx
+        .query_row("SELECT doc, type, created FROM documents WHERE id = ?1 AND deleted IS NULL", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()?)
+}
+
+fn load(tx: &Transaction, row: i64, peer: u64) -> Result<LoroDoc> {
+    let snapshot: Vec<u8> =
+        tx.query_row("SELECT snapshot FROM doc_state WHERE doc = ?1", [row], |r| r.get(0))?;
+    let mut parts = vec![snapshot];
+    let mut stmt = tx.prepare_cached("SELECT bytes FROM changes WHERE doc = ?1 ORDER BY seq")?;
+    for bytes in stmt.query_map([row], |r| r.get::<_, Vec<u8>>(0))? {
+        parts.push(bytes?);
+    }
+    let doc = LoroDoc::new();
+    doc.import_batch(&parts)?;
+    doc.set_peer_id(peer)?;
+    Ok(doc)
+}
+
+/// Fold the logged updates into a new snapshot. Loro keeps the full history inside
+/// the snapshot, so nothing is lost.
+fn compact(tx: &Transaction, row: i64, doc: &LoroDoc) -> Result<()> {
+    tx.execute(
+        "UPDATE doc_state SET snapshot = ?2, updates = 0 WHERE doc = ?1",
+        params![row, doc.export(ExportMode::Snapshot)?],
+    )?;
+    tx.execute("DELETE FROM changes WHERE doc = ?1", [row])?;
+    Ok(())
+}
+
+fn change_set(tx: &Transaction, at: i64, origin: &str) -> Result<i64> {
+    tx.execute("INSERT INTO change_sets (at, origin) VALUES (?1, ?2)", params![at, origin])?;
+    Ok(tx.last_insert_rowid())
+}
+
+/// The document's JSON copy, refusing ones too big to store.
+fn checked_json(doc: &LoroDoc) -> Result<Value> {
+    let json = Value::Object(loro_json::read(doc));
+    let len = serde_json::to_vec(&json).map(|v| v.len()).unwrap_or(usize::MAX);
+    if len > MAX_DOC_BYTES {
+        return invalid(format!("document is {len} bytes; the most is {MAX_DOC_BYTES} (use a blob)"));
+    }
+    Ok(json)
+}
+
+fn write_views(tx: &Transaction, row: i64, doc_type: &str, json: &Value, replace: bool) -> Result<()> {
+    tx.execute(
+        "INSERT INTO doc_json (doc, type, json) VALUES (?1, ?2, ?3)
+         ON CONFLICT (doc) DO UPDATE SET json = excluded.json",
+        params![row, doc_type, json.to_string()],
+    )?;
+    if replace {
+        tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
+    }
+    let mut words = Vec::new();
+    loro_json::strings(json, &mut words);
+    tx.execute("INSERT INTO fts (rowid, text) VALUES (?1, ?2)", params![row, words.join("\n")])?;
+    Ok(())
+}
+
+fn doc_from_row(r: &rusqlite::Row) -> rusqlite::Result<Result<Doc>> {
+    let json: String = r.get(4)?;
+    let data = match serde_json::from_str(&json) {
+        Ok(Value::Object(o)) => o,
+        _ => return Ok(invalid("a stored JSON copy is not an object")),
+    };
+    Ok(Ok(Doc { id: r.get(0)?, doc_type: r.get(1)?, created: r.get(2)?, updated: r.get(3)?, data }))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests;

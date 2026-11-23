@@ -1,0 +1,15 @@
+[package]
+name = "db"
+description = "The document store behind the db service: Loro documents, a SQLite JSON copy, queries and search."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+loro.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
