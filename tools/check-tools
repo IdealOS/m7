@@ -5,4 +5,5 @@ set -eu
 cd "$(dirname "$0")"
 npx --yes -p typescript@5.9 -p @types/node@24 sh -c \
 	'tsc -p . --typeRoots "$(dirname "$(dirname "$(command -v tsc)")")/@types"'
-node --test .
+# A glob, not a directory: Node 24 (as in CI) rejects a directory here.
+node --test "*.test.ts"
