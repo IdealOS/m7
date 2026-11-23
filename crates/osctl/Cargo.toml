@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 protocol.workspace = true
 bus-client.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 

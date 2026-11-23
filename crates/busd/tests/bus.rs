@@ -79,7 +79,7 @@ async fn a_request_reaches_a_named_service_and_comes_back() {
     assert_eq!(answer, json!({"n": 1}));
 
     // The service sees the broker's stamp, not anything the client claims.
-    let (conn, me) = client.hello().await.unwrap();
+    let bus_client::HelloResult { conn, sender: me } = client.hello().await.unwrap();
     assert_eq!(me, Sender::Conn(conn));
     let seen = client.request("echo", "whoami", Value::Null).await.unwrap();
     assert_eq!(seen, json!({"conn": conn}));
@@ -386,7 +386,7 @@ async fn session_hands_over_app_connections() {
     let conn = reply.result["conn"].as_u64().unwrap();
     app_end.set_nonblocking(true).unwrap();
     let app = Client::from_stream(tokio::net::UnixStream::from_std(app_end).unwrap());
-    let (seen, sender) = app.hello().await.unwrap();
+    let bus_client::HelloResult { conn: seen, sender } = app.hello().await.unwrap();
     assert_eq!(seen, conn);
     assert_eq!(sender, Sender::App { app: "org.example.notes".into(), conn });
     assert_eq!(app.claim("db").await.unwrap_err().code(), code::PERMISSION_DENIED);

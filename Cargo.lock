@@ -269,6 +269,7 @@ dependencies = [
  "libc",
  "log",
  "protocol",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -282,6 +283,7 @@ dependencies = [
  "libc",
  "log",
  "protocol",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -2307,6 +2309,7 @@ dependencies = [
  "busd",
  "libc",
  "protocol",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -3023,6 +3026,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "protocol",
+ "serde",
  "serde_json",
 ]
 

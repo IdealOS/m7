@@ -53,7 +53,7 @@ impl fmt::Display for Report {
 /// `service` is a second connection to the same broker as `bus`.
 pub async fn run(bus: &Client, service: Client, duration: Duration, size: usize) -> Result<Report, String> {
     let e = |e: bus_client::CallError| e.to_string();
-    let conn = bus.hello().await.map_err(e)?.0;
+    let conn = bus.hello().await.map_err(e)?.conn;
     let name = format!("bench-{}-{conn}", std::process::id());
     service.claim(&name).await.map_err(e)?;
     let echo = tokio::spawn({

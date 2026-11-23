@@ -5,8 +5,11 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use bus_client::{Client, Incoming, Publication};
-use protocol::bus::{BROKER, TAP_TOPIC};
+use bus_client::{Client, Incoming, ListResult, Publication};
+use protocol::Message;
+use protocol::broker::TapEvent;
+use protocol::bus::{Sender, TAP_TOPIC};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, PartialEq)]
@@ -26,12 +29,12 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
     let w = |e: std::io::Error| e.to_string();
     match command {
         Command::List => {
-            let list = bus.request(BROKER, "list", Value::Null).await.map_err(|e| e.to_string())?;
+            let list = bus.list().await.map_err(|e| e.to_string())?;
             write_list(&list, out).map_err(w)
         }
         Command::Hello => {
-            let (conn, sender) = bus.hello().await.map_err(|e| e.to_string())?;
-            writeln!(out, "{}", json!({"conn": conn, "sender": sender})).map_err(w)
+            let hello = bus.hello().await.map_err(|e| e.to_string())?;
+            writeln!(out, "{}", json!(hello)).map_err(w)
         }
         Command::Call { to, method, params, timeout } => {
             let answer = match timeout {
@@ -89,56 +92,43 @@ pub async fn echo(bus: &Client) {
     }
 }
 
-fn write_list(list: &Value, out: &mut impl Write) -> std::io::Result<()> {
-    let mut services: Vec<(&String, &Value)> =
-        list["services"].as_object().map(|m| m.iter().collect()).unwrap_or_default();
-    services.sort_by_key(|(name, _)| *name);
-    for (name, conn) in services {
+fn write_list(list: &ListResult, out: &mut impl Write) -> std::io::Result<()> {
+    // A BTreeMap, so already sorted by name.
+    for (name, conn) in &list.services {
         writeln!(out, "{name:<16} connection {conn}")?;
     }
-    writeln!(out, "{} connection(s)", list["connections"])
+    writeln!(out, "{} connection(s)", list.connections)
 }
 
 /// One line per traced message: who sent it, then what it was.
 pub fn tap_line(p: &Publication) -> String {
-    let d = &p.data;
-    let who = match d["sender"].as_object().and_then(|o| o.iter().next()) {
-        Some((kind, v)) if kind == "service" => v.as_str().unwrap_or("?").to_owned(),
-        Some((kind, v)) if kind == "app" => format!("app {}", v["app"].as_str().unwrap_or("?")),
-        _ => "conn".to_owned(),
+    let Ok(TapEvent { conn, sender, msg, bus_id }) = TapEvent::deserialize(&p.data) else {
+        return format!("? {}", p.data);
     };
-    let who = format!("{who}#{}", d["conn"]);
-    let m = &d["msg"];
+    let who = match sender {
+        Sender::Service(name) => name,
+        Sender::App { app, .. } => format!("app {app}"),
+        Sender::Conn(_) => "conn".to_owned(),
+    };
+    let who = format!("{who}#{conn}");
     let compact = |v: &Value| if v.is_null() { String::new() } else { format!(" {v}") };
-    match m["kind"].as_str().unwrap_or("?") {
-        "request" => {
-            let routed = d.get("bus_id").map(|id| format!(" (bus id {id})")).unwrap_or_default();
-            format!(
-                "{who} request {} -> {}.{}{}{routed}",
-                m["id"],
-                str(&m["to"]),
-                str(&m["method"]),
-                compact(&m["params"])
-            )
+    match msg {
+        Message::Request { id, to, method, params, .. } => {
+            let routed = bus_id.map(|id| format!(" (bus id {id})")).unwrap_or_default();
+            format!("{who} request {id} -> {to}.{method}{}{routed}", compact(&params))
         }
-        "response" if m["ok"] == json!(true) => {
-            format!("{who} response {} ok{}", m["id"], compact(&m["result"]))
+        Message::Response { id, ok: true, result, .. } => {
+            format!("{who} response {id} ok{}", compact(&result.unwrap_or_default()))
         }
-        "response" => format!(
-            "{who} response {} error {}: {}",
-            m["id"],
-            str(&m["error"]["code"]),
-            str(&m["error"]["message"])
-        ),
-        "publish" => format!("{who} publish {}{}", str(&m["topic"]), compact(&m["data"])),
-        "subscribe" | "unsubscribe" => format!("{who} {} {}", str(&m["kind"]), str(&m["topic"])),
-        "cancel" => format!("{who} cancel {}", m["id"]),
-        other => format!("{who} {other} {m}"),
+        Message::Response { id, error, .. } => match error {
+            Some(e) => format!("{who} response {id} error {}: {}", e.code, e.message),
+            None => format!("{who} response {id} error"),
+        },
+        Message::Publish { topic, data, .. } => format!("{who} publish {topic}{}", compact(&data)),
+        Message::Subscribe { topic, .. } => format!("{who} subscribe {topic}"),
+        Message::Unsubscribe { topic, .. } => format!("{who} unsubscribe {topic}"),
+        Message::Cancel { id } => format!("{who} cancel {id}"),
     }
-}
-
-fn str(v: &Value) -> &str {
-    v.as_str().unwrap_or("?")
 }
 
 #[cfg(test)]
@@ -256,5 +246,6 @@ mod tests {
             ),
             "db#2 publish db.live.1"
         );
+        assert_eq!(line(json!({"not": "a tap event"})), r#"? {"not":"a tap event"}"#);
     }
 }

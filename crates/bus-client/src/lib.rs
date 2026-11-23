@@ -32,13 +32,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use protocol::broker::{NameParams, method};
 use protocol::bus::{self, BROKER, BusError, Message, Sender, encode_frame};
 use protocol::unix::{MAX_FDS_PER_MESSAGE, MAX_FDS_PER_SEND};
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{mpsc, oneshot};
 use wire::{FrameReader, write_with_fds};
+
+pub use protocol::broker::{HelloResult, ListResult};
 
 /// Frames waiting to be written.
 const OUTGOING_FRAMES: usize = 1024;
@@ -259,19 +264,38 @@ impl Client {
         result
     }
 
+    /// A broker method with typed params and result (see [`protocol::broker`]).
+    async fn broker<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<T, CallError> {
+        let params = serde_json::to_value(params).map_err(|e| CallError::bad_request(e.to_string()))?;
+        let result = self.request(BROKER, method, params).await?;
+        T::deserialize(&result)
+            .map_err(|e| CallError::bad_request(format!("the broker's {method} answer: {e}")))
+    }
+
     /// Who the broker says this connection is, and its connection number.
-    pub async fn hello(&self) -> Result<(u64, Sender), CallError> {
-        let v = self.request(BROKER, "hello", Value::Null).await?;
-        let conn = v["conn"].as_u64().unwrap_or_default();
-        let sender =
-            serde_json::from_value(v["sender"].clone()).map_err(|e| CallError::bad_request(e.to_string()))?;
-        Ok((conn, sender))
+    pub async fn hello(&self) -> Result<HelloResult, CallError> {
+        self.broker(method::HELLO, ()).await
+    }
+
+    /// Claimed service names and their connections, and how many connections
+    /// the broker has.
+    pub async fn list(&self) -> Result<ListResult, CallError> {
+        self.broker(method::LIST, ()).await
     }
 
     /// Claim a service name, so requests addressed to it come to this connection.
     /// Read them from [`Client::take_requests`].
     pub async fn claim(&self, name: &str) -> Result<(), CallError> {
-        self.request(BROKER, "claim", json!({"name": name})).await.map(drop)
+        self.broker::<()>(method::CLAIM, NameParams { name: name.into() }).await
+    }
+
+    /// Give up a name this connection claimed.
+    pub async fn release(&self, name: &str) -> Result<(), CallError> {
+        self.broker::<()>(method::RELEASE, NameParams { name: name.into() }).await
     }
 
     /// The queue of requests sent to names this connection claimed. Returns `None`

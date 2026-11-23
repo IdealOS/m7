@@ -1,6 +1,57 @@
 {
   "$comment": "Generated from crates/protocol by crates/protocol-schema; do not edit. Run `make protocol`.",
   "$defs": {
+    "AdoptApp": {
+      "additionalProperties": false,
+      "description": "An app's connection: its messages are stamped with this reverse-DNS app id.",
+      "properties": {
+        "app": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app"
+      ],
+      "type": "object"
+    },
+    "AdoptParams": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AdoptApp"
+        },
+        {
+          "$ref": "#/$defs/AdoptSystem"
+        }
+      ],
+      "description": "Params of `adopt`, with which session hands the broker one end of a socket\npair (the request's one descriptor) and says what the connection is."
+    },
+    "AdoptResult": {
+      "description": "Result of `adopt`: the new connection's number.",
+      "properties": {
+        "conn": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conn"
+      ],
+      "type": "object"
+    },
+    "AdoptSystem": {
+      "additionalProperties": false,
+      "description": "A system service's connection: it may claim names and tap the bus.",
+      "properties": {
+        "trust": {
+          "$ref": "#/$defs/SystemTrust"
+        }
+      },
+      "required": [
+        "trust"
+      ],
+      "type": "object"
+    },
     "BrokerErrorCode": {
       "description": "Error codes the broker itself sends. Services may send their own.",
       "oneOf": [
@@ -68,6 +119,51 @@
       "required": [
         "window",
         "ops"
+      ],
+      "type": "object"
+    },
+    "HelloResult": {
+      "description": "Result of `hello`: who the broker says this connection is.",
+      "properties": {
+        "conn": {
+          "description": "This connection's number.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sender": {
+          "$ref": "#/$defs/Sender",
+          "description": "How the broker stamps this connection's messages."
+        }
+      },
+      "required": [
+        "conn",
+        "sender"
+      ],
+      "type": "object"
+    },
+    "ListResult": {
+      "description": "Result of `list`.",
+      "properties": {
+        "connections": {
+          "description": "How many connections the broker has.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "services": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Each claimed service name and the connection that holds it.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "services",
+        "connections"
       ],
       "type": "object"
     },
@@ -265,6 +361,19 @@
           "type": "object"
         }
       ]
+    },
+    "NameParams": {
+      "description": "Params of `claim` and `release`.",
+      "properties": {
+        "name": {
+          "description": "A service name: lowercase letters, digits, `-` and `.`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
     },
     "NodeKind": {
       "description": "Node types understood by the compositor. Phase 0 renders the primitives\n(`rect`, `text`, `group`); widgets arrive in M4 and M5.",
@@ -492,6 +601,47 @@
           "type": "object"
         }
       ]
+    },
+    "SystemTrust": {
+      "description": "The one trust level `adopt` names explicitly.",
+      "enum": [
+        "system"
+      ],
+      "type": "string"
+    },
+    "TapEvent": {
+      "description": "The data of each publish on the tap topic: one message the broker received.",
+      "properties": {
+        "bus_id": {
+          "description": "For a request the broker forwards: the id the service sees and answers\nwith, to match the request to its response in the trace.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conn": {
+          "description": "The connection the message came from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "msg": {
+          "$ref": "#/$defs/Message",
+          "description": "The message as the connection sent it (before the broker rewrote its id)."
+        },
+        "sender": {
+          "$ref": "#/$defs/Sender",
+          "description": "How the broker stamped it."
+        }
+      },
+      "required": [
+        "conn",
+        "sender",
+        "msg"
+      ],
+      "type": "object"
     }
   },
   "$id": "idealos:protocol",

@@ -20,9 +20,11 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use protocol::broker::{AdoptParams, AdoptResult, NameParams, method};
 use protocol::bus::{BROKER, FrameError, Message, decode_frame, encode_frame};
 use protocol::unix::send_with_fds;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::Value;
 
 /// How busd finds session's connection.
 pub const SESSION_FD_ENV: &str = "IDEALOS_BUS_SESSION_FD";
@@ -88,7 +90,8 @@ impl Link {
         let (ours, theirs) = UnixStream::pair()?;
         ours.set_nonblocking(true)?;
         let mut link = Link { stream: ours, next_id: 1, pending: HashMap::new(), buf: Vec::new() };
-        link.send(Message::request(0, BROKER, "claim", json!({"name": "session"})), None, "claim session")?;
+        let claim = to_value(NameParams { name: "session".into() });
+        link.send(Message::request(0, BROKER, method::CLAIM, claim), None, "claim session")?;
         Ok((link, Inherit { env: SESSION_FD_ENV, fd: theirs.into() }))
     }
 
@@ -96,14 +99,14 @@ impl Link {
     /// and return the other for the service to inherit.
     pub fn connection_for(&mut self, name: &str, role: &Role) -> io::Result<Inherit> {
         let params = match role {
-            Role::System => json!({"trust": "system"}),
-            Role::App(id) => json!({"app": id}),
+            Role::System => AdoptParams::system(),
+            Role::App(id) => AdoptParams::app(id),
             Role::None | Role::Broker => {
                 return Err(io::Error::other("only system services and apps get one"));
             }
         };
         let (service_end, broker_end) = UnixStream::pair()?;
-        let msg = Message::request(0, BROKER, "adopt", params).with_fds(1);
+        let msg = Message::request(0, BROKER, method::ADOPT, to_value(params)).with_fds(1);
         self.send(msg, Some(broker_end.as_fd()), &format!("connection for {name}"))?;
         Ok(Inherit { env: BUS_FD_ENV, fd: service_end.into() })
     }
@@ -169,8 +172,7 @@ impl Link {
         let Message::Response { id, ok, error, result, .. } = msg else { return };
         let what = self.pending.remove(&id).unwrap_or_else(|| format!("request {id}"));
         if ok {
-            let conn = result.as_ref().and_then(|r| r.get("conn")).and_then(Value::as_u64);
-            if let Some(conn) = conn {
+            if let Some(AdoptResult { conn }) = result.and_then(|r| AdoptResult::deserialize(&r).ok()) {
                 say!("busd took the {what} as connection {conn}");
             }
         } else if let Some(e) = error {
@@ -179,10 +181,15 @@ impl Link {
     }
 }
 
+fn to_value(v: impl serde::Serialize) -> Value {
+    serde_json::to_value(v).expect("broker params serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::unix::recv_with_fds;
+    use serde_json::json;
 
     #[test]
     fn roles_parse() {

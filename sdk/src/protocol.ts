@@ -42,6 +42,21 @@ export const MAX_TIMEOUT_MS = 3600000;
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
 
+/** An app's connection: its messages are stamped with this reverse-DNS app id. */
+export type AdoptApp = { app: string };
+
+/**
+ * Params of `adopt`, with which session hands the broker one end of a socket
+ * pair (the request's one descriptor) and says what the connection is.
+ */
+export type AdoptParams = AdoptApp | AdoptSystem;
+
+/** Result of `adopt`: the new connection's number. */
+export type AdoptResult = { conn: number };
+
+/** A system service's connection: it may claim names and tap the bus. */
+export type AdoptSystem = { trust: SystemTrust };
+
 /** Error codes the broker itself sends. Services may send their own. */
 export type BrokerErrorCode =
   /** The frame was valid JSON but the message makes no sense (unknown method, bad params). */
@@ -67,6 +82,22 @@ export type BusError = { code: string; message: string };
 
 /** Params of a `compositor.commit` request. */
 export type Commit = { window: number; ops: SceneOp[] };
+
+/** Result of `hello`: who the broker says this connection is. */
+export type HelloResult = {
+  /** This connection's number. */
+  conn: number;
+  /** How the broker stamps this connection's messages. */
+  sender: Sender;
+};
+
+/** Result of `list`. */
+export type ListResult = {
+  /** Each claimed service name and the connection that holds it. */
+  services: Record<string, number>;
+  /** How many connections the broker has. */
+  connections: number;
+};
 
 /** One bus frame's JSON. */
 export type Message =
@@ -103,6 +134,12 @@ export type Message =
   | { kind: "unsubscribe"; id: number; topic: string }
   | { kind: "publish"; topic: string; data?: unknown; fds?: number; from?: Sender | null };
 
+/** Params of `claim` and `release`. */
+export type NameParams = {
+  /** A service name: lowercase letters, digits, `-` and `.`. */
+  name: string;
+};
+
 /**
  * Node types understood by the compositor. Phase 0 renders the primitives
  * (`rect`, `text`, `group`); widgets arrive in M4 and M5.
@@ -130,3 +167,21 @@ export type Sender =
    * claims a name), identified by its bus connection number.
    */
   | { conn: number };
+
+/** The one trust level `adopt` names explicitly. */
+export type SystemTrust = "system";
+
+/** The data of each publish on the tap topic: one message the broker received. */
+export type TapEvent = {
+  /** The connection the message came from. */
+  conn: number;
+  /** How the broker stamped it. */
+  sender: Sender;
+  /** The message as the connection sent it (before the broker rewrote its id). */
+  msg: Message;
+  /**
+   * For a request the broker forwards: the id the service sees and answers
+   * with, to match the request to its response in the trace.
+   */
+  bus_id?: number | null;
+};

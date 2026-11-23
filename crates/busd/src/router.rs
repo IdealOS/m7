@@ -17,11 +17,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
+use protocol::broker::{
+    AdoptApp, AdoptParams, AdoptResult, AdoptSystem, HelloResult, ListResult, NameParams, SystemTrust,
+    TapEvent, method,
+};
 use protocol::bus::{
     self, BROKER, BusError, DEFAULT_TIMEOUT_MS, MAX_NAMES, MAX_PENDING_REQUESTS, MAX_SUBSCRIPTIONS,
     MAX_TIMEOUT_MS, Message, Sender, TAP_TOPIC, code,
 };
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 pub type ConnId = u64;
 
@@ -135,7 +141,7 @@ impl Router {
                 if let Some((requester, id)) = adopted_for {
                     out.push(Action::Deliver {
                         to: vec![requester],
-                        msg: Message::ok(id, json!({"conn": conn})),
+                        msg: Message::ok(id, to_value(AdoptResult { conn })),
                     });
                 }
             }
@@ -163,7 +169,7 @@ impl Router {
     fn message(&mut self, now: Instant, conn: ConnId, sender: Sender, msg: Message, out: &mut Vec<Action>) {
         match msg {
             Message::Request { id, ref to, ref method, ref params, fds, .. } if to == BROKER => {
-                if method == "adopt" {
+                if method == method::ADOPT {
                     return match self.adopt(conn, params, fds) {
                         Ok(trust) => out.push(Action::Adopt { requester: conn, id, trust }),
                         Err(e) => out.push(Action::Deliver { to: vec![conn], msg: Message::failed(id, e) }),
@@ -292,9 +298,9 @@ impl Router {
         if fds != 1 {
             return Err(refuse(code::BAD_REQUEST, "adopt takes exactly one descriptor"));
         }
-        match (params.get("app").and_then(Value::as_str), params.get("trust").and_then(Value::as_str)) {
-            (Some(app), None) if valid_app_id(app) => Ok(Trust::App { app: app.into() }),
-            (None, Some("system")) => Ok(Trust::System),
+        match parse::<AdoptParams>(params) {
+            Some(AdoptParams::App(AdoptApp { app })) if valid_app_id(&app) => Ok(Trust::App { app }),
+            Some(AdoptParams::System(AdoptSystem { trust: SystemTrust::System })) => Ok(Trust::System),
             _ => Err(refuse(
                 code::BAD_REQUEST,
                 r#"adopt needs {"app": "<reverse-DNS id>"} or {"trust": "system"}"#,
@@ -304,10 +310,11 @@ impl Router {
 
     /// The broker's own methods.
     fn broker(&mut self, conn: ConnId, sender: &Sender, id: u64, method: &str, params: &Value) -> Message {
-        let name = params.get("name").and_then(Value::as_str);
+        let name = parse::<NameParams>(params).map(|p| p.name);
+        let name = name.as_deref();
         match method {
-            "hello" => Message::ok(id, json!({"conn": conn, "sender": sender})),
-            "claim" => {
+            method::HELLO => Message::ok(id, to_value(HelloResult { conn, sender: sender.clone() })),
+            method::CLAIM => {
                 let Some(name) = name.filter(|n| valid_name(n)) else {
                     return Message::err(
                         id,
@@ -338,7 +345,7 @@ impl Router {
                     }
                 }
             }
-            "release" => {
+            method::RELEASE => {
                 let Some(name) = name else {
                     return Message::err(id, code::BAD_REQUEST, "release needs a name");
                 };
@@ -348,10 +355,9 @@ impl Router {
                 }
                 Message::ok(id, Value::Null)
             }
-            "list" => {
-                let services: serde_json::Map<String, Value> =
-                    self.names.iter().map(|(n, c)| (n.clone(), json!(c))).collect();
-                Message::ok(id, json!({"services": services, "connections": self.conns.len()}))
+            method::LIST => {
+                let services = self.names.iter().map(|(n, c)| (n.clone(), *c)).collect();
+                Message::ok(id, to_value(ListResult { services, connections: self.conns.len() as u64 }))
             }
             other => Message::err(id, code::BAD_REQUEST, format!("the broker has no method {other:?}")),
         }
@@ -379,18 +385,17 @@ impl Router {
         if to.is_empty() {
             return;
         }
-        let mut data = json!({"conn": conn, "sender": sender, "msg": msg});
-        if let Message::Request { to: name, .. } = msg
-            && self.names.contains_key(name)
-        {
-            // The id the service will see and answer with, to match the two up.
-            data["bus_id"] = json!(self.next_id);
-        }
+        // For a request that will be forwarded: the id the service will see.
+        let bus_id = match msg {
+            Message::Request { to: name, .. } if self.names.contains_key(name) => Some(self.next_id),
+            _ => None,
+        };
+        let event = TapEvent { conn, sender: sender.clone(), msg: msg.clone(), bus_id };
         out.push(Action::Deliver {
             to,
             msg: Message::Publish {
                 topic: TAP_TOPIC.into(),
-                data,
+                data: to_value(event),
                 fds: 0,
                 from: Some(Sender::Service(BROKER.into())),
             },
@@ -449,6 +454,15 @@ impl Router {
     }
 }
 
+/// Params as `T`, or `None` if they don't have its shape.
+fn parse<T: DeserializeOwned>(params: &Value) -> Option<T> {
+    T::deserialize(params).ok()
+}
+
+fn to_value(v: impl Serialize) -> Value {
+    serde_json::to_value(v).expect("broker types serialize")
+}
+
 /// App ids are reverse-DNS names such as `org.idealos.mail`: at least two
 /// dot-separated segments of letters, digits and `-`.
 fn valid_app_id(id: &str) -> bool {
@@ -467,6 +481,7 @@ fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     struct Harness {
         router: Router,

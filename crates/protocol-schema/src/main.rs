@@ -5,6 +5,7 @@
 //! Besides the types under `$defs`, the document carries the protocol's constants
 //! under `x-constants`, which JSON Schema has no keyword for.
 
+use protocol::broker;
 use protocol::bus::{self, code};
 use serde_json::{Value, json};
 
@@ -12,6 +13,12 @@ fn document() -> Value {
     let mut g = schemars::generate::SchemaSettings::draft2020_12().into_generator();
     g.subschema_for::<protocol::Message>();
     g.subschema_for::<protocol::Commit>();
+    g.subschema_for::<broker::HelloResult>();
+    g.subschema_for::<broker::NameParams>();
+    g.subschema_for::<broker::ListResult>();
+    g.subschema_for::<broker::AdoptParams>();
+    g.subschema_for::<broker::AdoptResult>();
+    g.subschema_for::<broker::TapEvent>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -124,7 +131,21 @@ mod tests {
     #[test]
     fn every_wire_type_is_exported() {
         let defs = defs();
-        for name in ["Message", "Sender", "BusError", "BrokerErrorCode", "Commit", "SceneOp", "NodeKind"] {
+        for name in [
+            "Message",
+            "Sender",
+            "BusError",
+            "BrokerErrorCode",
+            "Commit",
+            "SceneOp",
+            "NodeKind",
+            "HelloResult",
+            "NameParams",
+            "ListResult",
+            "AdoptParams",
+            "AdoptResult",
+            "TapEvent",
+        ] {
             assert!(defs.contains_key(name), "{name} missing");
         }
         let codes = defs["BrokerErrorCode"]["oneOf"].as_array().unwrap();
