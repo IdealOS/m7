@@ -17,11 +17,12 @@ IDEALOS_USERSPACE_DEPENDENCIES = host-pkgconf libinput libxkbcommon libudev
 IDEALOS_USERSPACE_CARGO_ENV = PKG_CONFIG_ALLOW_CROSS=1
 
 # The device has no window system, so build the compositor with only the KMS
-# backend. `session` has no features. kms-probe, db-bench and js-bench (Spikes A/B,
-# C and D) are dev tools that hw-report runs to measure new hardware.
-IDEALOS_USERSPACE_BINS = session compositor kms-probe db-bench js-bench
+# backend. `session`, `busd` and `osctl` have no features. kms-probe, db-bench and
+# js-bench (Spikes A/B, C and D) are dev tools that hw-report runs to measure new
+# hardware.
+IDEALOS_USERSPACE_BINS = session busd osctl compositor kms-probe db-bench js-bench
 IDEALOS_USERSPACE_CARGO_BUILD_OPTS = \
-	-p session \
+	-p session -p busd -p osctl \
 	-p compositor --no-default-features --features kms \
 	-p kms-probe -p db-bench -p js-bench
 

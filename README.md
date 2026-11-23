@@ -21,6 +21,8 @@ The same compositor on the QEMU image, through its KMS backend:
 ```sh
 make hosted        # compositor demo in a window: drag title bars, click to raise, Option+Tab
 make bench         # release build, redraws every frame, logs frame times
+make bus           # the message bus broker; then, in another terminal:
+make bus-bench     #   round trip and throughput through it (osctl bus bench)
 make spike-db      # Spike C: Loro + SQLite + FTS5 at 10,000 docs
 make spike-js      # Spike D: memory and startup of 8 QuickJS app processes
 make spike-kms     # Spike A: wgpu -> KMS on virtio-gpu in a QEMU VM (needs lima + qemu)
@@ -65,6 +67,9 @@ on the device in `/data/reports`.
 
 ```
 crates/protocol     bus envelope and scene-graph ops (shared by Rust and, via sdk/, TypeScript)
+crates/busd         message bus broker: routing, pub/sub, sender identity, permission hook
+crates/bus-client   async Rust client for the bus
+crates/osctl        command-line tool: osctl bus list|call|pub|sub|tap|echo|bench
 crates/compositor   scene graph, wgpu renderer, window manager, hosted + KMS backends
 crates/session      first process after init: starts and supervises services
 spikes/             db-bench (C), js-bench (D), kms-probe (A/B): benchmarks to rerun on the Pi
@@ -95,6 +100,17 @@ docs/               feature list, implementation plan, screenshots
 | SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes, and checks that `session` and the compositor restarted from the overlay with the old shell gone. Not yet run against a Pi. |
 | Hardware report (`make pi-report`) | **Works against QEMU**: `make smoke-report` runs it end to end and checks every section, both kms-probe runs, the compositor finding input, both benchmark tables, and that the desktop comes back. Not yet run on a Pi. |
 | SD card flashing | `tools/flash-sd` is syntax-checked but **never run**. |
+
+### Message bus (M2)
+
+| Item | State |
+| --- | --- |
+| `busd` broker | **Works** on macOS and in the QEMU image, where session starts it on `/run/idealos/bus.sock` and `make smoke-qemu` sends a request through it. Routes requests by service name and rewrites request ids, so two clients can both use id 1. A request ends with exactly one answer: the service's, a broker `timeout` (default 30 s, or `timeout_ms`), `service_gone`, or nothing after the caller cancels. Also handles pub/sub with `prefix.*` wildcards, and stamps every message with its sender (a client's own `from` is dropped). Each connection's outgoing queue is bounded at 4096 frames and 16 MiB; a connection that stops reading is dropped, except a tap, which just misses trace messages. The permission hook allows everything until M6. |
+| Who may connect | Only the broker's own user or root, checked with peer credentials; the socket's directory is owner-only. All such connections are trusted: they may claim service names and tap the bus. **Not yet:** apps get their own connections from `session` (a socket pair per app, handed to the broker), which needs file-descriptor passing. |
+| `bus-client` | Async Rust client: requests (dropping one before it finishes cancels it), subscriptions (dropping the last one on a pattern unsubscribes), publishing, and serving claimed names. |
+| `osctl bus` | `list`, `call`, `pub`, `sub`, `tap` (a live trace of every message), `echo` (a test service), `bench`. |
+| Benchmarks | `osctl bus bench`, through a running broker. Apple M3 Mac (release build): 37.5 µs round trip p50, 290,000 requests/s with 64 in flight, 1.24 million publishes/s. QEMU image on the same Mac (`make smoke-report`, 3 s runs): 18.5 µs p50, 262,000 requests/s and 1.47 million publishes/s with 64-byte payloads; 47.7 µs, 124,000 requests/s and 237,000 publishes/s with 4 KiB. `make smoke-qemu` checks a 1 s run. `make pi-report` runs it on a Pi; not yet run there. |
+| Not started | File-descriptor passing (`SCM_RIGHTS`), JSON Schema export and generated TypeScript types (`sdk/src/protocol.ts` is still hand-written), fuzzing the frame parser. |
 
 ### Spikes
 

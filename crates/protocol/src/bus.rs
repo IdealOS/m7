@@ -11,6 +11,35 @@ use serde_json::Value;
 /// passed file descriptors, never inside JSON, so frames stay small.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 
+/// The broker's own name: requests sent `to` it are handled by `busd` itself
+/// (`hello`, `claim`, `release`, `list`).
+pub const BROKER: &str = "bus";
+
+/// Topic the broker publishes a trace of every message it receives on. Only
+/// trusted connections may subscribe (`osctl bus tap` does).
+pub const TAP_TOPIC: &str = "bus.tap";
+
+/// How long the broker waits for a response before answering `timeout` itself,
+/// unless the request sets `timeout_ms`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Error codes the broker itself sends. Services may send their own.
+pub mod code {
+    /// The frame was valid JSON but the message makes no sense (unknown method,
+    /// bad params).
+    pub const BAD_REQUEST: &str = "bad_request";
+    /// No connection has claimed the name the request was sent to.
+    pub const NO_SUCH_SERVICE: &str = "no_such_service";
+    /// Another connection already holds the name.
+    pub const NAME_TAKEN: &str = "name_taken";
+    /// The permission hook refused the message.
+    pub const PERMISSION_DENIED: &str = "permission_denied";
+    /// The service didn't answer within the request's timeout.
+    pub const TIMEOUT: &str = "timeout";
+    /// The service disconnected before answering.
+    pub const SERVICE_GONE: &str = "service_gone";
+}
+
 /// Who sent a message, as stamped by the broker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,6 +48,9 @@ pub enum Sender {
     Service(String),
     /// An app, identified by its app id and bus connection number.
     App { app: String, conn: u64 },
+    /// A trusted local connection (a tool such as `osctl`, or a service before it
+    /// claims a name), identified by its bus connection number.
+    Conn(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +68,9 @@ pub enum Message {
         method: String,
         #[serde(default)]
         params: Value,
+        /// Overrides [`DEFAULT_TIMEOUT_MS`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Sender>,
     },
@@ -47,6 +82,13 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<BusError>,
     },
+    /// The requester no longer wants the answer to request `id`. The broker
+    /// forwards it to the service and drops the response if one still comes.
+    Cancel {
+        id: u64,
+    },
+    /// `topic` is an exact topic, or a prefix ending in `.*` (see
+    /// [`topic_matches`]). The broker answers with a response carrying `id`.
     Subscribe {
         id: u64,
         topic: String,
@@ -62,6 +104,78 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Sender>,
     },
+}
+
+impl Message {
+    pub fn ok(id: u64, result: Value) -> Message {
+        Message::Response { id, ok: true, result: Some(result), error: None }
+    }
+
+    pub fn err(id: u64, code: &str, message: impl Into<String>) -> Message {
+        Message::Response {
+            id,
+            ok: false,
+            result: None,
+            error: Some(BusError { code: code.into(), message: message.into() }),
+        }
+    }
+}
+
+/// Whether subscription `pattern` covers `topic`. A pattern is an exact topic, a
+/// prefix ending in `.*` that matches every topic below it (`db.live.*` matches
+/// `db.live.7` and `db.live.7.x`, not `db.live` or `db.lively`), or `*` for every
+/// topic except the broker's own `bus.` topics.
+pub fn topic_matches(pattern: &str, topic: &str) -> bool {
+    if pattern == "*" {
+        return !topic.starts_with("bus.");
+    }
+    match pattern.strip_suffix(".*") {
+        None => pattern == topic,
+        Some(prefix) => {
+            topic.len() > prefix.len() + 1
+                && topic.starts_with(prefix)
+                && topic.as_bytes()[prefix.len()] == b'.'
+        }
+    }
+}
+
+/// Whether `pattern` is one [`topic_matches`] understands: `*`, or dot-separated
+/// non-empty segments with `*` allowed only as a final `.*`.
+pub fn valid_pattern(pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let body = pattern.strip_suffix(".*").unwrap_or(pattern);
+    valid_topic(body)
+}
+
+/// Whether `topic` can be published to: dot-separated non-empty segments, no `*`.
+pub fn valid_topic(topic: &str) -> bool {
+    !topic.is_empty() && !topic.contains('*') && topic.split('.').all(|s| !s.is_empty())
+}
+
+/// Where `busd` listens: `$IDEALOS_BUS` if set; otherwise `/run/idealos/bus.sock`
+/// on the device (Linux, running as root) and a per-user directory elsewhere, so
+/// hosted development on a Mac needs no setup.
+pub fn default_socket_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("IDEALOS_BUS") {
+        return p.into();
+    }
+    // init starts session with no USER set; a developer's shell in the build VM has one.
+    let root = match std::env::var("USER") {
+        Ok(user) => user == "root",
+        Err(_) => true,
+    };
+    if cfg!(target_os = "linux") && root {
+        return "/run/idealos/bus.sock".into();
+    }
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir).join("idealos").join("bus.sock"),
+        None => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+            std::env::temp_dir().join(format!("idealos-{user}")).join("bus.sock")
+        }
+    }
 }
 
 /// Encode a message as one length-prefixed frame.
@@ -118,6 +232,38 @@ mod tests {
             let again: Message = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
             assert_eq!(msg, again);
         }
+    }
+
+    #[test]
+    fn cancel_and_timeouts_round_trip() {
+        let line = r#"{"id": 7, "kind": "request", "to": "db", "method": "query", "timeout_ms": 500}"#;
+        let msg: Message = serde_json::from_str(line).unwrap();
+        assert!(matches!(msg, Message::Request { timeout_ms: Some(500), .. }));
+        let cancel: Message = serde_json::from_str(r#"{"kind": "cancel", "id": 7}"#).unwrap();
+        assert_eq!(cancel, Message::Cancel { id: 7 });
+        let conn = serde_json::to_value(Sender::Conn(3)).unwrap();
+        assert_eq!(conn, serde_json::json!({"conn": 3}));
+    }
+
+    #[test]
+    fn topic_patterns() {
+        assert!(topic_matches("ui.event", "ui.event"));
+        assert!(!topic_matches("ui.event", "ui.events"));
+        assert!(topic_matches("db.live.*", "db.live.7"));
+        assert!(topic_matches("db.live.*", "db.live.7.x"));
+        assert!(!topic_matches("db.live.*", "db.live"));
+        assert!(!topic_matches("db.live.*", "db.lively"));
+        assert!(topic_matches("*", "anything.at.all"));
+        // The broker's trace only goes to connections that name it.
+        assert!(!topic_matches("*", "bus.tap"));
+        assert!(topic_matches("bus.*", "bus.tap"));
+        for good in ["*", "a", "a.b", "a.*", "a.b.*"] {
+            assert!(valid_pattern(good), "{good}");
+        }
+        for bad in ["", ".", "a.", ".a", "a..b", "a*", "*.a", "a.*.b", ".*"] {
+            assert!(!valid_pattern(bad), "{bad}");
+        }
+        assert!(!valid_topic("a.*"));
     }
 
     #[test]

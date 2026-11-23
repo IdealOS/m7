@@ -18,7 +18,7 @@ BIN="$REPO/target/device"
 # the copies baked into the read-only image. Write to .new and rename, because a
 # running executable can't be overwritten in place. (Dropbear has no SFTP server,
 # so plain ssh + cat instead of scp.)
-for b in session compositor kms-probe; do
+for b in session busd osctl compositor kms-probe; do
 	[ -f "$BIN/$b" ] || { echo "No $BIN/$b. Run tools/build-device-bins."; exit 1; }
 	remote "cat > /opt/idealos/bin/$b.new && chmod 755 /opt/idealos/bin/$b.new &&
 		mv /opt/idealos/bin/$b.new /opt/idealos/bin/$b" <"$BIN/$b"

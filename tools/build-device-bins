@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rebuild session, compositor and kms-probe with the image's Buildroot toolchain and
+# Rebuild session, busd, osctl, compositor and kms-probe with the image's Buildroot toolchain and
 # copy them to target/device. Needs a built image (tools/build-image) for BOARD.
 # Both boards share the toolchain (aarch64 cortex-a72, same glibc), so binaries
 # from either output run on both.
@@ -27,7 +27,7 @@ vm_run "set -e
 	export BR2_DL_DIR=\$HOME/br-dl
 	make -C \$HOME/out/$BOARD idealos-userspace-rebuild"
 mkdir -p "$BIN"
-for b in session compositor kms-probe; do
+for b in session busd osctl compositor kms-probe; do
 	rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:out/$BOARD/target/usr/bin/$b" "$BIN/$b"
 done
 echo "Device binaries in target/device"

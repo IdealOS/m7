@@ -1,0 +1,206 @@
+//! `osctl`: command-line tool for a running idealos system.
+//!
+//! ```text
+//! osctl [--socket PATH] bus list                      services and connection count
+//! osctl [--socket PATH] bus call TO METHOD [JSON] [--timeout MS]
+//! osctl [--socket PATH] bus pub TOPIC [JSON]
+//! osctl [--socket PATH] bus sub PATTERN               print publications as JSON lines
+//! osctl [--socket PATH] bus tap                       print every message the broker sees
+//! osctl [--socket PATH] bus echo NAME                 serve NAME, answering with the params
+//! osctl [--socket PATH] bus bench [--seconds N] [--size BYTES]
+//! ```
+//!
+//! Exit status: 0 on success, 1 when the bus or a service answers with an error or
+//! can't be reached, 2 for bad usage.
+
+mod bench;
+mod commands;
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use commands::Command;
+
+const USAGE: &str = "usage: osctl [--socket PATH] bus (list | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
+| sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])";
+
+fn main() {
+    let (socket, command) = match parse(std::env::args().skip(1).collect()) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("osctl: {e}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+    let result = runtime.block_on(async {
+        let path = socket.unwrap_or_else(protocol::bus::default_socket_path);
+        let bus = bus_client::Client::connect(&path).await.map_err(|e| e.to_string())?;
+        let mut out = std::io::stdout().lock();
+        commands::run(&bus, &path, command, &mut out).await
+    });
+    if let Err(e) = result {
+        let _ = std::io::stdout().flush();
+        eprintln!("osctl: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
+    let mut args = args.into_iter().peekable();
+    let mut socket = None;
+    if args.peek().map(String::as_str) == Some("--socket") {
+        args.next();
+        socket = Some(args.next().ok_or("--socket needs a path")?.into());
+    }
+    match args.next().as_deref() {
+        Some("bus") => {}
+        Some(other) => return Err(format!("unknown command {other}")),
+        None => return Err("missing command".into()),
+    }
+    let sub = args.next().ok_or("missing bus subcommand")?;
+    // Split the rest into positionals and --flag value pairs.
+    let mut positional = Vec::new();
+    let mut flags = Vec::new();
+    while let Some(arg) = args.next() {
+        if let Some(flag) = arg.strip_prefix("--") {
+            let value = args.next().ok_or(format!("--{flag} needs a value"))?;
+            flags.push((flag.to_owned(), value));
+        } else {
+            positional.push(arg);
+        }
+    }
+    let number = |name: &str, default: u64| -> Result<u64, String> {
+        match flags.iter().find(|(f, _)| f == name) {
+            Some((_, v)) => v.parse().map_err(|_| format!("--{name} must be a whole number, not {v}")),
+            None => Ok(default),
+        }
+    };
+    let allowed = |names: &[&str]| -> Result<(), String> {
+        match flags.iter().find(|(f, _)| !names.contains(&f.as_str())) {
+            Some((f, _)) => Err(format!("bus {sub} has no --{f}")),
+            None => Ok(()),
+        }
+    };
+    let json = |text: Option<&String>| -> Result<serde_json::Value, String> {
+        match text {
+            None => Ok(serde_json::Value::Null),
+            Some(t) => serde_json::from_str(t).map_err(|e| format!("not JSON: {t}: {e}")),
+        }
+    };
+    let arity = |min: usize, max: usize| -> Result<(), String> {
+        if positional.len() < min || positional.len() > max {
+            Err(format!(
+                "bus {sub} takes {} argument(s)",
+                if min == max { min.to_string() } else { format!("{min} to {max}") }
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    let command = match sub.as_str() {
+        "list" => {
+            arity(0, 0)?;
+            allowed(&[])?;
+            Command::List
+        }
+        "call" => {
+            arity(2, 3)?;
+            allowed(&["timeout"])?;
+            let timeout =
+                flags.iter().any(|(f, _)| f == "timeout").then(|| number("timeout", 0)).transpose()?;
+            Command::Call {
+                to: positional[0].clone(),
+                method: positional[1].clone(),
+                params: json(positional.get(2))?,
+                timeout: timeout.map(Duration::from_millis),
+            }
+        }
+        "pub" => {
+            arity(1, 2)?;
+            allowed(&[])?;
+            Command::Pub { topic: positional[0].clone(), data: json(positional.get(1))? }
+        }
+        "sub" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            Command::Sub { pattern: positional[0].clone() }
+        }
+        "tap" => {
+            arity(0, 0)?;
+            allowed(&[])?;
+            Command::Tap
+        }
+        "echo" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            Command::Echo { name: positional[0].clone() }
+        }
+        "bench" => {
+            arity(0, 0)?;
+            allowed(&["seconds", "size"])?;
+            Command::Bench { seconds: number("seconds", 2)?.max(1), size: number("size", 64)? as usize }
+        }
+        other => return Err(format!("unknown bus subcommand {other}")),
+    };
+    Ok((socket, command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse_str(line: &str) -> Result<(Option<PathBuf>, Command), String> {
+        parse(line.split(' ').map(str::to_owned).collect())
+    }
+
+    #[test]
+    fn parses_each_subcommand() {
+        assert_eq!(parse_str("bus list").unwrap(), (None, Command::List));
+        assert_eq!(
+            parse_str("--socket /tmp/b.sock bus call db query {\"a\":1} --timeout 250").unwrap(),
+            (
+                Some("/tmp/b.sock".into()),
+                Command::Call {
+                    to: "db".into(),
+                    method: "query".into(),
+                    params: json!({"a": 1}),
+                    timeout: Some(Duration::from_millis(250)),
+                }
+            )
+        );
+        assert_eq!(
+            parse_str("bus call echo ping").unwrap().1,
+            Command::Call { to: "echo".into(), method: "ping".into(), params: json!(null), timeout: None }
+        );
+        assert_eq!(
+            parse_str("bus pub a.b 3").unwrap().1,
+            Command::Pub { topic: "a.b".into(), data: json!(3) }
+        );
+        assert_eq!(parse_str("bus sub a.*").unwrap().1, Command::Sub { pattern: "a.*".into() });
+        assert_eq!(parse_str("bus tap").unwrap().1, Command::Tap);
+        assert_eq!(parse_str("bus echo e").unwrap().1, Command::Echo { name: "e".into() });
+        assert_eq!(parse_str("bus bench --size 1024").unwrap().1, Command::Bench { seconds: 2, size: 1024 });
+    }
+
+    #[test]
+    fn rejects_bad_usage() {
+        for bad in [
+            "",
+            "db list",
+            "bus",
+            "bus frobnicate",
+            "bus list extra",
+            "bus call db",
+            "bus call db query {not json",
+            "bus call db query --timeout soon",
+            "bus list --timeout 5",
+            "bus bench --seconds",
+            "--socket",
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
+}

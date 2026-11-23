@@ -1,9 +1,10 @@
 #!/bin/sh
 # Hardware report for a first boot on new hardware: what the board is, what the
-# display, GPU and input stacks found, and the Pi numbers for Spikes A/B, C and D.
+# display, GPU and input stacks found, the Pi numbers for Spikes A/B, C and D, and
+# the message bus's round trip and throughput.
 # Prints Markdown and saves a copy under /data/reports.
 #
-#   hw-report [--quick]     # --quick skips the database and JavaScript benchmarks
+#   hw-report [--quick]     # --quick skips the database, JavaScript and bus benchmarks
 #
 # Run it over SSH (tools/pi-report does), not from the console: it restarts
 # session without the compositor so kms-probe can take the display, which also
@@ -151,6 +152,16 @@ benches() {
 	$RUN db-bench --docs 10000 --db /data/db-bench.sqlite 2>&1
 	section "Spike D: QuickJS app processes"
 	$RUN js-bench 2>&1
+	bus
+}
+
+bus() {
+	section "Bus: round trip and throughput"
+	echo "osctl's own echo service on a second connection, through the running busd."
+	echo
+	# The session restarted after the KMS section; give busd a moment to listen.
+	for _ in 1 2 3 4 5 6 7 8 9 10; do $RUN osctl bus list >/dev/null 2>&1 && break; sleep 0.5; done
+	for size in 64 4096; do $RUN osctl bus bench --seconds 3 --size $size 2>&1; echo; done | fenced
 }
 
 main() {

@@ -16,7 +16,9 @@ import {
 const GOOD = [
   "Starting syslogd: OK",
   "session: started shell (pid 183)",
-  "session: started compositor (pid 184)",
+  "session: started bus (pid 184)",
+  "session: started compositor (pid 185)",
+  "[2026-11-21T10:00:00Z INFO  busd] busd: listening on /run/idealos/bus.sock",
   "[2026-11-21T10:00:00Z INFO  compositor::backend::kms::run] kms: virtio_gpu (virtio GPU) on Virtual-1 at 1280x800 @ 75 Hz; adapter llvmpipe (LLVM 22.1.8, 128 bits) (Vulkan)",
   "[2026-11-21T10:00:00Z INFO  compositor::backend::kms::run] kms: first frame on screen",
   "# echo SMOKE hostname $(hostname)",
@@ -25,9 +27,12 @@ const GOOD = [
   "SMOKE overlay ok",
   "SMOKE vulkan-loader ok",
   "SMOKE session ok",
-  "SMOKE compositor-pid 184",
+  "SMOKE compositor-pid 185",
   "SMOKE console-keyboard The keyboard is in off mode",
   "SMOKE shader-cache-files 3",
+  "SMOKE bus-socket /run/idealos/bus.sock",
+  'SMOKE bus-call {"n":1}',
+  "SMOKE bus-bench BENCH size=64 rtt_p50_us=180.2 rtt_p99_us=410.0 requests_per_s=21000 publishes_per_s=90000",
   "SMOKE end",
 ].join("\n");
 
@@ -55,7 +60,7 @@ test("the original findfs failure is caught", () => {
 test("a missing Vulkan loader and a compositor that never draws are reported", () => {
   const log = GOOD.replace("SMOKE vulkan-loader ok\n", "")
     .replace(/^.*kms: .*$\n/gm, "")
-    .replace("SMOKE compositor-pid 184", "SMOKE compositor-pid ");
+    .replace("SMOKE compositor-pid 185", "SMOKE compositor-pid ");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, ["Vulkan loader installed", "compositor showed a frame", "compositor still running"]);
 });
@@ -63,7 +68,7 @@ test("a missing Vulkan loader and a compositor that never draws are reported", (
 test("a compositor that crashes after its first frame is reported", () => {
   // session restarts it, so a pid may still be there; the exit line gives it away.
   const log = GOOD.replace(
-    "SMOKE compositor-pid 184",
+    "SMOKE compositor-pid 185",
     "session: compositor exited (signal: 11 (SIGSEGV)) after 1.2s\nSMOKE compositor-pid 190",
   );
   const failed = evaluate(log).filter((c) => !c.ok);
@@ -204,6 +209,9 @@ const REPORT = [
   "| Operation | Count | p50 | p99 | Throughput |",
   "## Spike D: QuickJS app processes",
   "| Process | Ready in | RSS | QuickJS heap |",
+  "## Bus: round trip and throughput",
+  "BENCH size=64 rtt_p50_us=180.2 rtt_p99_us=410.0 requests_per_s=21000 publishes_per_s=90000",
+  "BENCH size=4096 rtt_p50_us=260.0 rtt_p99_us=600.0 requests_per_s=12000 publishes_per_s=40000",
 ].join("\n");
 const RESTORED = [
   GOOD,
@@ -230,6 +238,38 @@ test("a report that leaves the compositor off fails", () => {
   const stopped = `${GOOD}\n[2026-11-22T10:00:30Z INFO  compositor::backend::kms::run] kms: stopping on SIGTERM`;
   const left = evaluateReport(REPORT, 0, stopped, 1, "session-conf present").filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(left, ["desktop restored after the report"]);
+});
+
+// --- Bus ---
+
+test("a missing broker is reported", () => {
+  const log = GOOD.replace("[2026-11-21T10:00:00Z INFO  busd] busd: listening on /run/idealos/bus.sock\n", "")
+    .replace("SMOKE bus-socket /run/idealos/bus.sock", "SMOKE bus-socket ls: /run/idealos/bus.sock: No such file or directory")
+    .replace('SMOKE bus-call {"n":1}', "SMOKE bus-call osctl: connect to the bus at /run/idealos/bus.sock: No such file or directory")
+    .replace(/SMOKE bus-bench .*/, "SMOKE bus-bench ");
+  const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
+  assert.deepEqual(failed, [
+    "session started busd on /run/idealos/bus.sock",
+    "a request went through the bus and back",
+    "bus benchmark ran",
+  ]);
+});
+
+test("busd counts even when the shell's message splits session's line", () => {
+  // Seen on the QEMU serial console: "session: started " + the shell's warning.
+  const log = GOOD.replace("session: started bus (pid 184)", "/bin/sh: can't access tty; job control turned offsession: started ");
+  assert.deepEqual(evaluate(log).filter((c) => !c.ok), []);
+});
+
+test("the bus benchmark's numbers are shown", () => {
+  const bench = evaluate(GOOD).find((c) => c.name === "bus benchmark ran");
+  assert.equal(bench?.detail, "21000 requests/s, round trip p50 180.2 µs");
+});
+
+test("a report without the bus benchmark is reported", () => {
+  const report = REPORT.replace(/BENCH size=4096 .*/, "osctl: connect to the bus at /run/idealos/bus.sock: Connection refused");
+  const failed = evaluateReport(report, 0, RESTORED, 1, "session-conf absent").filter((c) => !c.ok).map((c) => c.name);
+  assert.deepEqual(failed, ["report tools all ran", "benchmarks produced tables"]);
 });
 
 // --- Console and shader cache ---

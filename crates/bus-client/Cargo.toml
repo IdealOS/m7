@@ -1,0 +1,12 @@
+[package]
+name = "bus-client"
+description = "Async client for the message bus, used by every service, osctl and (later) the app host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol.workspace = true
+serde_json.workspace = true
+log.workspace = true
+tokio.workspace = true

@@ -26,6 +26,12 @@ export const GUEST_SCRIPT = [
   "echo SMOKE console-keyboard $(kbd_mode -C /dev/tty0 2>&1)",
   // Mesa caches compiled shaders under XDG_CACHE_HOME, which start-session puts on /data.
   "echo SMOKE shader-cache-files $(find /data/cache -type f 2>/dev/null | wc -l)",
+  // session starts busd; a service and a client talk through it.
+  "echo SMOKE bus-socket $(ls /run/idealos/bus.sock 2>&1)",
+  "osctl bus echo smoke-echo >/dev/null 2>&1 & sleep 0.5",
+  `echo SMOKE bus-call $(osctl bus call smoke-echo ping '{"n":1}' 2>&1)`,
+  "echo SMOKE bus-bench $(osctl bus bench --seconds 1 2>&1 | grep ^BENCH)",
+  "kill $!",
   "echo SMOKE end",
 ];
 
@@ -56,6 +62,9 @@ export function evaluate(log: string): Check[] {
   const cacheOff = /^.*for shader cache.*$/m.exec(log);
   // wgpu's OpenGL backend probing EGL; the renderer only asks for Vulkan.
   const egl = /^.*libEGL warning.*$/m.exec(log);
+  const bench = f.get("bus-bench") ?? "";
+  const rps = Number(/requests_per_s=(\d+)/.exec(bench)?.[1] ?? 0);
+  const rtt = /rtt_p50_us=([\d.]+)/.exec(bench)?.[1];
   return [
     {
       name: "session started its shell",
@@ -92,6 +101,19 @@ export function evaluate(log: string): Check[] {
       name: "Mesa shader cache on /data",
       ok: cacheFiles > 0 && !cacheOff,
       detail: cacheOff?.[0].trim() ?? `${cacheFiles} file(s) in /data/cache`,
+    },
+    {
+      // busd's own line, not session's "started bus": the console shell's messages
+      // can land in the middle of session's lines on the shared serial console.
+      name: "session started busd on /run/idealos/bus.sock",
+      ok: /busd: listening on \/run\/idealos\/bus\.sock/.test(log) && f.get("bus-socket") === "/run/idealos/bus.sock",
+      detail: f.get("bus-socket") ?? "not reported",
+    },
+    fact("bus-call", '{"n":1}', "a request went through the bus and back"),
+    {
+      name: "bus benchmark ran",
+      ok: rps > 0,
+      detail: rps ? `${rps} requests/s, round trip p50 ${rtt} µs` : bench || "not reported",
     },
   ];
 }
@@ -221,8 +243,8 @@ export function evaluateReport(
   probe: string,
 ): Check[] {
   const has = (re: RegExp) => re.test(report);
-  const errors = report.split("\n").filter((l) => /^(kms-probe|db-bench|js-bench|dev-exec): /.test(l));
-  const sections = ["Board", "Storage", "Display", "Input devices", "Spike A/B", "Spike C", "Spike D"];
+  const errors = report.split("\n").filter((l) => /^(kms-probe|db-bench|js-bench|osctl|dev-exec): /.test(l));
+  const sections = ["Board", "Storage", "Display", "Input devices", "Spike A/B", "Spike C", "Spike D", "Bus"];
   const missing = sections.filter((name) => !report.includes(`## ${name}`));
   const frames = log.split("\n").filter((l) => FIRST_FRAME.test(l)).length;
   const conf = /session-conf (\w+)/.exec(probe)?.[1];
@@ -242,8 +264,10 @@ export function evaluateReport(
     },
     {
       name: "benchmarks produced tables",
-      ok: has(/\| Operation \| Count \| p50/) && has(/\| Process \| Ready in/),
-      detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}`,
+      ok: has(/\| Operation \| Count \| p50/) && has(/\| Process \| Ready in/) && has(/^BENCH size=4096 /m),
+      detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}, bus ${
+        has(/^BENCH size=64 /m) && has(/^BENCH size=4096 /m) ? "yes" : "no"
+      }`,
     },
     {
       // hw-report stops the desktop's compositor by restarting session, and bounds its

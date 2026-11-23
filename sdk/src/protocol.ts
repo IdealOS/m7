@@ -22,7 +22,20 @@ export interface Commit {
   ops: SceneOp[];
 }
 
-export type Sender = { service: string } | { app: { app: string; conn: number } };
+/** Stamped by the broker. `conn` is a trusted local connection (a tool, or a
+ * service before it claims a name). */
+export type Sender = { service: string } | { app: { app: string; conn: number } } | { conn: number };
+
+/** The broker's own name: `hello`, `claim`, `release` and `list` go to it. */
+export const BROKER = "bus";
+/** The broker's trace of every message; only trusted connections may subscribe. */
+export const TAP_TOPIC = "bus.tap";
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Error codes the broker itself sends. Services may send their own. */
+export type BrokerErrorCode =
+  | "bad_request" | "no_such_service" | "name_taken"
+  | "permission_denied" | "timeout" | "service_gone";
 
 export interface BusError {
   code: string;
@@ -30,8 +43,9 @@ export interface BusError {
 }
 
 export type Message =
-  | { kind: "request"; id: number; to: string; method: string; params?: unknown; from?: Sender }
+  | { kind: "request"; id: number; to: string; method: string; params?: unknown; timeout_ms?: number; from?: Sender }
   | { kind: "response"; id: number; ok: boolean; result?: unknown; error?: BusError }
+  | { kind: "cancel"; id: number }
   | { kind: "subscribe"; id: number; topic: string }
   | { kind: "unsubscribe"; id: number; topic: string }
   | { kind: "publish"; topic: string; data?: unknown; from?: Sender };
