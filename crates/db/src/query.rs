@@ -69,6 +69,25 @@ pub fn compile(q: &Query) -> Result<Compiled> {
     Ok(Compiled { sql, params: c.params })
 }
 
+/// SQL that returns a row if any of the documents `rows` (by row number) matches
+/// `q`'s type and filter, ignoring its order and limit. Live queries use it to
+/// skip re-running when no changed document matches.
+pub fn compile_probe(q: &Query, rows: &[i64]) -> Result<Compiled> {
+    if !valid_type(&q.doc_type) {
+        return bad(format!("not a document type: {:?}", q.doc_type));
+    }
+    let mut c = Compiler { params: vec![Sql::Text(q.doc_type.clone())], terms: 0 };
+    let filter = c.filter(&q.filter, 0)?;
+    let list = c.bind(Sql::Text(serde_json::to_string(rows).expect("numbers serialize")));
+    let sql = format!(
+        "SELECT 1 FROM doc_json JOIN documents d ON d.doc = doc_json.doc
+         WHERE doc_json.doc IN (SELECT value FROM json_each({list}))
+           AND doc_json.type = ?1 AND {filter}
+         LIMIT 1"
+    );
+    Ok(Compiled { sql, params: c.params })
+}
+
 /// `text` as an FTS5 query matching documents that contain every word, with each
 /// word quoted so query syntax in it (`AND`, `"`, `*`, `:`) is just text. `None`
 /// when there are no words.

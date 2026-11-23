@@ -210,7 +210,7 @@ enum Job {
     Unwatch { id: u64 },
     /// Re-run the live queries that changes since the last flush could affect.
     Flush,
-    /// Take the hourly snapshot and prune old ones.
+    /// Refresh query statistics, take the hourly snapshot and prune old ones.
     Snapshot,
     /// Record a blob whose file was just written.
     AddBlob { hash: String, size: u64, reply: Reply },
@@ -464,7 +464,7 @@ fn work(
                     flush.notify_one();
                 }
             }
-            Job::Snapshot => match w.snapshots.take(&w.store) {
+            Job::Snapshot => match w.store.optimize().and_then(|()| w.snapshots.take(&w.store)) {
                 Ok(s) => {
                     log::info!("dbd: snapshot {} ({} bytes)", s.name, s.bytes);
                     if let Err(e) = w.snapshots.prune(db::snapshot::KEEP) {

@@ -41,9 +41,18 @@ pub struct Blobs {
 }
 
 impl Blobs {
+    /// The blob store in `dir`, created if needed. Uploads a crash left half-written
+    /// (`.incoming-*`) are deleted, so open it once, before any upload starts.
     pub fn new(dir: impl Into<PathBuf>) -> Result<Blobs> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
+        for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {
+            let entry = entry.map_err(|e| io(&dir, e))?;
+            if entry.file_name().to_string_lossy().starts_with(".incoming-") {
+                let path = entry.path();
+                std::fs::remove_file(&path).map_err(|e| io(&path, e))?;
+            }
+        }
         Ok(Blobs { dir })
     }
 

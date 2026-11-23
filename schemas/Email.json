@@ -43,5 +43,5 @@
       }
     }
   },
-  "x-indexes": ["date", "threadId", "messageId", "read"]
+  "x-indexes": ["date", "threadId", "messageId", "read", "from.address"]
 }

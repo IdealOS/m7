@@ -278,8 +278,8 @@ export function evaluateReport(
   probe: string,
 ): Check[] {
   const has = (re: RegExp) => re.test(report);
-  const errors = report.split("\n").filter((l) => /^(kms-probe|db-bench|js-bench|osctl|dev-exec): /.test(l));
-  const sections = ["Board", "Storage", "Display", "Input devices", "Spike A/B", "Spike C", "Spike D", "Bus"];
+  const errors = report.split("\n").filter((l) => /^(kms-probe|db-bench|store-bench|js-bench|osctl|dev-exec): /.test(l));
+  const sections = ["Board", "Storage", "Display", "Input devices", "Spike A/B", "Spike C", "Database", "Spike D", "Bus"];
   const missing = sections.filter((name) => !report.includes(`## ${name}`));
   const frames = log.split("\n").filter((l) => FIRST_FRAME.test(l)).length;
   const conf = /session-conf (\w+)/.exec(probe)?.[1];
@@ -299,8 +299,12 @@ export function evaluateReport(
     },
     {
       name: "benchmarks produced tables",
-      ok: has(/\| Operation \| Count \| p50/) && has(/\| Process \| Ready in/) && has(/^BENCH size=4096 /m),
-      detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}, bus ${
+      ok:
+        has(/\| Operation \| Count \| p50/) &&
+        has(/\| Store operation \| Count \| p50/) &&
+        has(/\| Process \| Ready in/) &&
+        has(/^BENCH size=4096 /m),
+      detail: `db-bench ${has(/\| Operation \|/) ? "yes" : "no"}, store-bench ${has(/\| Store operation \|/) ? "yes" : "no"}, js-bench ${has(/\| Process \|/) ? "yes" : "no"}, bus ${
         has(/^BENCH size=64 /m) && has(/^BENCH size=4096 /m) ? "yes" : "no"
       }`,
     },

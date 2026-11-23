@@ -762,6 +762,7 @@ fn live_query_parts_rebuild_the_result() {
                 filter: if rng.below(3) == 0 { Map::new() } else { random_filter(&mut rng, 1) },
                 order_by,
                 limit: (rng.below(2) == 0).then(|| 1 + rng.below(6) as u32),
+                offset: (rng.below(4) == 0).then(|| rng.below(3) as u32),
                 ..Query::all("T")
             };
             let mut list = Vec::new();
@@ -989,7 +990,11 @@ fn check_ref_tables(s: &Store, at: &str) {
 #[test]
 fn blobs_are_stored_once_by_hash_and_counted() {
     let dir = TempDir::new("blobs");
+    // A half-written upload left by a crash is cleaned up when the store opens.
+    std::fs::create_dir_all(dir.0.join("blobs")).unwrap();
+    std::fs::write(dir.0.join("blobs").join(".incoming-crashed"), b"half").unwrap();
     let blobs = Blobs::new(dir.0.join("blobs")).unwrap();
+    assert!(!dir.0.join("blobs").join(".incoming-crashed").exists());
     let mut s = Store::open_in_memory().unwrap();
     let bytes = b"hello, blob".repeat(100_000);
     let (hash, size) = blobs.write(&mut &bytes[..], blobs::MAX_BLOB_BYTES).unwrap();

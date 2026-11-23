@@ -201,7 +201,9 @@ impl Store {
         migrate(&conn)?;
         schemas::sync_indexes(&conn)?;
         let peer = read_peer(&conn)?;
-        Ok(Store { conn, peer })
+        let store = Store { conn, peer };
+        store.optimize()?;
+        Ok(store)
     }
 
     /// Create a document of `doc_type` holding `data`.
@@ -315,6 +317,24 @@ impl Store {
             .ok_or_else(|| Error::NotFound(id.into()))?;
         let tx = self.conn.unchecked_transaction()?;
         load(&tx, row, self.peer)
+    }
+
+    /// Refresh SQLite's statistics where they look stale (`PRAGMA optimize`), so the
+    /// planner picks the right expression index. Without them it prefers an index
+    /// that avoids sorting, even when another would skip almost every row. Cheap
+    /// when nothing changed; dbd runs it at startup and hourly.
+    pub fn optimize(&self) -> Result<()> {
+        // 0x10002: also analyze tables that have never been analyzed, with a row
+        // limit so a big table can't make this slow.
+        self.conn.execute_batch("PRAGMA optimize = 0x10002")?;
+        Ok(())
+    }
+
+    /// Whether live document `id`'s JSON copy (what queries see) still equals its
+    /// Loro document (the source of truth).
+    pub fn verify(&self, id: &str) -> Result<bool> {
+        let stored = self.get(id)?.data;
+        Ok(loro_json::read(&self.loro(id)?) == stored)
     }
 
     /// Run `sql` and return its rows' first column, for tests and `--explain`.

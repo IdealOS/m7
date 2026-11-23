@@ -216,6 +216,8 @@ const REPORT = [
   "[2026-11-22T10:00:00Z INFO  compositor::backend::kms::input] input: added QEMU Virtio Keyboard (keyboard)",
   "## Spike C: database (10,000 documents on /data)",
   "| Operation | Count | p50 | p99 | Throughput |",
+  "## Database: the store (10,000 emails on /data)",
+  "| Store operation | Count | p50 | p99 | Throughput |",
   "## Spike D: QuickJS app processes",
   "| Process | Ready in | RSS | QuickJS heap |",
   "## Bus: round trip and throughput",

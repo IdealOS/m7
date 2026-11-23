@@ -150,6 +150,8 @@ kms() {
 benches() {
 	section "Spike C: database (10,000 documents on /data)"
 	$RUN db-bench --docs 10000 --db /data/db-bench.sqlite 2>&1
+	section "Database: the store (10,000 emails on /data)"
+	$RUN store-bench --docs 10000 --dir /data/store-bench 2>&1
 	section "Spike D: QuickJS app processes"
 	$RUN js-bench 2>&1
 	bus
