@@ -42,11 +42,20 @@ export const MAX_PENDING_REQUESTS = 1024;
 /** Most documents one query returns; a larger `limit` is an error. */
 export const MAX_QUERY_LIMIT = 10000;
 
+/**
+ * Most streamed requests one connection may have open at once; they don't count against
+ * `MAX_PENDING_REQUESTS`.
+ */
+export const MAX_STREAMS = 256;
+
 /** Most subscription patterns one connection may hold. */
 export const MAX_SUBSCRIPTIONS = 256;
 
 /** Longest `timeout_ms` the broker honors; longer ones are shortened to this. */
 export const MAX_TIMEOUT_MS = 3600000;
+
+/** Most live queries (`watch`) the database service keeps open at once, across every caller. */
+export const MAX_WATCHES = 4096;
 
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
@@ -177,7 +186,14 @@ export type Message =
     fds?: number;
     from?: Sender | null;
     params?: unknown;
-    /** Overrides `DEFAULT_TIMEOUT_MS`. */
+    /**
+     * Ask for a streamed answer: the service may send any number of
+     * `Stream` frames before its response, and the request has no
+     * timeout. It stays open until the service responds, the requester
+     * cancels, or either side disconnects.
+     */
+    stream?: boolean;
+    /** Overrides `DEFAULT_TIMEOUT_MS`. Not allowed on a streamed request. */
     timeout_ms?: number | null;
   }
   | {
@@ -188,6 +204,11 @@ export type Message =
     fds?: number;
     result?: unknown;
   }
+  /**
+   * One part of a streamed answer to request `id`, from the service it went to.
+   * The broker forwards it under the requester's id; the request stays open.
+   */
+  | { kind: "stream"; id: number; data?: unknown }
   /**
    * The requester no longer wants the answer to request `id`. The broker
    * forwards it to the service and drops the response if one still comes.
@@ -309,3 +330,33 @@ export type VersionInfo = {
   /** The change set this one undid, if it was an undo. */
   undoes?: number | null;
 };
+
+/**
+ * A part of `watch`'s streamed answer.
+ *
+ * To keep a list up to date: drop the `removed` ids, replace the `changed`
+ * documents, append the `added` ones, and then, if `order` is present, sort the
+ * list to match it.
+ */
+export type WatchEvent =
+  /** The first part: every matching document, in order. */
+  | { kind: "initial"; docs: Doc[] }
+  /** What changed since the previous part. */
+  | {
+    kind: "diff";
+    /** Documents that are now in the result and weren't before. */
+    added: Doc[];
+    /** Documents still in the result whose contents changed. */
+    changed: Doc[];
+    /**
+     * Ids of documents no longer in the result (deleted, no longer matching,
+     * or pushed past the limit).
+     */
+    removed: string[];
+    /**
+     * Every id in the result, in order. Present whenever the order isn't
+     * just the previous one with the removed ids taken out (so whenever
+     * something was added or moved).
+     */
+    order?: string[] | null;
+  };

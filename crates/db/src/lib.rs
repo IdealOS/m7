@@ -14,10 +14,12 @@
 //! Spike C measured this write path at about 0.1 ms per write on a Mac.
 
 mod history;
+pub mod live;
 mod loro_json;
 pub mod query;
 
 pub use history::{ChangeSet, Version};
+pub use live::Watches;
 
 use std::path::Path;
 

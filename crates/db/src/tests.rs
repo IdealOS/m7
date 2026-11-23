@@ -633,3 +633,190 @@ fn random_undos_follow_the_rule() {
         }
     }
 }
+
+/// Apply a live query's part to a client's copy of its result, the way
+/// [`WatchEvent`]'s docs say to.
+fn apply(list: &mut Vec<Doc>, event: WatchEvent) {
+    match event {
+        WatchEvent::Initial { docs } => *list = docs,
+        WatchEvent::Diff { added, changed, removed, order } => {
+            assert!(
+                !(added.is_empty() && changed.is_empty() && removed.is_empty() && order.is_none()),
+                "an empty diff was sent"
+            );
+            list.retain(|d| !removed.contains(&d.id));
+            for doc in changed {
+                let slot = list.iter_mut().find(|d| d.id == doc.id).expect("a changed doc is in the list");
+                *slot = doc;
+            }
+            list.extend(added);
+            if let Some(order) = order {
+                assert_eq!(order.len(), list.len(), "order lists every document");
+                list.sort_by_key(|d| order.iter().position(|id| *id == d.id).expect("in order"));
+            }
+        }
+    }
+}
+
+use protocol::db::WatchEvent;
+
+#[test]
+fn live_queries_report_what_changed() {
+    let mut s = Store::open_in_memory().unwrap();
+    let mut w = Watches::new(&s).unwrap();
+    let a = s.create("Task", &obj(json!({"n": 1, "done": false})), "t").unwrap();
+    let q = Query {
+        order_by: vec![OrderBy("n".into(), Direction::Asc)],
+        limit: Some(2),
+        ..query("Task", json!({"done": false}))
+    };
+    let mut list = Vec::new();
+    apply(&mut list, w.add(&s, 7, q.clone()).unwrap());
+    assert_eq!(ids(&list), [a.id.as_str()]);
+    assert!(w.refresh(&s).unwrap().is_empty(), "the create before the watch was already in its result");
+
+    // Added: the order says where.
+    let b = s.create("Task", &obj(json!({"n": 0, "done": false})), "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    let [(7, Ok(WatchEvent::Diff { added, order: Some(order), .. }))] = &parts[..] else {
+        panic!("{parts:?}")
+    };
+    assert_eq!(ids(added), [b.id.as_str()]);
+    assert_eq!(order, &[b.id.clone(), a.id.clone()]);
+    for (_, part) in parts {
+        apply(&mut list, part.unwrap());
+    }
+
+    // Changed in place: no order.
+    s.update(&a.id, &obj(json!({"title": "x"})), "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    let [(7, Ok(WatchEvent::Diff { changed, order: None, added, removed }))] = &parts[..] else {
+        panic!("{parts:?}")
+    };
+    assert!(added.is_empty() && removed.is_empty());
+    assert_eq!(changed[0].data["title"], "x");
+    apply(&mut list, parts.into_iter().next().unwrap().1.unwrap());
+
+    // Several writes between refreshes become one part: a third task pushes `a`
+    // past the limit, then `b` stops matching, so `a` is back and `c` is in.
+    let c = s.create("Task", &obj(json!({"n": -1, "done": false})), "t").unwrap();
+    s.update(&b.id, &obj(json!({"done": true})), "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    assert_eq!(parts.len(), 1);
+    let part = parts.into_iter().next().unwrap().1.unwrap();
+    let WatchEvent::Diff { added, removed, .. } = part.clone() else { panic!() };
+    assert_eq!((ids(&added), removed), (vec![c.id.clone()], vec![b.id.clone()]));
+    apply(&mut list, part);
+    assert_eq!(list, s.query(&q).unwrap());
+
+    // Deleting, and undoing the delete.
+    s.delete(&c.id, "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    let [(7, Ok(WatchEvent::Diff { removed, order: None, .. }))] = &parts[..] else { panic!("{parts:?}") };
+    assert_eq!(removed, &[c.id.as_str()]);
+    let deleted = s.history(&c.id).unwrap().last().unwrap().change_set;
+    s.undo(deleted, "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    let [(7, Ok(WatchEvent::Diff { added, .. }))] = &parts[..] else { panic!("{parts:?}") };
+    assert_eq!(ids(added), [c.id.as_str()]);
+
+    // Stopped: nothing more.
+    assert!(w.remove(7));
+    s.create("Task", &obj(json!({"n": -5, "done": false})), "t").unwrap();
+    assert!(w.refresh(&s).unwrap().is_empty());
+    assert!(w.is_empty());
+}
+
+#[test]
+fn live_queries_rerun_only_for_changed_types_and_refuse_bad_queries() {
+    let mut s = Store::open_in_memory().unwrap();
+    let mut w = Watches::new(&s).unwrap();
+    w.add(&s, 1, Query::all("Note")).unwrap();
+    s.create("Task", &obj(json!({})), "t").unwrap();
+    assert!(w.refresh(&s).unwrap().is_empty());
+    assert_eq!(
+        s.types_changed_between(0, s.newest_change_set().unwrap()).unwrap().into_iter().collect::<Vec<_>>(),
+        ["Task"]
+    );
+    assert!(matches!(w.add(&s, 2, query("Note", json!({"a": {"$regex": "x"}}))), Err(Error::Invalid(_))));
+    assert_eq!(w.len(), 1, "a refused query isn't added");
+}
+
+/// Random writes to random live queries (filters, orders, limits), refreshing
+/// after random batches: applying every part to a client's copy always gives
+/// what running the query again gives. `DB_FUZZ_SEEDS=n` runs more.
+#[test]
+fn live_query_parts_rebuild_the_result() {
+    let seeds: u64 = std::env::var("DB_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    for seed in 0..seeds {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut s = Store::open_in_memory().unwrap();
+        let mut w = Watches::new(&s).unwrap();
+        let mut queries = Vec::new();
+        let mut lists: Vec<Vec<Doc>> = Vec::new();
+        for key in 0..6u64 {
+            let order_by = match rng.below(3) {
+                0 => Vec::new(),
+                _ => vec![OrderBy(
+                    rng.pick(&["a", "b", "obj.x"]).into(),
+                    rng.pick(&[Direction::Asc, Direction::Desc]),
+                )],
+            };
+            let q = Query {
+                filter: if rng.below(3) == 0 { Map::new() } else { random_filter(&mut rng, 1) },
+                order_by,
+                limit: (rng.below(2) == 0).then(|| 1 + rng.below(6) as u32),
+                ..Query::all("T")
+            };
+            let mut list = Vec::new();
+            apply(&mut list, w.add(&s, key, q.clone()).unwrap());
+            queries.push(q);
+            lists.push(list);
+        }
+        let mut live: Vec<String> = Vec::new();
+        let mut sets: Vec<i64> = Vec::new();
+        for step in 0..150 {
+            match rng.below(10) {
+                0..=3 => {
+                    let doc_type = if rng.below(5) == 0 { "Other" } else { "T" };
+                    let d = s.create(doc_type, &random_doc(&mut rng), "t").unwrap();
+                    live.push(d.id);
+                }
+                4..=6 if !live.is_empty() => {
+                    let id = rng.pick(&live);
+                    let mut patch = random_doc(&mut rng);
+                    if rng.below(3) == 0 {
+                        patch.insert(rng.pick(&["a", "b", "c"]).into(), Value::Null);
+                    }
+                    s.update(&id, &patch, "t").unwrap();
+                }
+                7 if !live.is_empty() => {
+                    let id = live.remove(rng.below(live.len() as u64) as usize);
+                    s.delete(&id, "t").unwrap();
+                }
+                8 if !sets.is_empty() => {
+                    // Undo something; refusals are fine, the result just mustn't drift.
+                    let _ = s.undo(rng.pick(&sets), "t");
+                    live = s
+                        .connection()
+                        .prepare("SELECT d.id FROM documents d JOIN doc_json j ON j.doc = d.doc")
+                        .unwrap()
+                        .query_map([], |r| r.get(0))
+                        .unwrap()
+                        .map(|r| r.unwrap())
+                        .collect();
+                }
+                _ => {}
+            }
+            sets.push(s.newest_change_set().unwrap());
+            if rng.below(4) == 0 {
+                for (key, part) in w.refresh(&s).unwrap() {
+                    apply(&mut lists[key as usize], part.unwrap());
+                }
+                for (key, q) in queries.iter().enumerate() {
+                    assert_eq!(lists[key], s.query(q).unwrap(), "seed {seed} step {step} query {key}: {q:?}");
+                }
+            }
+        }
+    }
+}

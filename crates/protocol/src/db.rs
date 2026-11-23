@@ -37,6 +37,12 @@ pub const SERVICE: &str = "db";
 /// | `at`     | [`AtParams`]     | [`AtResult`]   |
 /// | `changes` | [`ChangesParams`] | [`ChangesResult`] |
 /// | `undo`   | [`UndoParams`]   | [`UndoResult`] |
+/// | `watch`  | [`Query`]        | streamed [`WatchEvent`]s |
+///
+/// `watch` is a live query, sent as a streamed request (`"stream": true`). Its
+/// first part is the query's result; each later part is what changed since the
+/// one before. Changes made close together arrive as one part. It stays open until
+/// the caller cancels it or disconnects.
 pub mod method {
     pub const CREATE: &str = "create";
     pub const GET: &str = "get";
@@ -48,6 +54,7 @@ pub mod method {
     pub const AT: &str = "at";
     pub const CHANGES: &str = "changes";
     pub const UNDO: &str = "undo";
+    pub const WATCH: &str = "watch";
 }
 
 /// Error codes the `db` service sends, besides the broker's `bad_request`.
@@ -103,6 +110,34 @@ pub struct SearchParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DocsResult {
     pub docs: Vec<Doc>,
+}
+
+/// A part of `watch`'s streamed answer.
+///
+/// To keep a list up to date: drop the `removed` ids, replace the `changed`
+/// documents, append the `added` ones, and then, if `order` is present, sort the
+/// list to match it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum WatchEvent {
+    /// The first part: every matching document, in order.
+    Initial { docs: Vec<Doc> },
+    /// What changed since the previous part.
+    Diff {
+        /// Documents that are now in the result and weren't before.
+        added: Vec<Doc>,
+        /// Documents still in the result whose contents changed.
+        changed: Vec<Doc>,
+        /// Ids of documents no longer in the result (deleted, no longer matching,
+        /// or pushed past the limit).
+        removed: Vec<String>,
+        /// Every id in the result, in order. Present whenever the order isn't
+        /// just the previous one with the removed ids taken out (so whenever
+        /// something was added or moved).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<Vec<String>>,
+    },
 }
 
 /// What a change set did to a document.
@@ -202,6 +237,9 @@ pub struct UndoResult {
 pub const MAX_QUERY_LIMIT: u32 = 10_000;
 /// The `limit` a query gets when it names none.
 pub const DEFAULT_QUERY_LIMIT: u32 = 100;
+
+/// Most live queries (`watch`) the service keeps open at once, across every caller.
+pub const MAX_WATCHES: usize = 4096;
 
 /// A stored document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

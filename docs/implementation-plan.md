@@ -118,8 +118,10 @@ Frames are length-prefixed JSON (a 4-byte big-endian length, then UTF-8 JSON) ov
 {"id": 42, "kind": "request", "to": "db", "method": "query", "params": {"type": "Email", "where": {"read": false}}}
 {"id": 42, "kind": "response", "ok": true, "result": {"docs": []}}
 {"id": 43, "kind": "response", "ok": false, "error": {"code": "permission_denied", "message": "read Email not granted"}}
-{"id": 44, "kind": "subscribe", "topic": "db.live.7"}
-{"kind": "publish", "topic": "db.live.7", "from": {"service": "db"}, "data": {"added": [], "changed": [], "removed": []}}
+{"id": 44, "kind": "request", "to": "db", "method": "watch", "stream": true, "params": {"type": "Email", "where": {"read": false}}}
+{"id": 44, "kind": "stream", "data": {"kind": "diff", "added": [], "changed": [], "removed": []}}
+{"kind": "subscribe", "id": 45, "topic": "ui.theme"}
+{"kind": "publish", "topic": "ui.theme", "from": {"service": "settings"}, "data": {"dark": true}}
 ```
 
 ### Scene-graph ops
@@ -250,7 +252,7 @@ Goal: a working document store with queries, live updates, full-text search, lin
 - [ ] Document IDs are UUIDv7, so they sort by creation time.
 - [ ] Write path: apply changes to the Loro doc, then update the JSON copy, links and FTS index in the same SQLite transaction.
 - [ ] Query compiler from the filter JSON to SQL with `json_extract`, plus expression indexes on common fields of system schemas.
-- [ ] Live queries: a subscription registry; each commit re-runs the queries for the affected types and publishes the diff (added, changed, removed).
+- [ ] Live queries: a registry of streamed `watch` requests; each batch of commits re-runs the queries for the affected types and streams the diff (added, changed, removed) back on the request.
 - [ ] Blob store: files named by SHA-256 under `/data/blobs`, uploaded and read through passed file descriptors, with reference counts.
 - [ ] System schemas in `schemas/` as JSON Schema; writes are validated, and unknown fields are allowed.
 - [ ] History API: list versions, read a document at a version, diff two versions.

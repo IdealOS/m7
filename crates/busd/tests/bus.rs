@@ -516,3 +516,105 @@ async fn garbage_from_many_connections_leaves_the_broker_working() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// The next request a service gets, with its id and whether it's streamed.
+async fn next_request(requests: &mut bus_client::Requests) -> (u64, bool) {
+    match requests.next().await {
+        Some(Incoming::Request { id, stream, .. }) => (id, stream),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_streamed_request_gets_parts_in_order_until_the_service_ends_it() {
+    let bus = Bus::start("stream");
+    let svc = bus.client().await;
+    svc.claim("live").await.unwrap();
+    let mut requests = svc.take_requests().unwrap();
+    let client = bus.client().await;
+
+    let mut stream = client.request_stream("live", "watch", json!({"q": 1})).await.unwrap();
+    let (id, streamed) = next_request(&mut requests).await;
+    assert!(streamed);
+    for n in 0..100 {
+        svc.stream(id, json!(n)).await.unwrap();
+    }
+    svc.respond(id, Ok(Value::Null)).await.unwrap();
+    for n in 0..100 {
+        assert_eq!(stream.next().await.unwrap().unwrap(), json!(n));
+    }
+    assert!(stream.next().await.is_none(), "ended normally");
+
+    // An error response ends a stream with that error.
+    let mut failing = client.request_stream("live", "watch", Value::Null).await.unwrap();
+    let (id, _) = next_request(&mut requests).await;
+    svc.stream(id, json!("first")).await.unwrap();
+    svc.respond(id, Err(protocol::BusError { code: "nope".into(), message: "no".into() })).await.unwrap();
+    assert_eq!(failing.next().await.unwrap().unwrap(), json!("first"));
+    assert_eq!(failing.next().await.unwrap().unwrap_err().code(), "nope");
+    assert!(failing.next().await.is_none());
+
+    // A plain request isn't streamed, and its parts go nowhere.
+    let plain = tokio::spawn({
+        let client = client.clone();
+        async move { client.request("live", "get", Value::Null).await }
+    });
+    let (id, streamed) = next_request(&mut requests).await;
+    assert!(!streamed);
+    svc.stream(id, json!("ignored")).await.unwrap();
+    svc.respond(id, Ok(json!("answer"))).await.unwrap();
+    assert_eq!(plain.await.unwrap().unwrap(), json!("answer"));
+}
+
+#[tokio::test]
+async fn dropping_a_stream_or_disconnecting_cancels_it_at_the_service() {
+    let bus = Bus::start("stream-cancel");
+    let svc = bus.client().await;
+    svc.claim("live").await.unwrap();
+    let mut requests = svc.take_requests().unwrap();
+
+    let client = bus.client().await;
+    let stream = client.request_stream("live", "watch", Value::Null).await.unwrap();
+    let (id, _) = next_request(&mut requests).await;
+    drop(stream);
+    assert!(matches!(requests.next().await, Some(Incoming::Cancel { id: c }) if c == id));
+    // Parts sent after the cancel are harmless.
+    svc.stream(id, json!("late")).await.unwrap();
+
+    let other = bus.client().await;
+    let _stream = other.request_stream("live", "watch", Value::Null).await.unwrap();
+    let (id, _) = next_request(&mut requests).await;
+    drop(_stream);
+    drop(other);
+    assert!(matches!(requests.next().await, Some(Incoming::Cancel { id: c }) if c == id));
+}
+
+#[tokio::test]
+async fn a_service_going_away_ends_its_streams_with_an_error() {
+    let bus = Bus::start("stream-gone");
+    let svc = bus.client().await;
+    svc.claim("live").await.unwrap();
+    let mut requests = svc.take_requests().unwrap();
+    let client = bus.client().await;
+    let mut stream = client.request_stream("live", "watch", Value::Null).await.unwrap();
+    let (id, _) = next_request(&mut requests).await;
+    svc.stream(id, json!(1)).await.unwrap();
+    drop(requests);
+    drop(svc);
+    assert_eq!(stream.next().await.unwrap().unwrap(), json!(1));
+    assert_eq!(stream.next().await.unwrap().unwrap_err().code(), code::SERVICE_GONE);
+    assert!(stream.next().await.is_none());
+}
+
+/// The broker drops a connection that sends an oversized frame, so the client
+/// refuses to send one and stays connected.
+#[tokio::test]
+async fn an_oversized_message_is_refused_without_losing_the_connection() {
+    let bus = Bus::start("oversized");
+    let _svc = echo_service(&bus, "echo").await;
+    let client = bus.client().await;
+    let huge = "x".repeat(protocol::bus::MAX_FRAME_BYTES as usize);
+    let err = client.request("echo", "echo", json!(huge)).await.unwrap_err();
+    assert_eq!(err.code(), code::LIMIT_EXCEEDED);
+    assert_eq!(client.request("echo", "echo", json!("small")).await.unwrap(), json!("small"));
+}

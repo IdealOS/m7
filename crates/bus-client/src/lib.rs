@@ -17,6 +17,11 @@
 //! future before it finishes sends the broker a `cancel`; dropping a subscription
 //! unsubscribes once no other subscription uses the same pattern.
 //!
+//! A streamed request ([`Client::request_stream`]) gets any number of answers, read
+//! from the [`Stream`] it returns, until the service ends it; dropping the
+//! [`Stream`] cancels it. A service sends the parts with [`Client::stream`] and ends
+//! it with [`Client::respond`].
+//!
 //! Requests, responses and publishes can carry file descriptors (`*_with`
 //! methods); received ones arrive on [`Reply`], [`Incoming::Request`] and
 //! [`Publication`].
@@ -103,8 +108,10 @@ pub struct Publication {
 /// Something addressed to a name this client claimed.
 #[derive(Debug)]
 pub enum Incoming {
-    /// Answer it with [`Client::respond`], using `id`.
-    Request { id: u64, from: Option<Sender>, method: String, params: Value, fds: Vec<OwnedFd> },
+    /// Answer it with [`Client::respond`], using `id`. If `stream` is set, the
+    /// requester asked for a streamed answer: send parts with [`Client::stream`]
+    /// first, for as long as it stays open.
+    Request { id: u64, from: Option<Sender>, method: String, params: Value, stream: bool, fds: Vec<OwnedFd> },
     /// The requester gave up on request `id`; any answer will be dropped.
     Cancel { id: u64 },
 }
@@ -115,8 +122,13 @@ struct Sub {
     tx: mpsc::UnboundedSender<Publication>,
 }
 
+/// What a [`Stream`] receives: a part, or the error that ended it.
+type StreamItem = Result<Value, CallError>;
+
 struct State {
     pending: HashMap<u64, oneshot::Sender<Result<Reply, CallError>>>,
+    /// Open streamed requests. Dropping a sender ends its [`Stream`].
+    streams: HashMap<u64, mpsc::UnboundedSender<StreamItem>>,
     subs: Vec<Sub>,
     /// Incoming requests queue here from the start, so none are lost between
     /// `claim` and `take_requests`. `None` once the connection closes.
@@ -184,6 +196,7 @@ impl Client {
         let (requests, requests_rx) = mpsc::unbounded_channel();
         let state = State {
             pending: HashMap::new(),
+            streams: HashMap::new(),
             subs: Vec::new(),
             requests: Some(requests),
             requests_rx: Some(requests_rx),
@@ -208,6 +221,14 @@ impl Client {
         }
         let msg = msg.with_fds(fds.len() as u32);
         let frame = encode_frame(&msg).map_err(|e| CallError::bad_request(e.to_string()))?;
+        // The broker drops a connection that sends an oversized frame, so refuse it
+        // here and keep the connection.
+        if frame.len() - 4 > bus::MAX_FRAME_BYTES as usize {
+            return Err(CallError::Bus(BusError {
+                code: bus::code::LIMIT_EXCEEDED.into(),
+                message: format!("a {} byte message; the most is {}", frame.len() - 4, bus::MAX_FRAME_BYTES),
+            }));
+        }
         self.shared.out.send((frame, fds)).await.map_err(|_| CallError::Disconnected)
     }
 
@@ -255,6 +276,7 @@ impl Client {
             method: method.into(),
             params,
             timeout_ms,
+            stream: false,
             fds: 0,
             from: None,
         };
@@ -262,6 +284,30 @@ impl Client {
         let result = rx.await.unwrap_or(Err(CallError::Disconnected));
         guard.disarm();
         result
+    }
+
+    /// Send a streamed request: the service answers with any number of parts,
+    /// read from the returned [`Stream`], until it ends the stream. There is no
+    /// timeout; drop the [`Stream`] to cancel.
+    pub async fn request_stream(&self, to: &str, method: &str, params: Value) -> Result<Stream, CallError> {
+        let id = self.next_id();
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            if state.closed {
+                return Err(CallError::Disconnected);
+            }
+            state.streams.insert(id, tx);
+        }
+        let stream = Stream { rx, id, shared: self.shared.clone() };
+        self.send(Message::stream_request(id, to, method, params), Vec::new()).await?;
+        Ok(stream)
+    }
+
+    /// Send one part of the streamed answer to request `id` from
+    /// [`Client::take_requests`]. End the stream with [`Client::respond`].
+    pub async fn stream(&self, id: u64, data: Value) -> Result<(), CallError> {
+        self.send(Message::Stream { id, data }, Vec::new()).await
     }
 
     /// A broker method with typed params and result (see [`protocol::broker`]).
@@ -417,6 +463,30 @@ impl Requests {
     }
 }
 
+/// The answers to a streamed request. Dropping it cancels the request.
+pub struct Stream {
+    rx: mpsc::UnboundedReceiver<StreamItem>,
+    id: u64,
+    shared: Arc<Shared>,
+}
+
+impl Stream {
+    /// The next part. `Some(Err(..))` is the error that ended the stream (from the
+    /// service, the broker, or a lost connection); `None` means it ended normally.
+    pub async fn next(&mut self) -> Option<Result<Value, CallError>> {
+        self.rx.recv().await
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let open = self.shared.state.lock().unwrap().streams.remove(&self.id).is_some();
+        if open {
+            self.shared.send_now(&Message::Cancel { id: self.id });
+        }
+    }
+}
+
 pub struct Subscription {
     rx: mpsc::UnboundedReceiver<Publication>,
     key: u64,
@@ -489,6 +559,9 @@ async fn read_frames(mut reader: FrameReader, state: Arc<Mutex<State>>) {
     for (_, waiter) in state.pending.drain() {
         let _ = waiter.send(Err(CallError::Disconnected));
     }
+    for (_, stream) in state.streams.drain() {
+        let _ = stream.send(Err(CallError::Disconnected));
+    }
     state.subs.clear();
     state.requests = None;
 }
@@ -496,16 +569,25 @@ async fn read_frames(mut reader: FrameReader, state: Arc<Mutex<State>>) {
 fn dispatch(state: &mut State, msg: Message, fds: Vec<OwnedFd>) {
     match msg {
         Message::Response { id, ok, result, error, .. } => {
+            let error = || {
+                CallError::Bus(error.unwrap_or_else(|| BusError {
+                    code: "unknown".into(),
+                    message: "error response without an error".into(),
+                }))
+            };
             if let Some(waiter) = state.pending.remove(&id) {
-                let answer = if ok {
-                    Ok(Reply { result: result.unwrap_or(Value::Null), fds })
-                } else {
-                    Err(CallError::Bus(error.unwrap_or_else(|| BusError {
-                        code: "unknown".into(),
-                        message: "error response without an error".into(),
-                    })))
-                };
+                let answer =
+                    if ok { Ok(Reply { result: result.unwrap_or(Value::Null), fds }) } else { Err(error()) };
                 let _ = waiter.send(answer);
+            } else if let Some(stream) = state.streams.remove(&id)
+                && !ok
+            {
+                let _ = stream.send(Err(error()));
+            }
+        }
+        Message::Stream { id, data } => {
+            if let Some(stream) = state.streams.get(&id) {
+                let _ = stream.send(Ok(data));
             }
         }
         Message::Publish { topic, data, from, .. } => {
@@ -521,8 +603,8 @@ fn dispatch(state: &mut State, msg: Message, fds: Vec<OwnedFd>) {
             }
             let _ = last.tx.send(Publication { topic, data, from, fds });
         }
-        Message::Request { id, method, params, from, .. } => {
-            send_incoming(state, Incoming::Request { id, from, method, params, fds });
+        Message::Request { id, method, params, from, stream, .. } => {
+            send_incoming(state, Incoming::Request { id, from, method, params, stream, fds });
         }
         Message::Cancel { id } => send_incoming(state, Incoming::Cancel { id }),
         Message::Subscribe { .. } | Message::Unsubscribe { .. } => {

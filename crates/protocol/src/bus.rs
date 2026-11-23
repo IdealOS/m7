@@ -30,6 +30,10 @@ pub const MAX_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 /// the broker answers `limit_exceeded` without forwarding.
 pub const MAX_PENDING_REQUESTS: usize = 1024;
 
+/// Most streamed requests (see [`Message::Stream`]) one connection may have open at
+/// once. They don't count against [`MAX_PENDING_REQUESTS`].
+pub const MAX_STREAMS: usize = 256;
+
 /// Most subscription patterns one connection may hold.
 pub const MAX_SUBSCRIPTIONS: usize = 256;
 
@@ -101,9 +105,15 @@ pub enum Message {
         method: String,
         #[serde(default)]
         params: Value,
-        /// Overrides [`DEFAULT_TIMEOUT_MS`].
+        /// Overrides [`DEFAULT_TIMEOUT_MS`]. Not allowed on a streamed request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        /// Ask for a streamed answer: the service may send any number of
+        /// [`Message::Stream`] frames before its response, and the request has no
+        /// timeout. It stays open until the service responds, the requester
+        /// cancels, or either side disconnects.
+        #[serde(default, skip_serializing_if = "is_false")]
+        stream: bool,
         /// How many file descriptors travel with this message (see [`crate::unix`]).
         #[serde(default, skip_serializing_if = "is_zero")]
         fds: u32,
@@ -119,6 +129,13 @@ pub enum Message {
         error: Option<BusError>,
         #[serde(default, skip_serializing_if = "is_zero")]
         fds: u32,
+    },
+    /// One part of a streamed answer to request `id`, from the service it went to.
+    /// The broker forwards it under the requester's id; the request stays open.
+    Stream {
+        id: u64,
+        #[serde(default)]
+        data: Value,
     },
     /// The requester no longer wants the answer to request `id`. The broker
     /// forwards it to the service and drops the response if one still comes.
@@ -150,6 +167,10 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Message {
     pub fn ok(id: u64, result: Value) -> Message {
         Message::Response { id, ok: true, result: Some(result), error: None, fds: 0 }
@@ -170,8 +191,24 @@ impl Message {
             method: method.into(),
             params,
             timeout_ms: None,
+            stream: false,
             fds: 0,
             from: None,
+        }
+    }
+
+    /// A streamed request (see [`Message::Stream`]).
+    pub fn stream_request(
+        id: u64,
+        to: impl Into<String>,
+        method: impl Into<String>,
+        params: Value,
+    ) -> Message {
+        match Message::request(id, to, method, params) {
+            Message::Request { id, to, method, params, fds, from, .. } => {
+                Message::Request { id, to, method, params, timeout_ms: None, stream: true, fds, from }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -303,8 +340,10 @@ mod tests {
             r#"{"id": 42, "kind": "request", "to": "db", "method": "query", "params": {"type": "Email", "where": {"read": false}}}"#,
             r#"{"id": 42, "kind": "response", "ok": true, "result": {"docs": []}}"#,
             r#"{"id": 43, "kind": "response", "ok": false, "error": {"code": "permission_denied", "message": "read Email not granted"}}"#,
-            r#"{"id": 44, "kind": "subscribe", "topic": "db.live.7"}"#,
-            r#"{"kind": "publish", "topic": "db.live.7", "from": {"service": "db"}, "data": {"added": [], "changed": [], "removed": []}}"#,
+            r#"{"id": 44, "kind": "request", "to": "db", "method": "watch", "stream": true, "params": {"type": "Email", "where": {"read": false}}}"#,
+            r#"{"id": 44, "kind": "stream", "data": {"kind": "diff", "added": [], "changed": [], "removed": []}}"#,
+            r#"{"kind": "subscribe", "id": 45, "topic": "ui.theme"}"#,
+            r#"{"kind": "publish", "topic": "ui.theme", "from": {"service": "settings"}, "data": {"dark": true}}"#,
         ];
         for line in lines {
             let msg: Message = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
@@ -319,6 +358,16 @@ mod tests {
         let msg: Message = serde_json::from_str(line).unwrap();
         assert!(matches!(msg, Message::Request { timeout_ms: Some(500), .. }));
         let cancel: Message = serde_json::from_str(r#"{"kind": "cancel", "id": 7}"#).unwrap();
+        // Streaming stays off the wire unless asked for.
+        assert!(!serde_json::to_string(&msg).unwrap().contains("stream"));
+        let streamed: Message = serde_json::from_str(
+            r#"{"id": 8, "kind": "request", "to": "db", "method": "watch", "stream": true}"#,
+        )
+        .unwrap();
+        assert_eq!(streamed, Message::stream_request(8, "db", "watch", Value::Null));
+        let frame: Message =
+            serde_json::from_str(r#"{"kind": "stream", "id": 8, "data": {"n": 1}}"#).unwrap();
+        assert_eq!(frame, Message::Stream { id: 8, data: serde_json::json!({"n": 1}) });
         assert_eq!(cancel, Message::Cancel { id: 7 });
         let with_fds: Message =
             serde_json::from_str(r#"{"kind": "publish", "topic": "t", "fds": 2}"#).unwrap();
@@ -384,6 +433,8 @@ mod tests {
             Message::ok(7, serde_json::json!({"conn": 3, "sender": {"app": {"app": "org.x", "conn": 3}}})),
             Message::err(2, code::TIMEOUT, "slow \u{1F600} \"quoted\""),
             Message::Cancel { id: u64::MAX },
+            Message::stream_request(3, "db", "watch", serde_json::json!({"type": "Note"})),
+            Message::Stream { id: 3, data: serde_json::json!({"kind": "diff", "removed": ["x"]}) },
             Message::publish("db.live.1", serde_json::json!({"added": [{}], "s": "\\"})).with_fds(2),
         ]
         .iter()

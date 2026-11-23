@@ -41,6 +41,9 @@ export const GUEST_SCRIPT = [
   `SID=$(osctl db create SmokeUndo '{"v":1}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/'); osctl db update "$SID" '{"v":2}' >/dev/null`,
   `SSET=$(osctl db history "$SID" | grep -o '"change_set":[0-9]*' | tail -1 | cut -d: -f2); osctl db undo "$SSET" >/dev/null`,
   `echo SMOKE db-undo $(osctl db get "$SID" 2>&1 | grep -o '"v":[0-9]*')`,
+  // A live query: its first part, then a diff once another client creates a match.
+  `(sleep 1; osctl db create SmokeLive '{"n":1}' >/dev/null) &`,
+  `echo SMOKE db-watch $(timeout 10 osctl db watch '{"type":"SmokeLive"}' --count 2 2>&1 | grep -o '"kind":"[a-z]*"' | tr '\\n' ' ')`,
   "echo SMOKE end",
 ];
 
@@ -123,6 +126,7 @@ export function evaluate(log: string): Check[] {
     fact("db-file", "/data/db/idealos.db", "dbd keeps the database on /data"),
     fact("db-roundtrip", "1", "a document went into the database and came back from a query"),
     fact("db-undo", '"v":1', "undoing a change brought the old value back"),
+    fact("db-watch", '"kind":"initial" "kind":"diff"', "a live query reported a new document"),
     {
       name: "bus benchmark ran",
       ok: rps > 0,

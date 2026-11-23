@@ -161,3 +161,68 @@ async fn many_clients_at_once() {
     .unwrap();
     assert_eq!(one.docs.len(), 25);
 }
+
+/// The next part of a live query, within a few seconds.
+async fn next_part(stream: &mut bus_client::Stream) -> protocol::db::WatchEvent {
+    let part = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("a part within 5 s")
+        .expect("the stream is open")
+        .expect("not an error");
+    serde_json::from_value(part).unwrap()
+}
+
+#[tokio::test]
+async fn live_queries_over_the_bus() {
+    use protocol::db::WatchEvent;
+    let s = Setup::start("watch").await;
+    let c = s.client().await;
+    let first = doc(call(&c, "create", json!({"type": "Task", "data": {"n": 5}})).await.unwrap());
+    let query = json!({"type": "Task", "where": {"done": {"$ne": true}}, "orderBy": [["n", "asc"]]});
+    let mut live = c.request_stream(SERVICE, "watch", query.clone()).await.unwrap();
+    let WatchEvent::Initial { docs } = next_part(&mut live).await else { panic!("not the initial part") };
+    let mut list = docs;
+    assert_eq!(list, std::slice::from_ref(&first));
+
+    // Another client's writes show up; a burst of them arrives in fewer parts.
+    let writer = s.client().await;
+    for n in 0..20 {
+        call(&writer, "create", json!({"type": "Task", "data": {"n": n}})).await.unwrap();
+    }
+    call(&writer, "update", json!({"id": first.id, "patch": {"done": true}})).await.unwrap();
+    // Changes to other types don't wake this query.
+    call(&writer, "create", json!({"type": "Note", "data": {}})).await.unwrap();
+    let mut parts = 0;
+    while list.len() != 20 || list.iter().any(|d| d.id == first.id) {
+        let WatchEvent::Diff { added, changed, removed, order } = next_part(&mut live).await else {
+            panic!()
+        };
+        parts += 1;
+        list.retain(|d| !removed.contains(&d.id));
+        for d in changed {
+            let slot = list.iter_mut().find(|x| x.id == d.id).unwrap();
+            *slot = d;
+        }
+        list.extend(added);
+        if let Some(order) = order {
+            list.sort_by_key(|d| order.iter().position(|id| *id == d.id).unwrap());
+        }
+    }
+    assert!(parts < 21, "{parts} parts for 21 writes");
+    let fresh: DocsResult = serde_json::from_value(call(&c, "query", query).await.unwrap()).unwrap();
+    assert_eq!(list, fresh.docs);
+
+    // Bad queries and unstreamed watches are refused.
+    let mut bad = c
+        .request_stream(SERVICE, "watch", json!({"type": "Task", "where": {"a": {"$regex": 1}}}))
+        .await
+        .unwrap();
+    assert_eq!(bad.next().await.unwrap().unwrap_err().code(), "bad_request");
+    assert!(bad.next().await.is_none());
+    assert_eq!(call(&c, "watch", json!({"type": "Task"})).await.unwrap_err().code(), "bad_request");
+
+    // Dropping the stream stops the live query; the service carries on.
+    drop(live);
+    call(&writer, "create", json!({"type": "Task", "data": {"n": 99}})).await.unwrap();
+    assert_eq!(doc(call(&c, "get", json!({"id": first.id})).await.unwrap()).data["done"], true);
+}

@@ -1,6 +1,7 @@
 //! Randomized tests of the router: many seeds of random events across a few
-//! connections, checking the router's bookkeeping after every event and that every
-//! forwarded request ends exactly once.
+//! connections, checking the router's bookkeeping after every event, that every
+//! forwarded request ends exactly once, and that stream frames reach only the
+//! requester of an open streamed request, from the service it went to.
 //!
 //! Deterministic (a seeded generator, no dependencies), so a failure prints the
 //! seed and step that reproduce it. `BUS_FUZZ_SEEDS=n` runs more seeds.
@@ -51,7 +52,7 @@ fn random_params(rng: &mut Rng) -> Value {
 
 fn random_message(rng: &mut Rng, router: &Router) -> Message {
     let id = rng.below(8);
-    match rng.below(10) {
+    match rng.below(11) {
         0..=3 => Message::Request {
             id,
             to: rng.pick(NAMES).to_string(),
@@ -63,6 +64,7 @@ fn random_message(rng: &mut Rng, router: &Router) -> Message {
                 2 => Some(0),
                 _ => Some(rng.below(60_000)),
             },
+            stream: rng.chance(30),
             fds: rng.below(3) as u32,
             // Clients may send anything here; the router must overwrite it.
             from: rng.chance(20).then(|| Sender::Service("forged".into())),
@@ -81,6 +83,13 @@ fn random_message(rng: &mut Rng, router: &Router) -> Message {
             }
         }
         6 => Message::Cancel { id },
+        10 => {
+            // Mostly parts for real pending requests (streamed or not), from whoever.
+            let mut ids: Vec<u64> = router.pending.keys().copied().collect();
+            ids.sort_unstable();
+            let id = if !ids.is_empty() && rng.chance(80) { *rng.pick(&ids) } else { id };
+            Message::Stream { id, data: Value::Null }
+        }
         7 => Message::Subscribe { id, topic: rng.pick(TOPICS).to_string() },
         8 => Message::Unsubscribe { id, topic: rng.pick(TOPICS).to_string() },
         _ => Message::Publish {
@@ -92,12 +101,20 @@ fn random_message(rng: &mut Rng, router: &Router) -> Message {
     }
 }
 
+/// A forwarded request that hasn't ended: where it went, the id the broker gave
+/// it, and whether it's streamed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Outstanding {
+    service: ConnId,
+    bus_id: u64,
+    streamed: bool,
+}
+
 /// What the test expects from the outside: the requests the router forwarded
-/// that haven't ended yet, keyed by (requester, the requester's id), with the
-/// connection they went to and the id the broker gave them.
+/// that haven't ended yet, keyed by (requester, the requester's id).
 #[derive(Default)]
 struct Model {
-    outstanding: HashMap<(ConnId, u64), (ConnId, u64)>,
+    outstanding: HashMap<(ConnId, u64), Outstanding>,
     /// `adopt` requests the router accepted, answered when the connection opens.
     /// (Counted: session may reuse an id while an earlier adopt is in flight.)
     adopting: HashMap<(ConnId, u64), usize>,
@@ -105,9 +122,10 @@ struct Model {
 
 /// The router's tables agree with each other.
 fn check_tables(r: &Router) -> Result<(), String> {
-    if r.by_client.len() != r.pending.len() || r.deadlines.len() != r.pending.len() {
+    let timed = r.pending.values().filter(|p| !p.streamed()).count();
+    if r.by_client.len() != r.pending.len() || r.deadlines.len() != timed {
         return Err(format!(
-            "{} pending, {} by client, {} deadlines",
+            "{} pending ({timed} with timeouts), {} by client, {} deadlines",
             r.pending.len(),
             r.by_client.len(),
             r.deadlines.len()
@@ -117,7 +135,9 @@ fn check_tables(r: &Router) -> Result<(), String> {
         if r.by_client.get(&(p.requester, p.client_id)) != Some(bus_id) {
             return Err(format!("request {bus_id} missing from by_client"));
         }
-        if !r.deadlines.contains(&(p.deadline, *bus_id)) {
+        if let Some(deadline) = p.deadline
+            && !r.deadlines.contains(&(deadline, *bus_id))
+        {
             return Err(format!("request {bus_id} has no deadline"));
         }
         if !r.conns.contains_key(&p.requester) || !r.conns.contains_key(&p.service) {
@@ -125,11 +145,20 @@ fn check_tables(r: &Router) -> Result<(), String> {
         }
     }
     for (id, c) in &r.conns {
-        let waiting = r.pending.values().filter(|p| p.requester == *id).count();
-        if c.waiting != waiting {
-            return Err(format!("conn {id} counts {} waiting, has {waiting}", c.waiting));
+        let mine = || r.pending.values().filter(|p| p.requester == *id);
+        let waiting = mine().filter(|p| !p.streamed()).count();
+        let streams = mine().filter(|p| p.streamed()).count();
+        if c.waiting != waiting || c.streams != streams {
+            return Err(format!(
+                "conn {id} counts {} waiting and {} streams, has {waiting} and {streams}",
+                c.waiting, c.streams
+            ));
         }
-        if c.waiting > MAX_PENDING_REQUESTS || c.subs.len() > MAX_SUBSCRIPTIONS || c.names.len() > MAX_NAMES {
+        if c.waiting > MAX_PENDING_REQUESTS
+            || c.streams > MAX_STREAMS
+            || c.subs.len() > MAX_SUBSCRIPTIONS
+            || c.names.len() > MAX_NAMES
+        {
             return Err(format!("conn {id} is over a limit"));
         }
         for name in &c.names {
@@ -188,10 +217,29 @@ fn check_actions(r: &Router, event: &Event, out: &[Action], model: &mut Model) -
         }
         // A forwarded request (perhaps to a name the requester holds itself): the
         // requester now waits for exactly one answer.
-        if let (Some(requester), Some(id), Message::Request { id: bus_id, .. }) = (sent_by, sent_id, msg)
-            && model.outstanding.insert((requester, id), (to[0], *bus_id)).is_some()
+        if let (Some(requester), Some(id), Message::Request { id: bus_id, stream, .. }) =
+            (sent_by, sent_id, msg)
         {
-            return Err(format!("({requester}, {id}) forwarded twice"));
+            let forwarded = Outstanding { service: to[0], bus_id: *bus_id, streamed: *stream };
+            if model.outstanding.insert((requester, id), forwarded).is_some() {
+                return Err(format!("({requester}, {id}) forwarded twice"));
+            }
+        }
+        // A part of a streamed answer: to the requester of an open streamed
+        // request, sent by the service it went to, and the request stays open.
+        if let Message::Stream { id, .. } = msg {
+            let [conn] = to[..] else { return Err("a stream frame to several connections".into()) };
+            let Some(o) = model.outstanding.get(&(conn, *id)) else {
+                return Err(format!("stream frame {id} to {conn}, which has no such request open"));
+            };
+            let from_service = matches!(
+                event,
+                Event::Message { conn: from, msg: Message::Stream { id: sent, .. } }
+                    if *from == o.service && *sent == o.bus_id
+            );
+            if !o.streamed || !from_service {
+                return Err(format!("stream frame for request {} reached {conn} wrongly", o.bus_id));
+            }
         }
         if let Message::Response { id, .. } = msg {
             let [conn] = to[..] else { return Err("a response to several connections".into()) };
@@ -201,7 +249,7 @@ fn check_actions(r: &Router, event: &Event, out: &[Action], model: &mut Model) -
             if immediate {
                 continue;
             }
-            let Some((service, bus_id)) = model.outstanding.remove(&(conn, *id)) else {
+            let Some(Outstanding { service, bus_id, .. }) = model.outstanding.remove(&(conn, *id)) else {
                 return Err(format!("response {id} to {conn}, which wasn't waiting for it"));
             };
             // Ended by the service's own answer, or by the broker (a timeout, or
@@ -218,8 +266,13 @@ fn check_actions(r: &Router, event: &Event, out: &[Action], model: &mut Model) -
         model.outstanding.remove(&(*conn, *id));
     }
     // Everything outstanding is still pending in the router, and vice versa.
-    let pending: HashMap<(ConnId, u64), (ConnId, u64)> =
-        r.pending.iter().map(|(bus_id, p)| ((p.requester, p.client_id), (p.service, *bus_id))).collect();
+    let pending: HashMap<(ConnId, u64), Outstanding> = r
+        .pending
+        .iter()
+        .map(|(&bus_id, p)| {
+            ((p.requester, p.client_id), Outstanding { service: p.service, bus_id, streamed: p.streamed() })
+        })
+        .collect();
     if pending != model.outstanding {
         return Err(format!("router has {pending:?}, model has {:?}", model.outstanding));
     }
@@ -290,12 +343,27 @@ fn run_seed(seed: u64, steps: usize) {
         }
     }
 
-    // Every request ends: after the longest timeout, nothing is left.
+    // Every request ends: after the longest timeout only streamed ones are left,
+    // and closing every connection ends those.
     now += Duration::from_millis(MAX_TIMEOUT_MS + 1);
     let mut out = Vec::new();
     router.handle(now, Event::Tick, &mut out);
     if let Err(why) = check_actions(&router, &Event::Tick, &out, &mut model) {
         fail(steps, "the final tick", why);
+    }
+    if !router.pending.values().all(Pending::streamed) {
+        fail(steps, "the final tick", "a request with a timeout outlived it".into());
+    }
+    let mut conns: Vec<ConnId> = router.conns.keys().copied().collect();
+    conns.sort_unstable();
+    for conn in conns {
+        let event = Event::Closed { conn };
+        let mut out = Vec::new();
+        router.handle(now, event.clone(), &mut out);
+        if let Err(why) = check_tables(&router).and_then(|_| check_actions(&router, &event, &out, &mut model))
+        {
+            fail(steps, &format!("{event:?}"), why);
+        }
     }
     assert!(router.pending.is_empty() && model.outstanding.is_empty(), "seed {seed}: requests never ended");
 }

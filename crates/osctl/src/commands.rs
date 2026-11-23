@@ -16,12 +16,35 @@ use serde_json::{Value, json};
 pub enum Command {
     List,
     Hello,
-    Call { to: String, method: String, params: Value, timeout: Option<Duration> },
-    Pub { topic: String, data: Value },
-    Sub { pattern: String },
+    Call {
+        to: String,
+        method: String,
+        params: Value,
+        timeout: Option<Duration>,
+    },
+    /// A streamed request: print each part as a JSON line, stopping after `count`
+    /// parts if given.
+    Stream {
+        to: String,
+        method: String,
+        params: Value,
+        count: Option<u64>,
+    },
+    Pub {
+        topic: String,
+        data: Value,
+    },
+    Sub {
+        pattern: String,
+    },
     Tap,
-    Echo { name: String },
-    Bench { seconds: u64, size: usize },
+    Echo {
+        name: String,
+    },
+    Bench {
+        seconds: u64,
+        size: usize,
+    },
 }
 
 /// `path` is the broker's socket, for commands that open a second connection.
@@ -43,6 +66,22 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
             };
             let answer = answer.map_err(|e| e.to_string())?;
             writeln!(out, "{answer}").map_err(w)
+        }
+        Command::Stream { to, method, params, count } => {
+            let mut stream = bus.request_stream(&to, &method, params).await.map_err(|e| e.to_string())?;
+            let mut printed = 0;
+            while count.is_none_or(|n| printed < n) {
+                match stream.next().await {
+                    Some(Ok(part)) => {
+                        writeln!(out, "{part}").map_err(w)?;
+                        out.flush().map_err(w)?;
+                        printed += 1;
+                    }
+                    Some(Err(e)) => return Err(e.to_string()),
+                    None => break,
+                }
+            }
+            Ok(())
         }
         Command::Pub { topic, data } => {
             bus.publish(&topic, data).await.map_err(|e| e.to_string())?;
@@ -113,9 +152,10 @@ pub fn tap_line(p: &Publication) -> String {
     let who = format!("{who}#{conn}");
     let compact = |v: &Value| if v.is_null() { String::new() } else { format!(" {v}") };
     match msg {
-        Message::Request { id, to, method, params, .. } => {
+        Message::Request { id, to, method, params, stream, .. } => {
+            let stream = if stream { " (streamed)" } else { "" };
             let routed = bus_id.map(|id| format!(" (bus id {id})")).unwrap_or_default();
-            format!("{who} request {id} -> {to}.{method}{}{routed}", compact(&params))
+            format!("{who} request {id} -> {to}.{method}{}{stream}{routed}", compact(&params))
         }
         Message::Response { id, ok: true, result, .. } => {
             format!("{who} response {id} ok{}", compact(&result.unwrap_or_default()))
@@ -127,6 +167,7 @@ pub fn tap_line(p: &Publication) -> String {
         Message::Publish { topic, data, .. } => format!("{who} publish {topic}{}", compact(&data)),
         Message::Subscribe { topic, .. } => format!("{who} subscribe {topic}"),
         Message::Unsubscribe { topic, .. } => format!("{who} unsubscribe {topic}"),
+        Message::Stream { id, data } => format!("{who} stream {id}{}", compact(&data)),
         Message::Cancel { id } => format!("{who} cancel {id}"),
     }
 }
@@ -192,6 +233,32 @@ mod tests {
             Command::Call { to: "nobody".into(), method: "x".into(), params: Value::Null, timeout: None };
         let err = output(&me, call).await.unwrap_err();
         assert!(err.starts_with("no_such_service:"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn stream_prints_each_part_and_stops_at_the_count() {
+        let bus = Bus::start("stream");
+        let server = bus.client().await;
+        server.claim("counter").await.unwrap();
+        let mut requests = server.take_requests().unwrap();
+        tokio::spawn(async move {
+            while let Some(Incoming::Request { id, params, .. }) = requests.next().await {
+                for n in 0..params.as_u64().unwrap() {
+                    server.stream(id, json!(n)).await.unwrap();
+                }
+                server.respond(id, Ok(Value::Null)).await.unwrap();
+            }
+        });
+        let me = bus.client().await;
+        let stream =
+            |params, count| Command::Stream { to: "counter".into(), method: "count".into(), params, count };
+        assert_eq!(output(&me, stream(json!(3), None)).await.unwrap(), "0\n1\n2\n");
+        assert_eq!(output(&me, stream(json!(5), Some(2))).await.unwrap(), "0\n1\n");
+        let err = output(
+            &me,
+            Command::Stream { to: "nobody".into(), method: "x".into(), params: Value::Null, count: None },
+        );
+        assert!(err.await.unwrap_err().starts_with("no_such_service:"));
     }
 
     #[tokio::test]

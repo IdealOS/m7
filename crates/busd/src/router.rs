@@ -10,6 +10,10 @@
 //! the requester's id. A request ends exactly once: with the service's response, a
 //! `timeout` or `service_gone` error from the broker, or the requester's cancel.
 //!
+//! A streamed request (`"stream": true`) has no timeout, and the service may send
+//! any number of `stream` frames on it before its response; they are forwarded to
+//! the requester the same way. It ends the same ways, apart from the timeout.
+//!
 //! File descriptors never pass through the router. It only carries each message's
 //! `fds` count to the message it forwards; the shell sends the descriptors that
 //! arrived with a message along with whichever action declares them.
@@ -22,8 +26,8 @@ use protocol::broker::{
     TapEvent, method,
 };
 use protocol::bus::{
-    self, BROKER, BusError, DEFAULT_TIMEOUT_MS, MAX_NAMES, MAX_PENDING_REQUESTS, MAX_SUBSCRIPTIONS,
-    MAX_TIMEOUT_MS, Message, Sender, TAP_TOPIC, code,
+    self, BROKER, BusError, DEFAULT_TIMEOUT_MS, MAX_NAMES, MAX_PENDING_REQUESTS, MAX_STREAMS,
+    MAX_SUBSCRIPTIONS, MAX_TIMEOUT_MS, Message, Sender, TAP_TOPIC, code,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -92,8 +96,11 @@ struct Conn {
     /// Names this connection claimed, oldest first; the first is how it's stamped.
     names: Vec<String>,
     subs: Vec<String>,
-    /// Requests this connection sent that are still waiting for an answer.
+    /// Requests this connection sent that are still waiting for an answer, not
+    /// counting streamed ones.
     waiting: usize,
+    /// Streamed requests this connection sent that are still open.
+    streams: usize,
 }
 
 struct Pending {
@@ -101,7 +108,14 @@ struct Pending {
     /// The id the requester used.
     client_id: u64,
     service: ConnId,
-    deadline: Instant,
+    /// `None` for a streamed request, which has no timeout.
+    deadline: Option<Instant>,
+}
+
+impl Pending {
+    fn streamed(&self) -> bool {
+        self.deadline.is_none()
+    }
 }
 
 pub struct Router {
@@ -137,7 +151,10 @@ impl Router {
     pub fn handle(&mut self, now: Instant, event: Event, out: &mut Vec<Action>) {
         match event {
             Event::Opened { conn, trust, adopted_for } => {
-                self.conns.insert(conn, Conn { trust, names: Vec::new(), subs: Vec::new(), waiting: 0 });
+                self.conns.insert(
+                    conn,
+                    Conn { trust, names: Vec::new(), subs: Vec::new(), waiting: 0, streams: 0 },
+                );
                 // Session may have gone while the connection was being set up.
                 if let Some((requester, id)) = adopted_for
                     && self.conns.contains_key(&requester)
@@ -181,7 +198,7 @@ impl Router {
                 let reply = self.broker(conn, &sender, id, method, params);
                 out.push(Action::Deliver { to: vec![conn], msg: reply });
             }
-            Message::Request { id, to, method, params, timeout_ms, fds, .. } => {
+            Message::Request { id, to, method, params, timeout_ms, stream, fds, .. } => {
                 let mut reply = |msg| out.push(Action::Deliver { to: vec![conn], msg });
                 let Some(&service) = self.names.get(&to) else {
                     return reply(Message::err(id, code::NO_SUCH_SERVICE, format!("no service named {to}")));
@@ -193,7 +210,18 @@ impl Router {
                         format!("request {id} is already pending"),
                     ));
                 }
-                if self.conns.get(&conn).is_some_and(|c| c.waiting >= MAX_PENDING_REQUESTS) {
+                if stream && timeout_ms.is_some() {
+                    return reply(Message::err(id, code::BAD_REQUEST, "a streamed request has no timeout"));
+                }
+                let c = self.conns.get(&conn).expect("sender exists");
+                if stream && c.streams >= MAX_STREAMS {
+                    return reply(Message::err(
+                        id,
+                        code::LIMIT_EXCEEDED,
+                        format!("more than {MAX_STREAMS} streamed requests open"),
+                    ));
+                }
+                if !stream && c.waiting >= MAX_PENDING_REQUESTS {
                     return reply(Message::err(
                         id,
                         code::LIMIT_EXCEEDED,
@@ -206,6 +234,7 @@ impl Router {
                     method,
                     params,
                     timeout_ms,
+                    stream,
                     fds,
                     from: Some(sender.clone()),
                 };
@@ -215,14 +244,34 @@ impl Router {
                 let bus_id = self.next_id;
                 self.next_id += 1;
                 // Clamped, so a request can't hold its slot (and the service) forever,
-                // and the deadline stays far from the clock's limits.
+                // and the deadline stays far from the clock's limits. A streamed
+                // request has none: it's open until someone ends it.
                 let wait = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
-                let deadline = now + Duration::from_millis(wait);
+                let deadline = (!stream).then(|| now + Duration::from_millis(wait));
                 self.pending.insert(bus_id, Pending { requester: conn, client_id: id, service, deadline });
-                self.conns.get_mut(&conn).expect("sender exists").waiting += 1;
+                let c = self.conns.get_mut(&conn).expect("sender exists");
+                match deadline {
+                    Some(deadline) => {
+                        c.waiting += 1;
+                        self.deadlines.insert((deadline, bus_id));
+                    }
+                    None => c.streams += 1,
+                }
                 self.by_client.insert((conn, id), bus_id);
-                self.deadlines.insert((deadline, bus_id));
                 out.push(Action::Deliver { to: vec![service], msg: forwarded });
+            }
+            Message::Stream { id, data } => {
+                // Only from the service a streamed request went to; a frame after
+                // the request ended (a cancel crossing it on the wire) is dropped.
+                if let Some(p) = self.pending.get(&id)
+                    && p.service == conn
+                    && p.streamed()
+                {
+                    out.push(Action::Deliver {
+                        to: vec![p.requester],
+                        msg: Message::Stream { id: p.client_id, data },
+                    });
+                }
             }
             Message::Response { id, ok, result, error, fds } => {
                 // Only the service a request went to may answer it; anything else
@@ -411,9 +460,14 @@ impl Router {
         self.by_client.remove(&(p.requester, p.client_id));
         // The requester is already gone when its own close ends the request.
         if let Some(c) = self.conns.get_mut(&p.requester) {
-            c.waiting -= 1;
+            match p.deadline {
+                Some(_) => c.waiting -= 1,
+                None => c.streams -= 1,
+            }
         }
-        self.deadlines.remove(&(p.deadline, bus_id));
+        if let Some(deadline) = p.deadline {
+            self.deadlines.remove(&(deadline, bus_id));
+        }
         p
     }
 
@@ -523,6 +577,7 @@ mod tests {
                     method: method.into(),
                     params,
                     timeout_ms: None,
+                    stream: false,
                     fds: 0,
                     from: None,
                 },
@@ -691,6 +746,7 @@ mod tests {
             method: "drop".into(),
             params: Value::Null,
             timeout_ms: None,
+            stream: false,
             fds: 0,
             from: Some(Sender::Service("permd".into())),
         };
@@ -740,6 +796,7 @@ mod tests {
                 method: "x".into(),
                 params: Value::Null,
                 timeout_ms,
+                stream: false,
                 fds: 0,
                 from: None,
             };
@@ -1006,6 +1063,71 @@ mod tests {
         assert!(
             h.send(2, Message::Publish { topic: "x".into(), data: Value::Null, fds: 0, from: None })
                 .is_empty()
+        );
+    }
+
+    /// A streamed request: parts come back under the caller's id, it never times out,
+    /// and it ends with a response, a cancel, or either side going away.
+    #[test]
+    fn streamed_requests_forward_parts_until_they_end() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        h.open(2, app("org.example.notes"));
+        h.open(3, app("org.example.other"));
+        h.claim(1, "db");
+        let out = h.send(2, Message::stream_request(7, "db", "watch", json!({"type": "Note"})));
+        let [Action::Deliver { msg: Message::Request { id: bus_id, stream: true, .. }, .. }] = &out[..]
+        else {
+            panic!("{out:?}")
+        };
+        let bus_id = *bus_id;
+        assert!(h.router.next_deadline().is_none(), "no timeout");
+        for n in 0..3 {
+            let out = h.send(1, Message::Stream { id: bus_id, data: json!(n) });
+            assert_eq!(out, [deliver(2, Message::Stream { id: 7, data: json!(n) })]);
+        }
+        // Only the service may send parts.
+        assert!(h.send(3, Message::Stream { id: bus_id, data: json!("forged") }).is_empty());
+        assert!(h.send(2, Message::Stream { id: bus_id, data: json!("forged") }).is_empty());
+        h.advance(Duration::from_millis(MAX_TIMEOUT_MS * 2));
+        assert_eq!(h.send(1, Message::Stream { id: bus_id, data: json!(3) }).len(), 1, "still open");
+        // A response ends it; later parts are dropped.
+        assert_eq!(h.send(1, Message::ok(bus_id, Value::Null)), [deliver(2, Message::ok(7, Value::Null))]);
+        assert!(h.send(1, Message::Stream { id: bus_id, data: json!(4) }).is_empty());
+
+        // A cancel ends one, and so does the requester going away.
+        let open = |h: &mut Harness, id| match &h
+            .send(2, Message::stream_request(id, "db", "watch", Value::Null))[..]
+        {
+            [Action::Deliver { msg: Message::Request { id, .. }, .. }] => *id,
+            other => panic!("{other:?}"),
+        };
+        let first = open(&mut h, 8);
+        assert_eq!(h.send(2, Message::Cancel { id: 8 }), [deliver(1, Message::Cancel { id: first })]);
+        assert!(h.send(1, Message::Stream { id: first, data: Value::Null }).is_empty());
+        let second = open(&mut h, 9);
+        assert_eq!(h.run(Event::Closed { conn: 2 }), [deliver(1, Message::Cancel { id: second })]);
+    }
+
+    #[test]
+    fn streamed_requests_have_their_own_limit_and_no_timeout() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        h.open(2, app("org.example.notes"));
+        h.claim(1, "db");
+        let mut timed = Message::stream_request(1, "db", "watch", Value::Null);
+        if let Message::Request { timeout_ms, .. } = &mut timed {
+            *timeout_ms = Some(10);
+        }
+        assert_eq!(error_code(&h.send(2, timed)[0]), code::BAD_REQUEST);
+        for id in 0..MAX_STREAMS as u64 {
+            assert_eq!(h.send(2, Message::stream_request(id, "db", "watch", Value::Null)).len(), 1);
+        }
+        let out = h.send(2, Message::stream_request(5000, "db", "watch", Value::Null));
+        assert_eq!(error_code(&out[0]), code::LIMIT_EXCEEDED);
+        // Ordinary requests still go through.
+        assert!(
+            matches!(&h.request(2, 6000, "db", "q", Value::Null)[..], [Action::Deliver { to, .. }] if to == &[1])
         );
     }
 }

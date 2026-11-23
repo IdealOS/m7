@@ -33,6 +33,7 @@ fn document() -> Value {
     g.subschema_for::<db::ChangesResult>();
     g.subschema_for::<db::UndoParams>();
     g.subschema_for::<db::UndoResult>();
+    g.subschema_for::<db::WatchEvent>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -51,11 +52,13 @@ fn document() -> Value {
         "DEFAULT_TIMEOUT_MS": constant(bus::DEFAULT_TIMEOUT_MS.into(), "How long the broker waits for a response before answering `timeout` itself, unless the request sets `timeout_ms`."),
         "MAX_TIMEOUT_MS": constant(bus::MAX_TIMEOUT_MS.into(), "Longest `timeout_ms` the broker honors; longer ones are shortened to this."),
         "MAX_PENDING_REQUESTS": constant(bus::MAX_PENDING_REQUESTS.into(), "Most requests one connection may have waiting for an answer at once; past it the broker answers `limit_exceeded`."),
+        "MAX_STREAMS": constant(bus::MAX_STREAMS.into(), "Most streamed requests one connection may have open at once; they don't count against `MAX_PENDING_REQUESTS`."),
         "MAX_SUBSCRIPTIONS": constant(bus::MAX_SUBSCRIPTIONS.into(), "Most subscription patterns one connection may hold."),
         "MAX_NAMES": constant(bus::MAX_NAMES.into(), "Most service names one connection may claim."),
         "DB_SERVICE": constant(db::SERVICE.into(), "The name the database service claims."),
         "MAX_QUERY_LIMIT": constant(db::MAX_QUERY_LIMIT.into(), "Most documents one query returns; a larger `limit` is an error."),
         "DEFAULT_QUERY_LIMIT": constant(db::DEFAULT_QUERY_LIMIT.into(), "The `limit` a query gets when it names none."),
+        "MAX_WATCHES": constant(db::MAX_WATCHES.into(), "Most live queries (`watch`) the database service keeps open at once, across every caller."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

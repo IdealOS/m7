@@ -4,6 +4,7 @@
 //! osctl [--socket PATH] bus list                      services and connection count
 //! osctl [--socket PATH] bus hello                     this connection's number and identity
 //! osctl [--socket PATH] bus call TO METHOD [JSON] [--timeout MS]
+//! osctl [--socket PATH] bus stream TO METHOD [JSON] [--count N]   a streamed request; parts as JSON lines
 //! osctl [--socket PATH] bus pub TOPIC [JSON]
 //! osctl [--socket PATH] bus sub PATTERN               print publications as JSON lines
 //! osctl [--socket PATH] bus tap                       print every message the broker sees
@@ -19,6 +20,7 @@
 //! osctl [--socket PATH] db at ID CHANGE_SET           a document as it was then
 //! osctl [--socket PATH] db changes [--limit N]        recent change sets
 //! osctl [--socket PATH] db undo CHANGE_SET            revert a change set (undo an undo to redo)
+//! osctl [--socket PATH] db watch JSON [--count N]     a live query: its result, then changes, as JSON lines
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -36,10 +38,12 @@ use std::time::Duration;
 
 use commands::Command;
 
-const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
+const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO METHOD [JSON] [--timeout MS] \
+| stream TO METHOD [JSON] [--count N] | pub TOPIC [JSON] \
 | sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])
        osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
-| search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET)";
+| search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET \
+| watch JSON [--count N])";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -119,6 +123,17 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
             Ok(())
         }
     };
+    let count = flags.iter().any(|(f, _)| f == "count").then(|| number("count", 0)).transpose()?;
+    if group == "db" && sub == "watch" {
+        arity(1, 1)?;
+        allowed(&["count"])?;
+        let params = json(positional.first())?;
+        if !params.is_object() {
+            return Err("db watch takes a query: a JSON object".into());
+        }
+        let (to, method) = (protocol::db::SERVICE.into(), protocol::db::method::WATCH.into());
+        return Ok((socket, Command::Stream { to, method, params, count }));
+    }
     if group == "db" {
         return Ok((socket, db_command(&sub, &positional, &flags, arity, allowed, json)?));
     }
@@ -143,6 +158,16 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
                 method: positional[1].clone(),
                 params: json(positional.get(2))?,
                 timeout: timeout.map(Duration::from_millis),
+            }
+        }
+        "stream" => {
+            arity(2, 3)?;
+            allowed(&["count"])?;
+            Command::Stream {
+                to: positional[0].clone(),
+                method: positional[1].clone(),
+                params: json(positional.get(2))?,
+                count,
             }
         }
         "pub" => {
@@ -317,6 +342,15 @@ mod tests {
             db("create", json!({"type": "Note", "data": {"t": 1}}))
         );
         assert_eq!(parse_str("db get abc").unwrap().1, db("get", json!({"id": "abc"})));
+        let watch = |count| Command::Stream {
+            to: "db".into(),
+            method: "watch".into(),
+            params: json!({"type": "Note"}),
+            count,
+        };
+        assert_eq!(parse_str("db watch {\"type\":\"Note\"}").unwrap().1, watch(None));
+        assert_eq!(parse_str("db watch {\"type\":\"Note\"} --count 2").unwrap().1, watch(Some(2)));
+        assert_eq!(parse_str("bus stream db watch {\"type\":\"Note\"} --count 2").unwrap().1, watch(Some(2)));
         assert_eq!(parse_str("db delete abc").unwrap().1, db("delete", json!({"id": "abc"})));
         assert_eq!(
             parse_str("db update abc {\"t\":null}").unwrap().1,
@@ -338,6 +372,11 @@ mod tests {
             "db search",
             "db search x --limit y",
             "db drop x",
+            "db watch",
+            "db watch [1]",
+            "db watch {} --count x",
+            "db watch {} --limit 1",
+            "bus stream db",
             "db get a --type x",
         ] {
             assert!(parse_str(bad).is_err(), "{bad}");

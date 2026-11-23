@@ -419,8 +419,12 @@
             "params": {
               "default": null
             },
+            "stream": {
+              "description": "Ask for a streamed answer: the service may send any number of\n`Stream` frames before its response, and the request has no\ntimeout. It stays open until the service responds, the requester\ncancels, or either side disconnects.",
+              "type": "boolean"
+            },
             "timeout_ms": {
-              "description": "Overrides `DEFAULT_TIMEOUT_MS`.",
+              "description": "Overrides `DEFAULT_TIMEOUT_MS`. Not allowed on a streamed request.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -475,6 +479,28 @@
             "kind",
             "id",
             "ok"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One part of a streamed answer to request `id`, from the service it went to.\nThe broker forwards it under the requester's id; the request stays open.",
+          "properties": {
+            "data": {
+              "default": null
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
           ],
           "type": "object"
         },
@@ -1021,6 +1047,78 @@
         "kind"
       ],
       "type": "object"
+    },
+    "WatchEvent": {
+      "description": "A part of `watch`'s streamed answer.\n\nTo keep a list up to date: drop the `removed` ids, replace the `changed`\ndocuments, append the `added` ones, and then, if `order` is present, sort the\nlist to match it.",
+      "oneOf": [
+        {
+          "description": "The first part: every matching document, in order.",
+          "properties": {
+            "docs": {
+              "items": {
+                "$ref": "#/$defs/Doc"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "initial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "docs"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "What changed since the previous part.",
+          "properties": {
+            "added": {
+              "description": "Documents that are now in the result and weren't before.",
+              "items": {
+                "$ref": "#/$defs/Doc"
+              },
+              "type": "array"
+            },
+            "changed": {
+              "description": "Documents still in the result whose contents changed.",
+              "items": {
+                "$ref": "#/$defs/Doc"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "diff",
+              "type": "string"
+            },
+            "order": {
+              "description": "Every id in the result, in order. Present whenever the order isn't\njust the previous one with the removed ids taken out (so whenever\nsomething was added or moved).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "removed": {
+              "description": "Ids of documents no longer in the result (deleted, no longer matching,\nor pushed past the limit).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "added",
+            "changed",
+            "removed"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$id": "idealos:protocol",
@@ -1064,6 +1162,10 @@
       "description": "Most documents one query returns; a larger `limit` is an error.",
       "value": 10000
     },
+    "MAX_STREAMS": {
+      "description": "Most streamed requests one connection may have open at once; they don't count against `MAX_PENDING_REQUESTS`.",
+      "value": 256
+    },
     "MAX_SUBSCRIPTIONS": {
       "description": "Most subscription patterns one connection may hold.",
       "value": 256
@@ -1071,6 +1173,10 @@
     "MAX_TIMEOUT_MS": {
       "description": "Longest `timeout_ms` the broker honors; longer ones are shortened to this.",
       "value": 3600000
+    },
+    "MAX_WATCHES": {
+      "description": "Most live queries (`watch`) the database service keeps open at once, across every caller.",
+      "value": 4096
     },
     "TAP_TOPIC": {
       "description": "The broker's trace of every message; only trusted connections may subscribe.",
