@@ -66,6 +66,12 @@ export type AdoptResult = { conn: number };
 /** A system service's connection: it may claim names and tap the bus. */
 export type AdoptSystem = { trust: SystemTrust };
 
+/** Params of `at`: document `id` as it was just after change set `change_set`. */
+export type AtParams = { id: string; change_set: number };
+
+/** Result of `at`. */
+export type AtResult = { data: Record<string, unknown> };
+
 /** Error codes the broker itself sends. Services may send their own. */
 export type BrokerErrorCode =
   /** The frame was valid JSON but the message makes no sense (unknown method, bad params). */
@@ -88,6 +94,31 @@ export type BrokerErrorCode =
 
 /** Why a request failed. `code` is one of the broker's codes or a service's own. */
 export type BusError = { code: string; message: string };
+
+/** What a change set did to a document. */
+export type ChangeKind =
+  | "create" | "update" | "delete"
+  /** Undoing a delete brought it back. */
+  | "restore";
+
+/** One write, possibly to several documents. */
+export type ChangeSetInfo = {
+  id: number;
+  at: number;
+  origin: string;
+  /** Ids of the documents it touched. */
+  docs: string[];
+  undoes?: number | null;
+};
+
+/** Params of `changes`: the most recent change sets. */
+export type ChangesParams = {
+  /** At most this many (default 100, at most 10,000). */
+  limit?: number | null;
+};
+
+/** Result of `changes`, newest first. */
+export type ChangesResult = { change_sets: ChangeSetInfo[] };
 
 /** Params of a `compositor.commit` request. */
 export type Commit = { window: number; ops: SceneOp[] };
@@ -120,6 +151,9 @@ export type HelloResult = {
   /** How the broker stamps this connection's messages. */
   sender: Sender;
 };
+
+/** Result of `history`: every change to the document, oldest first. */
+export type HistoryResult = { versions: VersionInfo[] };
 
 /** Params of `get` and `delete`. */
 export type IdParams = { id: string };
@@ -249,8 +283,29 @@ export type TapEvent = {
 };
 
 /**
+ * Params of `undo`: revert change set `change_set` with a new change set. Undoing
+ * an undo redoes.
+ */
+export type UndoParams = { change_set: number };
+
+/** Result of `undo`: the change set the undo made. */
+export type UndoResult = { change_set: number };
+
+/**
  * Params of `update`: a JSON merge patch (RFC 7396) for document `id`. A key set
  * to null is removed, an object merges into the object there, and anything else
  * replaces the old value.
  */
 export type UpdateParams = { id: string; patch: Record<string, unknown> };
+
+/** One change set's effect on one document. */
+export type VersionInfo = {
+  change_set: number;
+  /** When, in milliseconds since the Unix epoch. */
+  at: number;
+  /** Who: the service name or app id that made the change. */
+  origin: string;
+  kind: ChangeKind;
+  /** The change set this one undid, if it was an undo. */
+  undoes?: number | null;
+};

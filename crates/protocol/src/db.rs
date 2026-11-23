@@ -33,6 +33,10 @@ pub const SERVICE: &str = "db";
 /// | `delete` | [`IdParams`]     | null           |
 /// | `query`  | [`Query`]        | [`DocsResult`] |
 /// | `search` | [`SearchParams`] | [`DocsResult`] |
+/// | `history` | [`IdParams`]    | [`HistoryResult`] |
+/// | `at`     | [`AtParams`]     | [`AtResult`]   |
+/// | `changes` | [`ChangesParams`] | [`ChangesResult`] |
+/// | `undo`   | [`UndoParams`]   | [`UndoResult`] |
 pub mod method {
     pub const CREATE: &str = "create";
     pub const GET: &str = "get";
@@ -40,6 +44,10 @@ pub mod method {
     pub const DELETE: &str = "delete";
     pub const QUERY: &str = "query";
     pub const SEARCH: &str = "search";
+    pub const HISTORY: &str = "history";
+    pub const AT: &str = "at";
+    pub const CHANGES: &str = "changes";
+    pub const UNDO: &str = "undo";
 }
 
 /// Error codes the `db` service sends, besides the broker's `bad_request`.
@@ -95,6 +103,99 @@ pub struct SearchParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DocsResult {
     pub docs: Vec<Doc>,
+}
+
+/// What a change set did to a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Create,
+    Update,
+    Delete,
+    /// Undoing a delete brought it back.
+    Restore,
+}
+
+/// One change set's effect on one document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VersionInfo {
+    pub change_set: i64,
+    /// When, in milliseconds since the Unix epoch.
+    pub at: i64,
+    /// Who: the service name or app id that made the change.
+    pub origin: String,
+    pub kind: ChangeKind,
+    /// The change set this one undid, if it was an undo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoes: Option<i64>,
+}
+
+/// Result of `history`: every change to the document, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryResult {
+    pub versions: Vec<VersionInfo>,
+}
+
+/// Params of `at`: document `id` as it was just after change set `change_set`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AtParams {
+    pub id: String,
+    pub change_set: i64,
+}
+
+/// Result of `at`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AtResult {
+    pub data: Map<String, Value>,
+}
+
+/// Params of `changes`: the most recent change sets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChangesParams {
+    /// At most this many (default 100, at most 10,000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One write, possibly to several documents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChangeSetInfo {
+    pub id: i64,
+    pub at: i64,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoes: Option<i64>,
+    /// Ids of the documents it touched.
+    pub docs: Vec<String>,
+}
+
+/// Result of `changes`, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChangesResult {
+    pub change_sets: Vec<ChangeSetInfo>,
+}
+
+/// Params of `undo`: revert change set `change_set` with a new change set. Undoing
+/// an undo redoes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UndoParams {
+    pub change_set: i64,
+}
+
+/// Result of `undo`: the change set the undo made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UndoResult {
+    pub change_set: i64,
 }
 
 /// Most documents one query returns; a larger `limit` is an error.

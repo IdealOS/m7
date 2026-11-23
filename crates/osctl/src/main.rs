@@ -15,6 +15,10 @@
 //! osctl [--socket PATH] db delete ID
 //! osctl [--socket PATH] db query JSON                 e.g. '{"type": "Note", "where": {"done": false}}'
 //! osctl [--socket PATH] db search WORDS... [--type TYPE] [--limit N]
+//! osctl [--socket PATH] db history ID                 every change to a document
+//! osctl [--socket PATH] db at ID CHANGE_SET           a document as it was then
+//! osctl [--socket PATH] db changes [--limit N]        recent change sets
+//! osctl [--socket PATH] db undo CHANGE_SET            revert a change set (undo an undo to redo)
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -35,7 +39,7 @@ use commands::Command;
 const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
 | sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])
        osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
-| search WORDS... [--type TYPE] [--limit N])";
+| search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -171,6 +175,10 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     Ok((socket, command))
 }
 
+fn change_set(text: &str) -> Result<i64, String> {
+    text.parse().map_err(|_| format!("a change set is a number, not {text}"))
+}
+
 /// `osctl db ...` is shorthand for a request to the db service.
 fn db_command(
     sub: &str,
@@ -227,6 +235,31 @@ fn db_command(
                 };
             }
             (method::SEARCH, params)
+        }
+        "history" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            (method::HISTORY, json!({"id": positional[0]}))
+        }
+        "at" => {
+            arity(2, 2)?;
+            allowed(&[])?;
+            (method::AT, json!({"id": positional[0], "change_set": change_set(&positional[1])?}))
+        }
+        "changes" => {
+            arity(0, 0)?;
+            allowed(&["limit"])?;
+            let mut params = json!({});
+            if let Some((_, v)) = flags.iter().find(|(f, _)| f == "limit") {
+                params["limit"] =
+                    json!(v.parse::<u32>().map_err(|_| format!("--limit must be a whole number, not {v}"))?);
+            }
+            (method::CHANGES, params)
+        }
+        "undo" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            (method::UNDO, json!({"change_set": change_set(&positional[0])?}))
         }
         other => return Err(format!("unknown db subcommand {other}")),
     };

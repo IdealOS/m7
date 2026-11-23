@@ -412,3 +412,224 @@ fn compiled_queries_agree_with_the_filter_language() {
         }
     }
 }
+
+// ---- History and undo ----
+
+fn data(s: &Store, id: &str) -> Value {
+    Value::Object(s.get(id).unwrap().data)
+}
+
+#[test]
+fn history_lists_every_change_and_reads_old_versions() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"title": "one"})), "app.a").unwrap();
+    s.update(&d.id, &obj(json!({"title": "two"})), "app.b").unwrap();
+    s.update(&d.id, &obj(json!({"title": "two"})), "app.b").unwrap(); // no change, no version
+    s.delete(&d.id, "app.c").unwrap();
+    let h = s.history(&d.id).unwrap();
+    let kinds: Vec<(Kind, &str)> = h.iter().map(|v| (v.kind, v.origin.as_str())).collect();
+    assert_eq!(kinds, [(Kind::Create, "app.a"), (Kind::Update, "app.b"), (Kind::Delete, "app.c")]);
+    assert_eq!(Value::Object(s.at(&d.id, h[0].change_set).unwrap()), json!({"title": "one"}));
+    assert_eq!(Value::Object(s.at(&d.id, h[1].change_set).unwrap()), json!({"title": "two"}));
+    assert_eq!(Value::Object(s.at(&d.id, h[2].change_set).unwrap()), json!({"title": "two"}));
+    let other = s.create("Note", &Map::new(), "t").unwrap();
+    assert!(matches!(s.at(&other.id, h[0].change_set), Err(Error::Invalid(_))));
+    assert!(matches!(s.history("nope"), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn old_versions_survive_compaction() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Counter", &obj(json!({"n": 0})), "t").unwrap();
+    for n in 1..=(COMPACT_AFTER * 2) {
+        s.update(&d.id, &obj(json!({"n": n})), "t").unwrap();
+    }
+    let h = s.history(&d.id).unwrap();
+    assert_eq!(h.len() as i64, COMPACT_AFTER * 2 + 1);
+    assert_eq!(s.at(&d.id, h[5].change_set).unwrap()["n"], 5);
+}
+
+#[test]
+fn undo_reverts_one_change_and_keeps_later_ones() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"title": "a", "body": "x", "tags": ["t"]})), "t").unwrap();
+    s.update(&d.id, &obj(json!({"title": "b", "tags": null})), "t").unwrap();
+    let edit = s.history(&d.id).unwrap().last().unwrap().change_set;
+    s.update(&d.id, &obj(json!({"body": "y"})), "t").unwrap(); // later, a different field
+
+    let undo = s.undo(edit, "user").unwrap();
+    assert_eq!(data(&s, &d.id), json!({"title": "a", "body": "y", "tags": ["t"]}));
+    let last = s.history(&d.id).unwrap().pop().unwrap();
+    assert_eq!((last.change_set, last.undoes, last.origin.as_str()), (undo, Some(edit), "user"));
+    // The JSON copy, search and queries follow.
+    assert_eq!(s.search("a", Some("Note"), 10).unwrap().len(), 1);
+    assert_eq!(s.query(&query("Note", json!({"tags": {"$contains": "t"}}))).unwrap().len(), 1);
+
+    // Undoing the undo redoes the edit.
+    s.undo(undo, "user").unwrap();
+    assert_eq!(data(&s, &d.id), json!({"title": "b", "body": "y"}));
+    let loro = s.loro(&d.id).unwrap();
+    assert_eq!(s.get(&d.id).unwrap().data, loro_json::read(&loro), "the JSON copy matches the Loro doc");
+}
+
+#[test]
+fn undo_of_a_field_changed_later_restores_the_old_value() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"title": "a"})), "t").unwrap();
+    s.update(&d.id, &obj(json!({"title": "b"})), "t").unwrap();
+    let edit = s.history(&d.id).unwrap()[1].change_set;
+    s.update(&d.id, &obj(json!({"title": "c"})), "t").unwrap();
+    s.undo(edit, "t").unwrap();
+    assert_eq!(data(&s, &d.id), json!({"title": "a"}));
+}
+
+#[test]
+fn undoing_creates_and_deletes() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"title": "keep me"})), "t").unwrap();
+    let created = s.history(&d.id).unwrap()[0].change_set;
+    s.delete(&d.id, "t").unwrap();
+    let deleted = s.history(&d.id).unwrap()[1].change_set;
+
+    let restore = s.undo(deleted, "t").unwrap();
+    assert_eq!(data(&s, &d.id), json!({"title": "keep me"}));
+    assert_eq!(s.search("keep", None, 10).unwrap().len(), 1);
+    // A second undo of the same delete has nothing left to do.
+    assert!(matches!(s.undo(deleted, "t"), Err(Error::Invalid(_))));
+    s.undo(restore, "t").unwrap();
+    assert!(matches!(s.get(&d.id), Err(Error::NotFound(_))));
+    s.undo(deleted, "t").unwrap();
+    s.undo(created, "t").unwrap();
+    assert!(matches!(s.get(&d.id), Err(Error::NotFound(_))));
+    assert!(s.query(&Query::all("Note")).unwrap().is_empty());
+    let kinds: Vec<Kind> = s.history(&d.id).unwrap().iter().map(|v| v.kind).collect();
+    use Kind::*;
+    assert_eq!(kinds, [Create, Delete, Restore, Delete, Restore, Delete]);
+}
+
+#[test]
+fn undo_refuses_what_it_cannot_do() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"n": 1})), "t").unwrap();
+    s.update(&d.id, &obj(json!({"n": 2})), "t").unwrap();
+    let edit = s.history(&d.id).unwrap()[1].change_set;
+    s.delete(&d.id, "t").unwrap();
+    assert!(matches!(s.undo(edit, "t"), Err(Error::Invalid(_))), "edits of a deleted document");
+    assert!(matches!(s.undo(9999, "t"), Err(Error::Invalid(_))));
+    let sets_before = s.change_sets(100).unwrap().len();
+    let _ = s.undo(edit, "t");
+    assert_eq!(s.change_sets(100).unwrap().len(), sets_before, "a refused undo leaves no change set");
+}
+
+#[test]
+fn change_sets_list_recent_writes() {
+    let mut s = Store::open_in_memory().unwrap();
+    let a = s.create("Note", &Map::new(), "one").unwrap();
+    s.update(&a.id, &obj(json!({"x": 1})), "two").unwrap();
+    let sets = s.change_sets(10).unwrap();
+    assert_eq!(sets.len(), 2);
+    assert_eq!((sets[0].origin.as_str(), &sets[0].docs), ("two", &vec![a.id.clone()]));
+    assert_eq!(s.change_sets(1).unwrap().len(), 1);
+}
+
+/// A database made by the first schema (before history) opens, migrates and works;
+/// its old documents just have no history from before.
+#[test]
+fn version_1_databases_migrate() {
+    let dir = std::env::temp_dir().join(format!("db-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v1.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute("INSERT INTO meta (key, value) VALUES ('peer', 7)", []).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let mut s = Store::open(&path).unwrap();
+    assert_eq!(s.peer, 7);
+    let v: i64 = s.connection().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+    assert_eq!(v, SCHEMA_VERSION);
+    let d = s.create("Note", &obj(json!({"a": 1})), "t").unwrap();
+    s.update(&d.id, &obj(json!({"a": 2})), "t").unwrap();
+    s.undo(s.history(&d.id).unwrap()[1].change_set, "t").unwrap();
+    assert_eq!(data(&s, &d.id), json!({"a": 1}));
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key a change touched: its name, value before and value after (None = absent).
+type KeyChange = (String, Option<Value>, Option<Value>);
+
+/// Random edits and undos of flat documents, against a model of the rule: undoing
+/// a change set puts each key it touched back to its value before (removing it if
+/// it was absent) and leaves other keys alone. The JSON copy always matches the
+/// Loro document. `DB_FUZZ_SEEDS=n` runs more.
+#[test]
+fn random_undos_follow_the_rule() {
+    let seeds: u64 = std::env::var("DB_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let keys = ["a", "b", "c", "d"];
+    for seed in 0..seeds {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut s = Store::open_in_memory().unwrap();
+        let d = s.create("T", &Map::new(), "t").unwrap();
+        let mut model = Map::new();
+        // Each update's change set and, per key it touched, (before, after).
+        let mut edits: Vec<(i64, Vec<KeyChange>)> = Vec::new();
+        for step in 0..60 {
+            if edits.is_empty() || rng.below(3) > 0 {
+                let mut patch = Map::new();
+                for _ in 0..1 + rng.below(3) {
+                    let key = rng.pick(&keys).to_string();
+                    let v = if rng.below(4) == 0 { Value::Null } else { json!(rng.below(5)) };
+                    patch.insert(key, v);
+                }
+                let mut touched = Vec::new();
+                for (k, v) in &patch {
+                    let before = model.get(k).cloned();
+                    let after = (!v.is_null()).then(|| v.clone());
+                    if before != after {
+                        touched.push((k.clone(), before, after.clone()));
+                        match after {
+                            Some(v) => model.insert(k.clone(), v),
+                            None => model.remove(k),
+                        };
+                    }
+                }
+                s.update(&d.id, &patch, "t").unwrap();
+                if !touched.is_empty() {
+                    let set = s.history(&d.id).unwrap().last().unwrap().change_set;
+                    edits.push((set, touched));
+                }
+            } else {
+                let (set, touched) = edits[rng.below(edits.len() as u64) as usize].clone();
+                let mut changes = Vec::new();
+                for (k, before, _) in &touched {
+                    let now = model.get(k).cloned();
+                    if now != *before {
+                        changes.push((k.clone(), now, before.clone()));
+                        match before {
+                            Some(v) => model.insert(k.clone(), v.clone()),
+                            None => model.remove(k),
+                        };
+                    }
+                }
+                match s.undo(set, "t") {
+                    Ok(undo) => {
+                        assert!(
+                            !changes.is_empty(),
+                            "seed {seed} step {step}: undo of {set} changed nothing"
+                        );
+                        edits.push((undo, changes));
+                    }
+                    Err(Error::Invalid(_)) => {
+                        assert!(changes.is_empty(), "seed {seed} step {step}: refused undo")
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            assert_eq!(s.get(&d.id).unwrap().data, model, "seed {seed} step {step}");
+            assert_eq!(loro_json::read(&s.loro(&d.id).unwrap()), model, "seed {seed} step {step}: Loro");
+        }
+    }
+}

@@ -113,6 +113,29 @@ fn recorded_origins(path: &std::path::Path) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn history_and_undo_over_the_bus() {
+    let s = Setup::start("undo").await;
+    let c = s.client().await;
+    let d = doc(call(&c, "create", json!({"type": "Note", "data": {"title": "a"}})).await.unwrap());
+    call(&c, "update", json!({"id": d.id, "patch": {"title": "b"}})).await.unwrap();
+    let history: protocol::db::HistoryResult =
+        serde_json::from_value(call(&c, "history", json!({"id": d.id})).await.unwrap()).unwrap();
+    assert_eq!(history.versions.len(), 2);
+    let edit = history.versions[1].change_set;
+    let old =
+        call(&c, "at", json!({"id": d.id, "change_set": history.versions[0].change_set})).await.unwrap();
+    assert_eq!(old, json!({"data": {"title": "a"}}));
+
+    let undo = call(&c, "undo", json!({"change_set": edit})).await.unwrap();
+    assert!(undo["change_set"].as_i64().unwrap() > edit);
+    assert_eq!(doc(call(&c, "get", json!({"id": d.id})).await.unwrap()).data["title"], "a");
+    let changes = call(&c, "changes", json!({"limit": 1})).await.unwrap();
+    assert_eq!(changes["change_sets"][0]["undoes"], edit);
+    assert_eq!(call(&c, "changes", Value::Null).await.unwrap()["change_sets"].as_array().unwrap().len(), 3);
+    assert_eq!(call(&c, "undo", json!({"change_set": 999})).await.unwrap_err().code(), "bad_request");
+}
+
+#[tokio::test]
 async fn many_clients_at_once() {
     let s = Setup::start("many").await;
     let mut tasks = Vec::new();

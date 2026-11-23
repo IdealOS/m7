@@ -37,6 +37,10 @@ export const GUEST_SCRIPT = [
   // session starts dbd on the bus; a document goes in and comes back out of a query.
   "echo SMOKE db-file $(ls /data/db/idealos.db 2>&1)",
   `echo SMOKE db-roundtrip $(osctl db create Smoke '{"n":7}' >/dev/null && osctl db query '{"type":"Smoke","where":{"n":7},"limit":1}' 2>&1 | grep -c '"n":7')`,
+  // Undo: change a document, undo the change, and read the old value back.
+  `SID=$(osctl db create SmokeUndo '{"v":1}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/'); osctl db update "$SID" '{"v":2}' >/dev/null`,
+  `SSET=$(osctl db history "$SID" | grep -o '"change_set":[0-9]*' | tail -1 | cut -d: -f2); osctl db undo "$SSET" >/dev/null`,
+  `echo SMOKE db-undo $(osctl db get "$SID" 2>&1 | grep -o '"v":[0-9]*')`,
   "echo SMOKE end",
 ];
 
@@ -118,6 +122,7 @@ export function evaluate(log: string): Check[] {
     fact("bus-call", '{"n":1}', "a request went through the bus and back"),
     fact("db-file", "/data/db/idealos.db", "dbd keeps the database on /data"),
     fact("db-roundtrip", "1", "a document went into the database and came back from a query"),
+    fact("db-undo", '"v":1', "undoing a change brought the old value back"),
     {
       name: "bus benchmark ran",
       ok: rps > 0,

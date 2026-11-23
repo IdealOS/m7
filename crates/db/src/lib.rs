@@ -13,12 +13,15 @@
 //!
 //! Spike C measured this write path at about 0.1 ms per write on a Mac.
 
+mod history;
 mod loro_json;
 pub mod query;
 
+pub use history::{ChangeSet, Version};
+
 use std::path::Path;
 
-use loro::{ExportMode, LoroDoc};
+use loro::{ExportMode, Frontiers, LoroDoc};
 use protocol::db::{Doc, Query, valid_type};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Map, Value};
@@ -67,7 +70,25 @@ CREATE INDEX changes_doc ON changes (doc, seq);
 CREATE VIRTUAL TABLE fts USING fts5 (text, content='', contentless_delete=1);
 ";
 
-const SCHEMA_VERSION: i64 = 1;
+/// Changes to the schema, in order: entry `i` takes a database from version
+/// `i + 1` to `i + 2`. A new database gets [`SCHEMA`] (version 1) and then all of them.
+const MIGRATIONS: &[&str] = &[
+    // 2: history and undo. Each change set's effect on each document, as Loro
+    // versions before and after, kept forever (unlike `changes`, which compaction
+    // empties). `undoes` marks a change set made by undoing another.
+    "CREATE TABLE doc_versions (
+        doc        INTEGER NOT NULL REFERENCES documents (doc),
+        change_set INTEGER NOT NULL REFERENCES change_sets (id),
+        kind       TEXT NOT NULL,   -- create, update, delete or restore
+        before     BLOB NOT NULL,   -- Loro frontiers, encoded
+        after      BLOB NOT NULL,
+        PRIMARY KEY (doc, change_set)
+    ) STRICT;
+    CREATE INDEX doc_versions_set ON doc_versions (change_set);
+    ALTER TABLE change_sets ADD COLUMN undoes INTEGER REFERENCES change_sets (id);",
+];
+
+const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 
 #[derive(Debug)]
 pub enum Error {
@@ -140,22 +161,24 @@ impl Store {
     fn init(conn: Connection) -> Result<Store> {
         conn.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        match version {
-            0 => {
-                let tx = conn.unchecked_transaction()?;
+        if version > SCHEMA_VERSION {
+            return invalid(format!(
+                "database schema version {version} is newer than this build ({SCHEMA_VERSION})"
+            ));
+        }
+        if version < SCHEMA_VERSION {
+            let tx = conn.unchecked_transaction()?;
+            if version == 0 {
                 tx.execute_batch(SCHEMA)?;
                 // The random half of a UUIDv7: unique enough to tell devices apart.
                 let peer = uuid::Uuid::now_v7().as_u64_pair().1 >> 1;
                 tx.execute("INSERT INTO meta (key, value) VALUES ('peer', ?1)", [peer as i64])?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                tx.commit()?;
             }
-            SCHEMA_VERSION => {}
-            v => {
-                return invalid(format!(
-                    "database schema version {v} is newer than this build ({SCHEMA_VERSION})"
-                ));
+            for migration in &MIGRATIONS[(version.max(1) - 1) as usize..] {
+                tx.execute_batch(migration)?;
             }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
         }
         let peer: i64 = conn.query_row("SELECT value FROM meta WHERE key = 'peer'", [], |r| r.get(0))?;
         Ok(Store { conn, peer: peer as u64 })
@@ -183,7 +206,8 @@ impl Store {
             "INSERT INTO doc_state (doc, snapshot) VALUES (?1, ?2)",
             params![row, doc.export(ExportMode::Snapshot)?],
         )?;
-        change_set(&tx, now, origin)?;
+        let set = change_set(&tx, now, origin, None)?;
+        record_version(&tx, row, set, Kind::Create, &Frontiers::default(), &doc.oplog_frontiers())?;
         write_views(&tx, row, doc_type, &json, false)?;
         tx.commit()?;
         Ok(Doc { id, doc_type: doc_type.into(), created: now, updated: now, data: loro_json::read(&doc) })
@@ -198,30 +222,15 @@ impl Store {
             return Err(Error::NotFound(id.into()));
         };
         let doc = load(&tx, row, peer)?;
-        let before = doc.oplog_vv();
+        let before = Before::of(&doc);
         loro_json::merge(&loro_json::data(&doc), patch)?;
         doc.commit();
         let mut updated: i64 =
             tx.query_row("SELECT updated FROM documents WHERE doc = ?1", [row], |r| r.get(0))?;
-        if doc.oplog_vv() != before {
-            let json = checked_json(&doc)?;
+        if doc.oplog_vv() != before.vv {
             updated = now_ms();
-            let set = change_set(&tx, updated, origin)?;
-            let bytes = doc.export(ExportMode::updates(&before))?;
-            tx.execute(
-                "INSERT INTO changes (doc, change_set, bytes) VALUES (?1, ?2, ?3)",
-                params![row, set, bytes],
-            )?;
-            tx.execute("UPDATE documents SET updated = ?2 WHERE doc = ?1", params![row, updated])?;
-            let logged: i64 = tx.query_row(
-                "UPDATE doc_state SET updates = updates + 1 WHERE doc = ?1 RETURNING updates",
-                [row],
-                |r| r.get(0),
-            )?;
-            if logged >= COMPACT_AFTER {
-                compact(&tx, row, &doc)?;
-            }
-            write_views(&tx, row, &doc_type, &json, true)?;
+            let set = change_set(&tx, updated, origin, None)?;
+            log_change(&tx, row, &doc_type, &doc, &before, set, updated)?;
         }
         tx.commit()?;
         Ok(Doc { id: id.into(), doc_type, created, updated, data: loro_json::read(&doc) })
@@ -246,10 +255,9 @@ impl Store {
         let tx = self.conn.transaction()?;
         let Some((row, _, _)) = live_row(&tx, id)? else { return Err(Error::NotFound(id.into())) };
         let now = now_ms();
-        change_set(&tx, now, origin)?;
-        tx.execute("UPDATE documents SET deleted = ?2, updated = ?2 WHERE doc = ?1", params![row, now])?;
-        tx.execute("DELETE FROM doc_json WHERE doc = ?1", [row])?;
-        tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
+        let set = change_set(&tx, now, origin, None)?;
+        let version = load(&tx, row, self.peer)?.oplog_frontiers();
+        delete_row(&tx, row, set, now, &version)?;
         tx.commit()?;
         Ok(())
     }
@@ -335,9 +343,113 @@ fn compact(tx: &Transaction, row: i64, doc: &LoroDoc) -> Result<()> {
     Ok(())
 }
 
-fn change_set(tx: &Transaction, at: i64, origin: &str) -> Result<i64> {
-    tx.execute("INSERT INTO change_sets (at, origin) VALUES (?1, ?2)", params![at, origin])?;
+fn change_set(tx: &Transaction, at: i64, origin: &str, undoes: Option<i64>) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO change_sets (at, origin, undoes) VALUES (?1, ?2, ?3)",
+        params![at, origin, undoes],
+    )?;
     Ok(tx.last_insert_rowid())
+}
+
+/// What a change does to a document, as recorded in `doc_versions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Create,
+    Update,
+    Delete,
+    Restore,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Create => "create",
+            Kind::Update => "update",
+            Kind::Delete => "delete",
+            Kind::Restore => "restore",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Kind> {
+        Ok(match text {
+            "create" => Kind::Create,
+            "update" => Kind::Update,
+            "delete" => Kind::Delete,
+            "restore" => Kind::Restore,
+            other => return invalid(format!("unknown change kind {other:?} in the database")),
+        })
+    }
+}
+
+fn record_version(
+    tx: &Transaction,
+    row: i64,
+    set: i64,
+    kind: Kind,
+    before: &Frontiers,
+    after: &Frontiers,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO doc_versions (doc, change_set, kind, before, after) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![row, set, kind.as_str(), before.encode(), after.encode()],
+    )?;
+    Ok(())
+}
+
+/// A document's version before an edit, to log the edit's update and record it.
+struct Before {
+    vv: loro::VersionVector,
+    frontiers: Frontiers,
+}
+
+impl Before {
+    fn of(doc: &LoroDoc) -> Before {
+        Before { vv: doc.oplog_vv(), frontiers: doc.oplog_frontiers() }
+    }
+}
+
+/// Log the edit made to `doc` since `before` as part of change set `set`: its Loro
+/// update, its version, the new JSON copy and search row.
+fn log_change(
+    tx: &Transaction,
+    row: i64,
+    doc_type: &str,
+    doc: &LoroDoc,
+    before: &Before,
+    set: i64,
+    at: i64,
+) -> Result<()> {
+    let json = checked_json(doc)?;
+    let bytes = doc.export(ExportMode::updates(&before.vv))?;
+    tx.execute("INSERT INTO changes (doc, change_set, bytes) VALUES (?1, ?2, ?3)", params![row, set, bytes])?;
+    tx.execute("UPDATE documents SET updated = ?2 WHERE doc = ?1", params![row, at])?;
+    let logged: i64 = tx.query_row(
+        "UPDATE doc_state SET updates = updates + 1 WHERE doc = ?1 RETURNING updates",
+        [row],
+        |r| r.get(0),
+    )?;
+    if logged >= COMPACT_AFTER {
+        compact(tx, row, doc)?;
+    }
+    record_version(tx, row, set, Kind::Update, &before.frontiers, &doc.oplog_frontiers())?;
+    write_views(tx, row, doc_type, &json, true)
+}
+
+/// Take a document out of queries and search, keeping its state.
+fn delete_row(tx: &Transaction, row: i64, set: i64, at: i64, version: &Frontiers) -> Result<()> {
+    tx.execute("UPDATE documents SET deleted = ?2, updated = ?2 WHERE doc = ?1", params![row, at])?;
+    tx.execute("DELETE FROM doc_json WHERE doc = ?1", [row])?;
+    tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
+    record_version(tx, row, set, Kind::Delete, version, version)
+}
+
+/// Bring a deleted document back into queries and search.
+fn restore_row(tx: &Transaction, row: i64, doc_type: &str, doc: &LoroDoc, set: i64, at: i64) -> Result<()> {
+    let json = checked_json(doc)?;
+    tx.execute("UPDATE documents SET deleted = NULL, updated = ?2 WHERE doc = ?1", params![row, at])?;
+    let version = doc.oplog_frontiers();
+    record_version(tx, row, set, Kind::Restore, &version, &version)?;
+    write_views(tx, row, doc_type, &json, false)
 }
 
 /// The document's JSON copy, refusing ones too big to store.

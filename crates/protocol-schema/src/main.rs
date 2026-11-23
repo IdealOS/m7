@@ -26,6 +26,13 @@ fn document() -> Value {
     g.subschema_for::<db::UpdateParams>();
     g.subschema_for::<db::SearchParams>();
     g.subschema_for::<db::DocsResult>();
+    g.subschema_for::<db::HistoryResult>();
+    g.subschema_for::<db::AtParams>();
+    g.subschema_for::<db::AtResult>();
+    g.subschema_for::<db::ChangesParams>();
+    g.subschema_for::<db::ChangesResult>();
+    g.subschema_for::<db::UndoParams>();
+    g.subschema_for::<db::UndoResult>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so

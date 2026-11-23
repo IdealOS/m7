@@ -36,6 +36,7 @@ const GOOD = [
   "SMOKE bus-bench BENCH size=64 rtt_p50_us=180.2 rtt_p99_us=410.0 requests_per_s=21000 publishes_per_s=90000",
   "SMOKE db-file /data/db/idealos.db",
   "SMOKE db-roundtrip 1",
+  'SMOKE db-undo "v":1',
   "SMOKE end",
 ].join("\n");
 
@@ -262,11 +263,13 @@ test("a missing broker is reported", () => {
 
 test("a missing database service is reported", () => {
   const log = GOOD.replace("SMOKE db-file /data/db/idealos.db", "SMOKE db-file ls: /data/db/idealos.db: No such file or directory")
-    .replace("SMOKE db-roundtrip 1", "SMOKE db-roundtrip 0");
+    .replace("SMOKE db-roundtrip 1", "SMOKE db-roundtrip 0")
+    .replace('SMOKE db-undo "v":1', "SMOKE db-undo");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, [
     "dbd keeps the database on /data",
     "a document went into the database and came back from a query",
+    "undoing a change brought the old value back",
   ]);
 });
 

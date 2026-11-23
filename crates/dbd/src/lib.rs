@@ -12,7 +12,9 @@ use db::{Error, Store};
 use protocol::BusError;
 use protocol::bus::{Sender, code as bus_code};
 use protocol::db::{
-    CreateParams, DEFAULT_QUERY_LIMIT, DocsResult, IdParams, Query, SearchParams, UpdateParams, code, method,
+    AtParams, AtResult, ChangeKind, ChangeSetInfo, ChangesParams, ChangesResult, CreateParams,
+    DEFAULT_QUERY_LIMIT, DocsResult, HistoryResult, IdParams, Query, SearchParams, UndoParams, UndoResult,
+    UpdateParams, VersionInfo, code, method,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -48,7 +50,55 @@ pub fn handle(store: &mut Store, origin: &str, method: &str, params: Value) -> R
             let docs = store.search(&p.text, p.doc_type.as_deref(), p.limit.unwrap_or(DEFAULT_QUERY_LIMIT));
             reply(docs.map(|docs| DocsResult { docs }))
         }
+        method::HISTORY => {
+            let versions = store.history(&parse::<IdParams>(params)?.id).map(|versions| HistoryResult {
+                versions: versions
+                    .into_iter()
+                    .map(|v| VersionInfo {
+                        change_set: v.change_set,
+                        at: v.at,
+                        origin: v.origin,
+                        kind: kind(v.kind),
+                        undoes: v.undoes,
+                    })
+                    .collect(),
+            });
+            reply(versions)
+        }
+        method::AT => {
+            let p: AtParams = parse(params)?;
+            reply(store.at(&p.id, p.change_set).map(|data| AtResult { data }))
+        }
+        method::CHANGES => {
+            let p: ChangesParams = parse(if params.is_null() { serde_json::json!({}) } else { params })?;
+            let sets = store.change_sets(p.limit.unwrap_or(DEFAULT_QUERY_LIMIT)).map(|sets| ChangesResult {
+                change_sets: sets
+                    .into_iter()
+                    .map(|c| ChangeSetInfo {
+                        id: c.id,
+                        at: c.at,
+                        origin: c.origin,
+                        undoes: c.undoes,
+                        docs: c.docs,
+                    })
+                    .collect(),
+            });
+            reply(sets)
+        }
+        method::UNDO => {
+            let p: UndoParams = parse(params)?;
+            reply(store.undo(p.change_set, origin).map(|change_set| UndoResult { change_set }))
+        }
         other => Err(error(bus_code::BAD_REQUEST, format!("db has no method {other:?}"))),
+    }
+}
+
+fn kind(k: db::Kind) -> ChangeKind {
+    match k {
+        db::Kind::Create => ChangeKind::Create,
+        db::Kind::Update => ChangeKind::Update,
+        db::Kind::Delete => ChangeKind::Delete,
+        db::Kind::Restore => ChangeKind::Restore,
     }
 }
 
