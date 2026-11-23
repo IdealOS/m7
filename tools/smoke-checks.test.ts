@@ -38,6 +38,10 @@ const GOOD = [
   "SMOKE db-roundtrip 1",
   'SMOKE db-undo "v":1',
   'SMOKE db-watch "kind":"initial" "kind":"diff"',
+  "SMOKE db-snapshot /data/db/snapshots/snapshot-1795000000000-12.db",
+  "SMOKE db-links 1",
+  "SMOKE db-blob smoke-blob 1",
+  "SMOKE db-schema 1",
   "SMOKE end",
 ].join("\n");
 
@@ -266,13 +270,21 @@ test("a missing database service is reported", () => {
   const log = GOOD.replace("SMOKE db-file /data/db/idealos.db", "SMOKE db-file ls: /data/db/idealos.db: No such file or directory")
     .replace("SMOKE db-roundtrip 1", "SMOKE db-roundtrip 0")
     .replace('SMOKE db-undo "v":1', "SMOKE db-undo")
-    .replace('SMOKE db-watch "kind":"initial" "kind":"diff"', 'SMOKE db-watch "kind":"initial"');
+    .replace('SMOKE db-watch "kind":"initial" "kind":"diff"', 'SMOKE db-watch "kind":"initial"')
+    .replace("SMOKE db-snapshot /data/db/snapshots/snapshot-1795000000000-12.db", "SMOKE db-snapshot osctl: no_such_service: no service named db")
+    .replace("SMOKE db-links 1", "SMOKE db-links 0")
+    .replace("SMOKE db-blob smoke-blob 1", "SMOKE db-blob osctl: no_such_service: no service named db 0")
+    .replace("SMOKE db-schema 1", "SMOKE db-schema 0");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, [
     "dbd keeps the database on /data",
     "a document went into the database and came back from a query",
     "undoing a change brought the old value back",
     "a live query reported a new document",
+    "a snapshot was written to /data/db/snapshots",
+    "a link was followed back from its target",
+    "a blob went in from a file and came back through a descriptor",
+    "the Contact schema refused a contact without a name",
   ]);
 });
 

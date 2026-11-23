@@ -45,6 +45,15 @@ pub enum Command {
         seconds: u64,
         size: usize,
     },
+    /// Store a file as a blob and print what the db service says about it.
+    PutBlob {
+        file: std::path::PathBuf,
+    },
+    /// Write a blob to a file, or standard output.
+    GetBlob {
+        hash: String,
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 /// `path` is the broker's socket, for commands that open a second connection.
@@ -110,6 +119,45 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
             out.flush().map_err(w)?;
             echo(bus).await;
             Err("the bus closed the connection".into())
+        }
+        Command::PutBlob { file } => {
+            let f = std::fs::File::open(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let reply = bus
+                .request_with(
+                    protocol::db::SERVICE,
+                    protocol::db::method::PUT_BLOB,
+                    Value::Null,
+                    vec![f.into()],
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            writeln!(out, "{}", reply.result).map_err(w)
+        }
+        Command::GetBlob { hash, out: to } => {
+            let reply = bus
+                .request_with(
+                    protocol::db::SERVICE,
+                    protocol::db::method::GET_BLOB,
+                    json!({"hash": hash}),
+                    Vec::new(),
+                    None,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            let Some(fd) = reply.fds.into_iter().next() else {
+                return Err("the db service sent no descriptor".into());
+            };
+            let mut blob = std::fs::File::from(fd);
+            match to {
+                Some(path) => {
+                    let mut f =
+                        std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    std::io::copy(&mut blob, &mut f).map_err(w)?;
+                    Ok(())
+                }
+                None => std::io::copy(&mut blob, out).map(drop).map_err(w),
+            }
         }
         Command::Bench { seconds, size } => {
             let service = Client::connect(path).await.map_err(|e| e.to_string())?;

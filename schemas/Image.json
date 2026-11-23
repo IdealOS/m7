@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Image",
+  "title": "Image",
+  "description": "A picture; the pixels are a blob.",
+  "type": "object",
+  "required": ["blob"],
+  "properties": {
+    "blob": { "x-kind": "blob" },
+    "type": { "type": "string", "description": "The MIME type." },
+    "width": { "type": "integer", "minimum": 0 },
+    "height": { "type": "integer", "minimum": 0 },
+    "taken": { "type": "integer", "description": "When it was taken, in milliseconds since the Unix epoch." },
+    "caption": { "type": "string" }
+  },
+  "x-indexes": ["taken"]
+}

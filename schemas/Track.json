@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Track",
+  "title": "Track",
+  "description": "A piece of music; the audio is a blob.",
+  "type": "object",
+  "required": ["title", "audio"],
+  "properties": {
+    "title": { "type": "string" },
+    "artist": { "type": "string" },
+    "album": { "type": "string" },
+    "albumArtist": { "type": "string" },
+    "trackNumber": { "type": "integer", "minimum": 0 },
+    "discNumber": { "type": "integer", "minimum": 0 },
+    "year": { "type": "integer" },
+    "genre": { "type": "string" },
+    "duration": { "type": "number", "minimum": 0, "description": "Seconds." },
+    "audio": { "x-kind": "blob" },
+    "artwork": { "x-kind": "blob" }
+  },
+  "x-indexes": ["artist", "album"]
+}

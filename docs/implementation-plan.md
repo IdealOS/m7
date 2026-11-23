@@ -253,7 +253,7 @@ Goal: a working document store with queries, live updates, full-text search, lin
 - [ ] Write path: apply changes to the Loro doc, then update the JSON copy, links and FTS index in the same SQLite transaction.
 - [ ] Query compiler from the filter JSON to SQL with `json_extract`, plus expression indexes on common fields of system schemas.
 - [ ] Live queries: a registry of streamed `watch` requests; each batch of commits re-runs the queries for the affected types and streams the diff (added, changed, removed) back on the request.
-- [ ] Blob store: files named by SHA-256 under `/data/blobs`, uploaded and read through passed file descriptors, with reference counts.
+- [ ] Blob store: files named by SHA-256 under `/data/db/blobs` (beside the database, so backups take both), uploaded and read through passed file descriptors, with reference counts.
 - [ ] System schemas in `schemas/` as JSON Schema; writes are validated, and unknown fields are allowed.
 - [ ] History API: list versions, read a document at a version, diff two versions.
 - [ ] Change sets and global undo: undo writes a new change that reverts a change set, so the undo itself stays in history.
@@ -332,7 +332,7 @@ Goal: no data is lost to a dead SD card or a bad update.
 - [ ] Optional encryption of backups, using a key held by `secretsd`.
 - [ ] Restore: a recovery boot mode that restores the data partition from a backup.
 - [ ] History compaction: keep everything for 30 days, then daily for a year, then weekly; pinned versions are kept; unreferenced blobs are swept.
-- [ ] RAUC A/B system updates, with automatic rollback if the new slot fails to boot.
+- [ ] RAUC A/B system updates, with automatic rollback if the new slot fails to boot. How releases reach beta testers (GitHub Releases, a release image, signing, database rollback) is planned in [releases.md](releases.md).
 - [ ] Settings: Storage and Backup pages.
 
 **Done when:** after wiping the data partition, a restore from USB brings back every document and blob, and a deliberately broken update rolls back.

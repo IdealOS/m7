@@ -34,6 +34,16 @@ fn document() -> Value {
     g.subschema_for::<db::UndoParams>();
     g.subschema_for::<db::UndoResult>();
     g.subschema_for::<db::WatchEvent>();
+    g.subschema_for::<db::LinksResult>();
+    g.subschema_for::<db::DiffParams>();
+    g.subschema_for::<db::DiffResult>();
+    g.subschema_for::<db::SchemasResult>();
+    g.subschema_for::<db::SnapshotInfo>();
+    g.subschema_for::<db::SnapshotsResult>();
+    g.subschema_for::<db::RestoreParams>();
+    g.subschema_for::<db::RestoreResult>();
+    g.subschema_for::<db::HashParams>();
+    g.subschema_for::<db::BlobInfo>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -59,6 +69,7 @@ fn document() -> Value {
         "MAX_QUERY_LIMIT": constant(db::MAX_QUERY_LIMIT.into(), "Most documents one query returns; a larger `limit` is an error."),
         "DEFAULT_QUERY_LIMIT": constant(db::DEFAULT_QUERY_LIMIT.into(), "The `limit` a query gets when it names none."),
         "MAX_WATCHES": constant(db::MAX_WATCHES.into(), "Most live queries (`watch`) the database service keeps open at once, across every caller."),
+        "MAX_BLOB_BYTES": constant(db::MAX_BLOB_BYTES.into(), "Largest blob `put_blob` takes."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

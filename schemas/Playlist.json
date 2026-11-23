@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Playlist",
+  "title": "Playlist",
+  "description": "An ordered list of Tracks.",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "tracks": { "type": "array", "items": { "x-kind": "link" } }
+  },
+  "x-indexes": ["name"]
+}

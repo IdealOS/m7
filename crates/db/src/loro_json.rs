@@ -126,6 +126,8 @@ pub fn strings<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
     match v {
         Value::String(s) => out.push(s),
         Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+        // Link targets and blob hashes are ids, not words anyone searches for.
+        Value::Object(o) if crate::refs::is_ref(o) => {}
         Value::Object(o) => o.values().for_each(|v| strings(v, out)),
         _ => {}
     }

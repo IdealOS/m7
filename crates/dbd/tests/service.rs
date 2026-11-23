@@ -24,7 +24,8 @@ impl Setup {
         tokio::spawn(busd::serve(UnixListener::bind(&socket).unwrap(), Box::new(busd::AllowAll), None));
         let service = Client::connect(&socket).await.unwrap();
         service.claim(SERVICE).await.unwrap();
-        tokio::spawn(dbd::serve(service, db::Store::open(&db).unwrap()));
+        let config = dbd::Config::beside(&db);
+        tokio::spawn(dbd::serve(service, db::Store::open(&db).unwrap(), config));
         Setup { dir, socket, db }
     }
 
@@ -225,4 +226,140 @@ async fn live_queries_over_the_bus() {
     drop(live);
     call(&writer, "create", json!({"type": "Task", "data": {"n": 99}})).await.unwrap();
     assert_eq!(doc(call(&c, "get", json!({"id": first.id})).await.unwrap()).data["done"], true);
+}
+
+#[tokio::test]
+async fn snapshots_restore_over_the_bus_and_live_queries_follow() {
+    use protocol::db::{RestoreResult, SnapshotInfo, SnapshotsResult, WatchEvent};
+    let s = Setup::start("snap").await;
+    let c = s.client().await;
+    let d = doc(call(&c, "create", json!({"type": "Note", "data": {"v": 1}})).await.unwrap());
+    let first: SnapshotInfo =
+        serde_json::from_value(call(&c, "snapshot", Value::Null).await.unwrap()).unwrap();
+    call(&c, "update", json!({"id": d.id, "patch": {"v": 2}})).await.unwrap();
+    let mut live = c.request_stream(SERVICE, "watch", json!({"type": "Note"})).await.unwrap();
+    let WatchEvent::Initial { docs } = next_part(&mut live).await else { panic!() };
+    assert_eq!(docs[0].data["v"], 2);
+
+    let list: SnapshotsResult =
+        serde_json::from_value(call(&c, "snapshots", Value::Null).await.unwrap()).unwrap();
+    // The startup snapshot (if dbd took one before the first write) and ours.
+    assert!(list.snapshots.iter().any(|x| x == &first));
+    let restored: RestoreResult =
+        serde_json::from_value(call(&c, "restore", json!({"name": first.name})).await.unwrap()).unwrap();
+    assert_eq!(doc(call(&c, "get", json!({"id": d.id})).await.unwrap()).data["v"], 1);
+    // The live query sees the restored state.
+    let WatchEvent::Diff { changed, .. } = next_part(&mut live).await else { panic!() };
+    assert_eq!(changed[0].data["v"], 1);
+    // And the restore can be undone.
+    call(&c, "restore", json!({"name": restored.saved.name})).await.unwrap();
+    assert_eq!(doc(call(&c, "get", json!({"id": d.id})).await.unwrap()).data["v"], 2);
+    assert_eq!(call(&c, "restore", json!({"name": "../test.db"})).await.unwrap_err().code(), "bad_request");
+    assert_eq!(
+        call(&c, "restore", json!({"name": "snapshot-1-1.db"})).await.unwrap_err().code(),
+        code::NOT_FOUND
+    );
+}
+
+/// A file with `text` in it, unlinked, as a descriptor.
+fn file_with(dir: &std::path::Path, text: &[u8]) -> std::os::fd::OwnedFd {
+    use std::io::{Seek, Write};
+    let path = dir.join(format!("upload-{}", uuid_like()));
+    let mut f =
+        std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&path).unwrap();
+    f.write_all(text).unwrap();
+    f.rewind().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    f.into()
+}
+
+fn uuid_like() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+#[tokio::test]
+async fn blobs_go_in_and_out_as_descriptors() {
+    use protocol::db::BlobInfo;
+    use std::io::Read;
+    let s = Setup::start("blobs").await;
+    let c = s.client().await;
+    let bytes = b"song bytes ".repeat(10_000);
+    let put = c
+        .request_with(SERVICE, "put_blob", Value::Null, vec![file_with(&s.dir, &bytes)], None)
+        .await
+        .unwrap();
+    let info: BlobInfo = serde_json::from_value(put.result).unwrap();
+    assert_eq!((info.size, info.refs), (bytes.len() as u64, 0));
+    assert_eq!(info.hash.len(), 64);
+    // The blob is on disk under its hash.
+    assert!(s.dir.join("blobs").join(&info.hash[..2]).join(&info.hash[2..]).is_file());
+
+    call(&c, "create", json!({"type": "Track", "data": {"title": "t", "audio": {"$blob": info.hash}}}))
+        .await
+        .unwrap();
+    let got =
+        c.request_with(SERVICE, "get_blob", json!({"hash": info.hash}), Vec::new(), None).await.unwrap();
+    assert_eq!(got.result["refs"], 1);
+    let [fd] = <[_; 1]>::try_from(got.fds).unwrap();
+    let mut back = Vec::new();
+    std::fs::File::from(fd).read_to_end(&mut back).unwrap();
+    assert_eq!(back, bytes);
+
+    // No descriptor, two descriptors, an unknown hash, a bad hash, and an
+    // unrecorded blob in a document are all refused.
+    assert_eq!(call(&c, "put_blob", Value::Null).await.unwrap_err().code(), "bad_request");
+    let two = vec![file_with(&s.dir, b"a"), file_with(&s.dir, b"b")];
+    assert_eq!(
+        c.request_with(SERVICE, "put_blob", Value::Null, two, None).await.unwrap_err().code(),
+        "bad_request"
+    );
+    let zeros = "0".repeat(64);
+    assert_eq!(call(&c, "get_blob", json!({"hash": zeros})).await.unwrap_err().code(), code::NOT_FOUND);
+    assert_eq!(call(&c, "blob_info", json!({"hash": "nope"})).await.unwrap_err().code(), code::NOT_FOUND);
+    assert_eq!(call(&c, "get_blob", json!({"hash": "../../etc"})).await.unwrap_err().code(), code::NOT_FOUND);
+    let missing = json!({"type": "Note", "data": {"f": {"$blob": zeros}}});
+    assert_eq!(call(&c, "create", missing).await.unwrap_err().code(), "bad_request");
+}
+
+#[tokio::test]
+async fn links_diffs_and_schemas_over_the_bus() {
+    use protocol::db::{DiffResult, LinksResult, SchemasResult};
+    let s = Setup::start("links").await;
+    let c = s.client().await;
+    let a = doc(call(&c, "create", json!({"type": "Contact", "data": {"name": "Ada"}})).await.unwrap());
+    let b =
+        doc(call(&c, "create", json!({"type": "Note", "data": {"about": {"$link": a.id}}})).await.unwrap());
+    let links: LinksResult =
+        serde_json::from_value(call(&c, "links", json!({"id": a.id})).await.unwrap()).unwrap();
+    assert_eq!((links.incoming[0].id.as_str(), links.incoming[0].path.as_str()), (b.id.as_str(), "about"));
+    let found: DocsResult = serde_json::from_value(
+        call(&c, "query", json!({"type": "Note", "where": {"$linksTo": a.id}})).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(found.docs[0].id, b.id);
+
+    call(&c, "update", json!({"id": a.id, "patch": {"organization": "AE"}})).await.unwrap();
+    let h: protocol::db::HistoryResult =
+        serde_json::from_value(call(&c, "history", json!({"id": a.id})).await.unwrap()).unwrap();
+    let diff: DiffResult = serde_json::from_value(
+        call(
+            &c,
+            "diff",
+            json!({"id": a.id, "from": h.versions[0].change_set, "to": h.versions[1].change_set}),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 1);
+    assert_eq!(diff.changes[0].path, "organization");
+
+    let schemas: SchemasResult =
+        serde_json::from_value(call(&c, "schemas", Value::Null).await.unwrap()).unwrap();
+    assert!(schemas.schemas.contains_key("Email"));
+    let e = call(&c, "create", json!({"type": "Contact", "data": {}})).await.unwrap_err();
+    assert_eq!(e.code(), "bad_request");
+    assert!(e.to_string().contains("name is required"), "{e}");
 }

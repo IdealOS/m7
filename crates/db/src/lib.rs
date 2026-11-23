@@ -13,13 +13,22 @@
 //!
 //! Spike C measured this write path at about 0.1 ms per write on a Mac.
 
+pub mod blobs;
 mod history;
 pub mod live;
 mod loro_json;
 pub mod query;
+mod refs;
+pub mod schemas;
+pub mod sha256;
+pub mod snapshot;
 
+pub use blobs::{BlobInfo, Blobs};
+pub use history::FieldChange;
 pub use history::{ChangeSet, Version};
 pub use live::Watches;
+pub use refs::{Backlink, Link};
+pub use snapshot::{SnapshotInfo, Snapshots};
 
 use std::path::Path;
 
@@ -88,6 +97,28 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX doc_versions_set ON doc_versions (change_set);
     ALTER TABLE change_sets ADD COLUMN undoes INTEGER REFERENCES change_sets (id);",
+    // 3: links and blobs. Both are kept like doc_json: rows for live documents only,
+    // rewritten with each change from the `{"$link": id}` and `{"$blob": hash}`
+    // values in the document (see `refs`).
+    "CREATE TABLE links (
+        src  INTEGER NOT NULL REFERENCES documents (doc),
+        path TEXT NOT NULL,         -- the field holding the link, such as `from`
+        dst  TEXT NOT NULL,         -- the target's id; it may not exist (yet, or any more)
+        PRIMARY KEY (src, path)
+    ) STRICT;
+    CREATE INDEX links_dst ON links (dst, src);
+    CREATE TABLE blobs (
+        hash    TEXT PRIMARY KEY,   -- SHA-256, lowercase hex; the file is blobs/ab/cdef...
+        size    INTEGER NOT NULL,
+        created INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE blob_refs (
+        doc  INTEGER NOT NULL REFERENCES documents (doc),
+        path TEXT NOT NULL,
+        hash TEXT NOT NULL REFERENCES blobs (hash),
+        PRIMARY KEY (doc, path)
+    ) STRICT;
+    CREATE INDEX blob_refs_hash ON blob_refs (hash);",
 ];
 
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
@@ -101,15 +132,20 @@ pub enum Error {
     Sqlite(rusqlite::Error),
     /// Loro couldn't apply, load or export a document's state.
     Loro(String),
+    /// A file outside the database (a snapshot or blob) couldn't be read or written.
+    Io(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            // Blobs and snapshots say what they are ("blob <hash>"); a bare id is a document.
+            Error::NotFound(what) if what.contains(' ') => write!(f, "no {what}"),
             Error::NotFound(id) => write!(f, "no document {id}"),
             Error::Invalid(why) => f.write_str(why),
             Error::Sqlite(e) => write!(f, "database: {e}"),
             Error::Loro(e) => write!(f, "document state: {e}"),
+            Error::Io(e) => write!(f, "file: {e}"),
         }
     }
 }
@@ -162,28 +198,10 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > SCHEMA_VERSION {
-            return invalid(format!(
-                "database schema version {version} is newer than this build ({SCHEMA_VERSION})"
-            ));
-        }
-        if version < SCHEMA_VERSION {
-            let tx = conn.unchecked_transaction()?;
-            if version == 0 {
-                tx.execute_batch(SCHEMA)?;
-                // The random half of a UUIDv7: unique enough to tell devices apart.
-                let peer = uuid::Uuid::now_v7().as_u64_pair().1 >> 1;
-                tx.execute("INSERT INTO meta (key, value) VALUES ('peer', ?1)", [peer as i64])?;
-            }
-            for migration in &MIGRATIONS[(version.max(1) - 1) as usize..] {
-                tx.execute_batch(migration)?;
-            }
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            tx.commit()?;
-        }
-        let peer: i64 = conn.query_row("SELECT value FROM meta WHERE key = 'peer'", [], |r| r.get(0))?;
-        Ok(Store { conn, peer: peer as u64 })
+        migrate(&conn)?;
+        schemas::sync_indexes(&conn)?;
+        let peer = read_peer(&conn)?;
+        Ok(Store { conn, peer })
     }
 
     /// Create a document of `doc_type` holding `data`.
@@ -345,6 +363,45 @@ fn compact(tx: &Transaction, row: i64, doc: &LoroDoc) -> Result<()> {
     Ok(())
 }
 
+/// The database's schema version (`PRAGMA user_version`).
+fn schema_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Bring `conn`'s schema up to [`SCHEMA_VERSION`], creating it if it's empty.
+fn migrate(conn: &Connection) -> Result<()> {
+    let version = schema_version(conn)?;
+    if version > SCHEMA_VERSION {
+        return invalid(format!(
+            "database schema version {version} is newer than this build ({SCHEMA_VERSION})"
+        ));
+    }
+    if version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    if version == 0 {
+        tx.execute_batch(SCHEMA)?;
+        // The random half of a UUIDv7: unique enough to tell devices apart.
+        let peer = uuid::Uuid::now_v7().as_u64_pair().1 >> 1;
+        tx.execute("INSERT INTO meta (key, value) VALUES ('peer', ?1)", [peer as i64])?;
+    }
+    for migration in &MIGRATIONS[(version.max(1) - 1) as usize..] {
+        tx.execute_batch(migration)?;
+    }
+    if (1..3).contains(&version) {
+        refs::backfill(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn read_peer(conn: &Connection) -> Result<u64> {
+    let peer: i64 = conn.query_row("SELECT value FROM meta WHERE key = 'peer'", [], |r| r.get(0))?;
+    Ok(peer as u64)
+}
+
 fn change_set(tx: &Transaction, at: i64, origin: &str, undoes: Option<i64>) -> Result<i64> {
     tx.execute(
         "INSERT INTO change_sets (at, origin, undoes) VALUES (?1, ?2, ?3)",
@@ -442,6 +499,7 @@ fn delete_row(tx: &Transaction, row: i64, set: i64, at: i64, version: &Frontiers
     tx.execute("UPDATE documents SET deleted = ?2, updated = ?2 WHERE doc = ?1", params![row, at])?;
     tx.execute("DELETE FROM doc_json WHERE doc = ?1", [row])?;
     tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
+    refs::clear(tx, row)?;
     record_version(tx, row, set, Kind::Delete, version, version)
 }
 
@@ -464,7 +522,14 @@ fn checked_json(doc: &LoroDoc) -> Result<Value> {
     Ok(json)
 }
 
+/// Write everything derived from a live document's data: its JSON copy, search row,
+/// links and blob references. Checks the data against its type's system schema, if
+/// it has one, and its links and blob references, first.
 fn write_views(tx: &Transaction, row: i64, doc_type: &str, json: &Value, replace: bool) -> Result<()> {
+    if let Some(schema) = schemas::get(doc_type) {
+        schema.validate(json).map_err(|why| Error::Invalid(format!("not a valid {doc_type}: {why}")))?;
+    }
+    refs::write(tx, row, json)?;
     tx.execute(
         "INSERT INTO doc_json (doc, type, json) VALUES (?1, ?2, ?3)
          ON CONFLICT (doc) DO UPDATE SET json = excluded.json",

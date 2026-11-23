@@ -135,14 +135,14 @@ fn queries_filter_order_and_limit() {
     .enumerate()
     {
         s.create(
-            "Email",
+            "Mail",
             &obj(json!({"subject": format!("m{i}"), "date": i, "read": read, "labels": labels})),
             "t",
         )
         .unwrap();
     }
     s.create("Note", &obj(json!({"read": false, "labels": ["INBOX"]})), "t").unwrap();
-    let mut q = query("Email", json!({"read": false, "labels": {"$contains": "INBOX"}}));
+    let mut q = query("Mail", json!({"read": false, "labels": {"$contains": "INBOX"}}));
     q.order_by = vec![OrderBy("date".into(), Direction::Desc)];
     let subjects: Vec<Value> = s.query(&q).unwrap().iter().map(|d| d.data["subject"].clone()).collect();
     assert_eq!(subjects, [json!("m3"), json!("m0")]);
@@ -150,7 +150,7 @@ fn queries_filter_order_and_limit() {
     assert_eq!(s.query(&q).unwrap().len(), 1);
     q.offset = Some(1);
     assert_eq!(s.query(&q).unwrap()[0].data["subject"], "m0");
-    assert_eq!(s.query(&Query::all("Email")).unwrap().len(), 4);
+    assert_eq!(s.query(&Query::all("Mail")).unwrap().len(), 4);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn compiled_paths_match_expression_indexes() {
     s.connection()
         .execute("CREATE INDEX email_date ON doc_json (type, json_extract(json, '$.date'))", [])
         .unwrap();
-    let mut q = query("Email", json!({"date": {"$gt": 5}}));
+    let mut q = query("Mail", json!({"date": {"$gt": 5}}));
     q.order_by = vec![OrderBy("date".into(), Direction::Desc)];
     let compiled = query::compile(&q).unwrap();
     let plan: Vec<String> = s
@@ -219,16 +219,12 @@ fn compiled_paths_match_expression_indexes() {
 fn search_finds_words_anywhere_and_treats_syntax_as_text() {
     let mut s = Store::open_in_memory().unwrap();
     let report = s
-        .create(
-            "Email",
-            &obj(json!({"subject": "Quarterly report", "body": {"text": "numbers inside"}})),
-            "t",
-        )
+        .create("Mail", &obj(json!({"subject": "Quarterly report", "body": {"text": "numbers inside"}})), "t")
         .unwrap();
-    s.create("Email", &obj(json!({"subject": "Lunch"})), "t").unwrap();
+    s.create("Mail", &obj(json!({"subject": "Lunch"})), "t").unwrap();
     s.create("Note", &obj(json!({"text": "quarterly plans"})), "t").unwrap();
     assert_eq!(ids(&s.search("quarterly report", None, 10).unwrap()), std::slice::from_ref(&report.id));
-    assert_eq!(ids(&s.search("NUMBERS", Some("Email"), 10).unwrap()), std::slice::from_ref(&report.id));
+    assert_eq!(ids(&s.search("NUMBERS", Some("Mail"), 10).unwrap()), std::slice::from_ref(&report.id));
     assert_eq!(s.search("quarterly", None, 10).unwrap().len(), 2);
     assert_eq!(s.search("quarterly", Some("Note"), 10).unwrap().len(), 1);
     for syntax in ["\"", "AND", "report*", "subject:x", "(", "NEAR(a b)", "   "] {
@@ -819,4 +815,399 @@ fn live_query_parts_rebuild_the_result() {
             }
         }
     }
+}
+
+// --- Links, blobs, schemas, snapshots, diffs ----------------------------------
+
+/// A fresh directory under the system temp dir, removed when dropped.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("db-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn link(id: &str) -> Value {
+    json!({ "$link": id })
+}
+
+#[test]
+fn links_are_followed_both_ways() {
+    let mut s = Store::open_in_memory().unwrap();
+    let c = s.create("Contact", &obj(json!({"name": "Ada"})), "t").unwrap();
+    let e = s
+        .create("Email", &obj(json!({"from": {"address": "ada@x", "contact": link(&c.id)}, "date": 1})), "t")
+        .unwrap();
+    let n = s
+        .create("Note", &obj(json!({"refs": [link(&c.id), link(&e.id)], "loose": link("nobody")})), "t")
+        .unwrap();
+
+    let (out, back) = s.links(&c.id).unwrap();
+    assert!(out.is_empty());
+    let backs: Vec<(String, String)> = back.iter().map(|b| (b.id.clone(), b.path.clone())).collect();
+    assert_eq!(backs, [(e.id.clone(), "from.contact".into()), (n.id.clone(), "refs.0".into())]);
+    let (out, _) = s.links(&n.id).unwrap();
+    let outs: Vec<(&str, &str, bool)> =
+        out.iter().map(|l| (l.path.as_str(), l.id.as_str(), l.exists)).collect();
+    assert_eq!(
+        outs,
+        [("loose", "nobody", false), ("refs.0", c.id.as_str(), true), ("refs.1", e.id.as_str(), true)]
+    );
+
+    // Queries: a field (or anything under it) linking to a document, any link to
+    // it, and the documents another links to.
+    let q = |t: &str, f: Value| ids(&s.query(&query(t, f)).unwrap());
+    assert_eq!(q("Email", json!({"from": {"$link": c.id}})), [e.id.as_str()]);
+    assert_eq!(q("Email", json!({"from.contact": {"$link": c.id}})), [e.id.as_str()]);
+    assert!(q("Email", json!({"to": {"$link": c.id}})).is_empty());
+    assert_eq!(q("Note", json!({"$linksTo": c.id})), [n.id.as_str()]);
+    assert_eq!(q("Note", json!({"refs": {"$link": e.id}})), [n.id.as_str()]);
+    assert_eq!(q("Email", json!({"$linkedFrom": n.id})), [e.id.as_str()]);
+    assert_eq!(q("Contact", json!({"$not": {"$linkedFrom": n.id}})), Vec::<String>::new());
+    // A field named like a prefix doesn't match: `ref` isn't `refs`.
+    assert!(q("Note", json!({"ref": {"$link": c.id}})).is_empty());
+
+    // Changing a field moves its link; deleting a document takes its links out of
+    // both directions, and undoing the delete brings them back.
+    s.update(&n.id, &obj(json!({"refs": [link(&e.id)]})), "t").unwrap();
+    assert_eq!(s.links(&c.id).unwrap().1.len(), 1);
+    s.delete(&e.id, "t").unwrap();
+    assert!(s.links(&c.id).unwrap().1.is_empty());
+    assert!(!s.links(&n.id).unwrap().0.iter().find(|l| l.id == e.id).unwrap().exists);
+    let deleted = s.history(&e.id).unwrap().last().unwrap().change_set;
+    s.undo(deleted, "t").unwrap();
+    assert_eq!(s.links(&c.id).unwrap().1.len(), 1);
+
+    for bad in [json!({"x": {"$link": 5}}), json!({"x": {"$link": "a", "y": 1}}), json!({"x": {"$link": ""}})]
+    {
+        assert!(matches!(s.create("Note", &obj(bad.clone()), "t"), Err(Error::Invalid(_))), "{bad}");
+    }
+    assert!(matches!(s.query(&query("Note", json!({"$linksTo": 3}))), Err(Error::Invalid(_))));
+    assert!(matches!(s.links("nope"), Err(Error::NotFound(_))));
+}
+
+/// The links and blob_refs tables always match the links and blob references in
+/// live documents' data, through random creates, updates, deletes and undos.
+#[test]
+fn link_and_blob_tables_follow_the_documents() {
+    let seeds: u64 = std::env::var("DB_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let hashes = [refs_hash(b"one"), refs_hash(b"two")];
+    for seed in 0..seeds {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut s = Store::open_in_memory().unwrap();
+        for h in &hashes {
+            s.add_blob(h, 3).unwrap();
+        }
+        let mut docs: Vec<String> = Vec::new();
+        let mut sets: Vec<i64> = Vec::new();
+        for step in 0..80 {
+            let value = |rng: &mut Rng, docs: &[String]| match rng.below(5) {
+                0 if !docs.is_empty() => link(&rng.pick(docs)),
+                1 => link("missing"),
+                2 => json!({ "$blob": rng.pick(&hashes) }),
+                3 => json!([link("x"), {"$blob": rng.pick(&hashes)}]),
+                _ => json!(rng.below(3)),
+            };
+            match rng.below(6) {
+                0 | 1 => {
+                    let mut data = Map::new();
+                    for k in ["a", "b"] {
+                        data.insert(k.into(), value(&mut rng, &docs));
+                    }
+                    docs.push(s.create("T", &data, "t").unwrap().id);
+                }
+                2 | 3 if !docs.is_empty() => {
+                    let id = rng.pick(&docs);
+                    let patch = obj(json!({ rng.pick(&["a", "b", "c"]): value(&mut rng, &docs) }));
+                    let _ = s.update(&id, &patch, "t");
+                }
+                4 if !docs.is_empty() => {
+                    let _ = s.delete(&rng.pick(&docs), "t");
+                }
+                5 if !sets.is_empty() => {
+                    let _ = s.undo(rng.pick(&sets), "t");
+                }
+                _ => {}
+            }
+            sets.push(s.newest_change_set().unwrap());
+            check_ref_tables(&s, &format!("seed {seed} step {step}"));
+        }
+    }
+}
+
+fn refs_hash(data: &[u8]) -> String {
+    crate::sha256::hex(data)
+}
+
+fn check_ref_tables(s: &Store, at: &str) {
+    let conn = s.connection();
+    let live: Vec<(i64, String)> = conn
+        .prepare("SELECT doc, json FROM doc_json ORDER BY doc")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let mut want_links = Vec::new();
+    let mut want_blobs = Vec::new();
+    for (row, json) in &live {
+        for r in refs::find(&serde_json::from_str(json).unwrap()).unwrap() {
+            match r {
+                refs::Ref::Link { path, id } => want_links.push((*row, path, id)),
+                refs::Ref::Blob { path, hash } => want_blobs.push((*row, path, hash)),
+            }
+        }
+    }
+    let rows = |sql: &str| -> Vec<(i64, String, String)> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    want_links.sort();
+    want_blobs.sort();
+    assert_eq!(rows("SELECT src, path, dst FROM links ORDER BY src, path, dst"), want_links, "{at}: links");
+    assert_eq!(
+        rows("SELECT doc, path, hash FROM blob_refs ORDER BY doc, path, hash"),
+        want_blobs,
+        "{at}: blobs"
+    );
+}
+
+#[test]
+fn blobs_are_stored_once_by_hash_and_counted() {
+    let dir = TempDir::new("blobs");
+    let blobs = Blobs::new(dir.0.join("blobs")).unwrap();
+    let mut s = Store::open_in_memory().unwrap();
+    let bytes = b"hello, blob".repeat(100_000);
+    let (hash, size) = blobs.write(&mut &bytes[..], blobs::MAX_BLOB_BYTES).unwrap();
+    assert_eq!((hash.as_str(), size), (crate::sha256::hex(&bytes).as_str(), bytes.len() as u64));
+    let path = blobs.path(&hash).unwrap();
+    assert!(path.ends_with(format!("{}/{}", &hash[..2], &hash[2..])));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o444, "read-only");
+    // The same bytes again: same blob, nothing new on disk.
+    assert_eq!(blobs.write(&mut &bytes[..], blobs::MAX_BLOB_BYTES).unwrap().0, hash);
+    let mut back = Vec::new();
+    std::io::Read::read_to_end(&mut blobs.open(&hash).unwrap(), &mut back).unwrap();
+    assert_eq!(back, bytes);
+
+    // Documents may only refer to recorded blobs; references are counted.
+    let doc = obj(json!({"file": {"$blob": hash}}));
+    assert!(matches!(s.create("Note", &doc, "t"), Err(Error::Invalid(_))));
+    assert_eq!(s.add_blob(&hash, size).unwrap().refs, 0);
+    let d = s.create("Note", &doc, "t").unwrap();
+    s.create("Note", &obj(json!({"files": [{"$blob": hash}, {"$blob": hash}]})), "t").unwrap();
+    assert_eq!(s.blob_info(&hash).unwrap().refs, 3);
+    s.delete(&d.id, "t").unwrap();
+    assert_eq!(s.blob_info(&hash).unwrap().refs, 2);
+    assert_eq!(s.add_blob(&hash, size).unwrap().size, size, "recording twice is harmless");
+
+    // Too big: refused, and nothing is left behind.
+    assert!(matches!(blobs.write(&mut &bytes[..], 10), Err(Error::Invalid(_))));
+    let leftovers = std::fs::read_dir(blobs.dir())
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with(".incoming"));
+    assert_eq!(leftovers.count(), 0);
+    for bad in ["", "AB", "../etc/passwd", &"g".repeat(64)] {
+        assert!(matches!(blobs.open(bad), Err(Error::Invalid(_))), "{bad}");
+    }
+    assert!(matches!(blobs.open(&"0".repeat(64)), Err(Error::NotFound(_))));
+    assert!(matches!(s.blob_info(&"0".repeat(64)), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn system_schemas_load_and_check_writes() {
+    let all = schemas::all();
+    assert_eq!(all.len(), 9);
+    let mut s = Store::open_in_memory().unwrap();
+    // Required fields, types and nested shapes are checked; unknown fields pass.
+    let err = |r: Result<Doc>| match r {
+        Err(Error::Invalid(why)) => why,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        err(s.create("Email", &obj(json!({"from": {"address": "a@x"}})), "t")).contains("date is required")
+    );
+    assert!(
+        err(s.create("Email", &obj(json!({"from": {"name": "A"}, "date": 1})), "t")).contains("from.address")
+    );
+    assert!(
+        err(s.create("Email", &obj(json!({"from": {"address": "a"}, "date": "today"})), "t"))
+            .contains("date")
+    );
+    let ok =
+        s.create("Email", &obj(json!({"from": {"address": "a"}, "date": 1, "x-mailer": "me"})), "t").unwrap();
+    assert!(err(s.update(&ok.id, &obj(json!({"read": "yes"})), "t")).contains("read must be boolean"));
+    assert!(
+        err(s.create("TextDocument", &obj(json!({"format": "rtf"})), "t")).contains("format must be one of")
+    );
+    assert!(
+        err(s.create("Playlist", &obj(json!({"name": "p", "tracks": ["t1"]})), "t"))
+            .contains("tracks.0 must be a link")
+    );
+    s.create("Playlist", &obj(json!({"name": "p", "tracks": [link("t1")]})), "t").unwrap();
+    assert!(err(s.create("Contact", &obj(json!({"name": ""})), "t")).contains("too short"));
+    // Types without a schema take anything.
+    s.create("Whatever", &obj(json!({"date": "today"})), "t").unwrap();
+
+    // Each x-indexes field has an expression index the compiled query uses.
+    let index_names: Vec<String> = s
+        .connection()
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'schema_%'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(index_names.contains(&"schema_Email_date".to_string()), "{index_names:?}");
+    let q = Query { order_by: vec![OrderBy("date".into(), Direction::Desc)], ..query("Email", json!({})) };
+    let compiled = query::compile(&q).unwrap();
+    let plan: Vec<String> = s
+        .connection()
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
+        .unwrap()
+        .query_map(rusqlite::params_from_iter(&compiled.params), |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(plan.iter().any(|p| p.contains("schema_Email_date")), "{plan:?}");
+
+    // A schema using a keyword the checker doesn't implement doesn't load.
+    let unsupported =
+        r#"{"title": "X", "type": "object", "properties": {"a": {"type": "string", "pattern": "^a"}}}"#;
+    assert!(schemas::load("X", unsupported).unwrap_err().contains("pattern"));
+    assert!(schemas::load("X", r#"{"title": "Y", "type": "object"}"#).is_err());
+}
+
+#[test]
+fn snapshots_restore_and_can_be_undone() {
+    let dir = TempDir::new("snapshots");
+    let mut s = Store::open(&dir.0.join("live.db")).unwrap();
+    let snaps = Snapshots::new(dir.0.join("snapshots")).unwrap();
+    let d = s.create("Note", &obj(json!({"v": 1})), "t").unwrap();
+    let first = snaps.take(&s).unwrap();
+    assert_eq!(snaps.take(&s).unwrap(), first, "nothing changed, so no new snapshot");
+    s.update(&d.id, &obj(json!({"v": 2})), "t").unwrap();
+    let e = s.create("Note", &obj(json!({"v": 3})), "t").unwrap();
+    let second = snaps.take(&s).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(snaps.list().unwrap(), [second.clone(), first.clone()]);
+
+    // Restoring brings the old state back, history included, and saves the state
+    // it replaced.
+    let saved = snaps.restore(&mut s, &first.name).unwrap();
+    assert_eq!(data(&s, &d.id), json!({"v": 1}));
+    assert!(matches!(s.get(&e.id), Err(Error::NotFound(_))));
+    assert_eq!(s.history(&d.id).unwrap().len(), 1);
+    // A write after the restore reuses the change set number the saved state had;
+    // the next snapshot still sees it's different.
+    s.update(&d.id, &obj(json!({"v": 9})), "t").unwrap();
+    s.create("Note", &obj(json!({})), "t").unwrap();
+    assert_eq!(s.newest_change_set().unwrap(), saved.change_set);
+    let after = snaps.take(&s).unwrap();
+    assert_ne!(after.name, saved.name);
+    // Undo the restore by restoring what it saved.
+    snaps.restore(&mut s, &saved.name).unwrap();
+    assert_eq!(data(&s, &d.id), json!({"v": 2}));
+    assert_eq!(data(&s, &e.id), json!({"v": 3}));
+    s.update(&e.id, &obj(json!({"v": 4})), "t").unwrap();
+    drop(s);
+    // The live database still opens normally, in WAL mode, with the restored data.
+    let s = Store::open(&dir.0.join("live.db")).unwrap();
+    assert_eq!(data(&s, &e.id), json!({"v": 4}));
+    let mode: String = s.connection().pragma_query_value(None, "journal_mode", |r| r.get(0)).unwrap();
+    assert_eq!(mode, "wal");
+
+    for bad in ["../live.db", "live.db", "snapshot-1-2.db.tmp", "snapshot--1.db"] {
+        assert!(
+            matches!(snaps.restore(&mut Store::open_in_memory().unwrap(), bad), Err(Error::Invalid(_))),
+            "{bad}"
+        );
+    }
+    assert!(matches!(
+        snaps.restore(&mut Store::open_in_memory().unwrap(), "snapshot-1-2.db"),
+        Err(Error::NotFound(_))
+    ));
+    // Another device's snapshot (a different Loro peer) is refused.
+    let mut other = Store::open(&dir.0.join("other.db")).unwrap();
+    assert!(
+        matches!(snaps.restore(&mut other, &first.name), Err(Error::Invalid(why)) if why.contains("another device"))
+    );
+
+    let count = snaps.list().unwrap().len();
+    assert_eq!(snaps.prune(2).unwrap(), count - 2);
+    assert_eq!(snaps.list().unwrap().len(), 2);
+}
+
+#[test]
+fn diffs_between_versions_list_changed_fields() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"a": 1, "o": {"x": 1}, "arr": [1, 2]})), "t").unwrap();
+    s.update(&d.id, &obj(json!({"a": 2, "o": {"y": 2}, "b": 3, "arr": [1]})), "t").unwrap();
+    let h = s.history(&d.id).unwrap();
+    let changes = s.diff(&d.id, h[0].change_set, h[1].change_set).unwrap();
+    let got: Vec<(&str, Option<Value>, Option<Value>)> =
+        changes.iter().map(|c| (c.path.as_str(), c.before.clone(), c.after.clone())).collect();
+    assert_eq!(
+        got,
+        [
+            ("a", Some(json!(1)), Some(json!(2))),
+            ("arr", Some(json!([1, 2])), Some(json!([1]))),
+            ("b", None, Some(json!(3))),
+            ("o.y", None, Some(json!(2))),
+        ]
+    );
+    assert_eq!(s.diff(&d.id, 0, h[0].change_set).unwrap().len(), 3, "everything is new at creation");
+    assert!(s.diff(&d.id, h[1].change_set, h[1].change_set).unwrap().is_empty());
+    assert!(matches!(s.diff(&d.id, 999, h[1].change_set), Err(Error::Invalid(_))));
+}
+
+/// A version 2 database (before links) migrates, and links already in documents'
+/// data are found.
+#[test]
+fn version_2_databases_migrate_and_backfill_links() {
+    let dir = TempDir::new("migrate-v2");
+    let path = dir.0.join("v2.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute("INSERT INTO meta (key, value) VALUES ('peer', 7)", []).unwrap();
+        conn.execute("INSERT INTO documents (id, type, created, updated) VALUES ('n1', 'Note', 1, 1)", [])
+            .unwrap();
+        conn.execute(
+            r#"INSERT INTO doc_json (doc, type, json) VALUES (1, 'Note', '{"to": {"$link": "n2"}}')"#,
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO documents (id, type, created, updated) VALUES ('n2', 'Note', 1, 1)", [])
+            .unwrap();
+        conn.execute(r#"INSERT INTO doc_json (doc, type, json) VALUES (2, 'Note', '{"to": {"$link": "n1"}, "bad": {"$link": 1}}')"#, []).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    let rows: Vec<(String, String)> = s
+        .connection()
+        .prepare("SELECT path, dst FROM links")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // A document with a malformed link keeps its data but gets no links.
+    assert_eq!(rows, [("to".to_string(), "n2".to_string())]);
+    assert_eq!(s.links("n2").unwrap().1[0].id, "n1");
 }

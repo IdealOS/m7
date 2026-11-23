@@ -24,6 +24,9 @@ export const DEFAULT_QUERY_LIMIT = 100;
  */
 export const DEFAULT_TIMEOUT_MS = 30000;
 
+/** Largest blob `put_blob` takes. */
+export const MAX_BLOB_BYTES = 4294967296;
+
 /** Most file descriptors one message may carry. */
 export const MAX_FDS_PER_MESSAGE = 16;
 
@@ -81,6 +84,25 @@ export type AtParams = { id: string; change_set: number };
 /** Result of `at`. */
 export type AtResult = { data: Record<string, unknown> };
 
+/** A link into a document from another live document. */
+export type BacklinkInfo = {
+  /** The linking document. */
+  id: string;
+  type: string;
+  /** Its field holding the link. */
+  path: string;
+};
+
+/** A stored blob. */
+export type BlobInfo = {
+  hash: string;
+  size: number;
+  /** When it was first stored, in milliseconds since the Unix epoch. */
+  created: number;
+  /** How many fields of live documents refer to it. */
+  refs: number;
+};
+
 /** Error codes the broker itself sends. Services may send their own. */
 export type BrokerErrorCode =
   /** The frame was valid JSON but the message makes no sense (unknown method, bad params). */
@@ -135,6 +157,15 @@ export type Commit = { window: number; ops: SceneOp[] };
 /** Params of `create`. */
 export type CreateParams = { type: string; data?: Record<string, unknown> };
 
+/**
+ * Params of `diff`: document `id` from just after change set `from` (0 for
+ * before it was created) to just after change set `to`.
+ */
+export type DiffParams = { id: string; from: number; to: number };
+
+/** Result of `diff`, sorted by path. */
+export type DiffResult = { changes: FieldChangeInfo[] };
+
 export type Direction = "asc" | "desc";
 
 /** A stored document. */
@@ -153,6 +184,24 @@ export type Doc = {
 /** Result of `query` and `search`. */
 export type DocsResult = { docs: Doc[] };
 
+/**
+ * One field that differs. Objects are compared field by field, arrays and other
+ * values as a whole.
+ */
+export type FieldChangeInfo = {
+  path: string;
+  /** Absent when the field doesn't exist after. */
+  after?: unknown;
+  /** Absent when the field didn't exist before. */
+  before?: unknown;
+};
+
+/** Params of `get_blob` and `blob_info`. */
+export type HashParams = {
+  /** The blob's SHA-256, lowercase hex. */
+  hash: string;
+};
+
 /** Result of `hello`: who the broker says this connection is. */
 export type HelloResult = {
   /** This connection's number. */
@@ -166,6 +215,19 @@ export type HistoryResult = { versions: VersionInfo[] };
 
 /** Params of `get` and `delete`. */
 export type IdParams = { id: string };
+
+/** A link out of a document. */
+export type LinkInfo = {
+  /** The field holding the link, such as `from.contact` or `tracks.3`. */
+  path: string;
+  /** The target's id. */
+  id: string;
+  /** Whether the target exists (and isn't deleted). */
+  exists: boolean;
+};
+
+/** Result of `links`. */
+export type LinksResult = { outgoing: LinkInfo[]; incoming: BacklinkInfo[] };
 
 /** Result of `list`. */
 export type ListResult = {
@@ -254,6 +316,15 @@ export type Query = {
   where?: Record<string, unknown>;
 };
 
+/** Params of `restore`: replace the database with snapshot `name`. */
+export type RestoreParams = { name: string };
+
+/**
+ * Result of `restore`: the snapshot of the state it replaced, so restoring that
+ * one undoes the restore.
+ */
+export type RestoreResult = { saved: SnapshotInfo };
+
 /** One change to a window's scene graph. */
 export type SceneOp =
   | { op: "create"; id: number; type: NodeKind; props?: Record<string, unknown> }
@@ -263,6 +334,9 @@ export type SceneOp =
   | { op: "remove"; parent: number; child: number }
   | { op: "destroy"; id: number }
   | { op: "listen"; id: number; events: string[] };
+
+/** Result of `schemas`: each system type's JSON Schema. */
+export type SchemasResult = { schemas: Record<string, unknown> };
 
 /** Params of `search`: documents containing every word of `text`, best first. */
 export type SearchParams = {
@@ -284,6 +358,20 @@ export type Sender =
    * claims a name), identified by its bus connection number.
    */
   | { conn: number };
+
+/** A snapshot of the database. */
+export type SnapshotInfo = {
+  /** Its name, which `restore` takes. */
+  name: string;
+  /** When it was taken, in milliseconds since the Unix epoch. */
+  taken: number;
+  /** The newest change set it holds. */
+  change_set: number;
+  bytes: number;
+};
+
+/** Result of `snapshots`, newest first. */
+export type SnapshotsResult = { snapshots: SnapshotInfo[] };
 
 /** The one trust level `adopt` names explicitly. */
 export type SystemTrust = "system";

@@ -21,6 +21,16 @@
 //! osctl [--socket PATH] db changes [--limit N]        recent change sets
 //! osctl [--socket PATH] db undo CHANGE_SET            revert a change set (undo an undo to redo)
 //! osctl [--socket PATH] db watch JSON [--count N]     a live query: its result, then changes, as JSON lines
+//! osctl [--socket PATH] db diff ID FROM TO            fields changed between two change sets (FROM 0: creation)
+//! osctl [--socket PATH] db link ID FIELD TARGET        set FIELD of ID to a link to TARGET
+//! osctl [--socket PATH] db links ID                    links out of and into a document
+//! osctl [--socket PATH] db schemas                     the system types' JSON Schemas
+//! osctl [--socket PATH] db snapshot                    take a snapshot now
+//! osctl [--socket PATH] db snapshots                   list snapshots, newest first
+//! osctl [--socket PATH] db restore NAME                replace the database with a snapshot (saving the current state)
+//! osctl [--socket PATH] db put-blob FILE               store a file as a blob; prints its hash
+//! osctl [--socket PATH] db get-blob HASH [OUT]         write a blob to OUT (default: standard output)
+//! osctl [--socket PATH] db blob-info HASH
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -43,7 +53,8 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
 | sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])
        osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
 | search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET \
-| watch JSON [--count N])";
+| watch JSON [--count N] | diff ID FROM TO | link ID FIELD TARGET | links ID | schemas | snapshot | snapshots \
+| restore NAME | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -133,6 +144,17 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         }
         let (to, method) = (protocol::db::SERVICE.into(), protocol::db::method::WATCH.into());
         return Ok((socket, Command::Stream { to, method, params, count }));
+    }
+    if group == "db" && (sub == "put-blob" || sub == "get-blob") {
+        allowed(&[])?;
+        let command = if sub == "put-blob" {
+            arity(1, 1)?;
+            Command::PutBlob { file: positional[0].clone().into() }
+        } else {
+            arity(1, 2)?;
+            Command::GetBlob { hash: positional[0].clone(), out: positional.get(1).map(PathBuf::from) }
+        };
+        return Ok((socket, command));
     }
     if group == "db" {
         return Ok((socket, db_command(&sub, &positional, &flags, arity, allowed, json)?));
@@ -286,6 +308,45 @@ fn db_command(
             allowed(&[])?;
             (method::UNDO, json!({"change_set": change_set(&positional[0])?}))
         }
+        "diff" => {
+            arity(3, 3)?;
+            allowed(&[])?;
+            let (from, to) = (change_set(&positional[1])?, change_set(&positional[2])?);
+            (method::DIFF, json!({"id": positional[0], "from": from, "to": to}))
+        }
+        "link" => {
+            arity(3, 3)?;
+            allowed(&[])?;
+            // A dotted field becomes nested objects, as a merge patch needs.
+            let mut patch = json!({"$link": positional[2]});
+            for key in positional[1].rsplit('.') {
+                patch = json!({ key: patch });
+            }
+            (method::UPDATE, json!({"id": positional[0], "patch": patch}))
+        }
+        "links" | "blob-info" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            match sub {
+                "links" => (method::LINKS, json!({"id": positional[0]})),
+                _ => (method::BLOB_INFO, json!({"hash": positional[0]})),
+            }
+        }
+        "schemas" | "snapshot" | "snapshots" => {
+            arity(0, 0)?;
+            allowed(&[])?;
+            let m = match sub {
+                "schemas" => method::SCHEMAS,
+                "snapshot" => method::SNAPSHOT,
+                _ => method::SNAPSHOTS,
+            };
+            (m, json!({}))
+        }
+        "restore" => {
+            arity(1, 1)?;
+            allowed(&[])?;
+            (method::RESTORE, json!({"name": positional[0]}))
+        }
         other => return Err(format!("unknown db subcommand {other}")),
     };
     Ok(Command::Call { to: protocol::db::SERVICE.into(), method: method.into(), params, timeout: None })
@@ -342,6 +403,22 @@ mod tests {
             db("create", json!({"type": "Note", "data": {"t": 1}}))
         );
         assert_eq!(parse_str("db get abc").unwrap().1, db("get", json!({"id": "abc"})));
+        assert_eq!(
+            parse_str("db link a from.contact b").unwrap().1,
+            db("update", json!({"id": "a", "patch": {"from": {"contact": {"$link": "b"}}}}))
+        );
+        assert_eq!(parse_str("db diff a 0 7").unwrap().1, db("diff", json!({"id": "a", "from": 0, "to": 7})));
+        assert_eq!(parse_str("db links a").unwrap().1, db("links", json!({"id": "a"})));
+        assert_eq!(parse_str("db snapshots").unwrap().1, db("snapshots", json!({})));
+        assert_eq!(
+            parse_str("db restore snapshot-1-2.db").unwrap().1,
+            db("restore", json!({"name": "snapshot-1-2.db"}))
+        );
+        assert_eq!(parse_str("db put-blob /tmp/x").unwrap().1, Command::PutBlob { file: "/tmp/x".into() });
+        assert_eq!(
+            parse_str("db get-blob abc out.bin").unwrap().1,
+            Command::GetBlob { hash: "abc".into(), out: Some("out.bin".into()) }
+        );
         let watch = |count| Command::Stream {
             to: "db".into(),
             method: "watch".into(),
@@ -373,6 +450,11 @@ mod tests {
             "db search x --limit y",
             "db drop x",
             "db watch",
+            "db link a b",
+            "db diff a b c",
+            "db put-blob",
+            "db get-blob",
+            "db snapshot now",
             "db watch [1]",
             "db watch {} --count x",
             "db watch {} --limit 1",

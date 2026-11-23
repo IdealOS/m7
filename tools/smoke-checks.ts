@@ -44,6 +44,16 @@ export const GUEST_SCRIPT = [
   // A live query: its first part, then a diff once another client creates a match.
   `(sleep 1; osctl db create SmokeLive '{"n":1}' >/dev/null) &`,
   `echo SMOKE db-watch $(timeout 10 osctl db watch '{"type":"SmokeLive"}' --count 2 2>&1 | grep -o '"kind":"[a-z]*"' | tr '\\n' ' ')`,
+  // A snapshot lands beside the database on /data.
+  `SN=$(osctl db snapshot 2>&1 | grep -o 'snapshot-[0-9]*-[0-9]*\\.db' | head -1); echo SMOKE db-snapshot $(ls /data/db/snapshots/$SN 2>&1)`,
+  // A link, followed back from its target.
+  `LA=$(osctl db create Contact '{"name":"Smoke"}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/'); LB=$(osctl db create Note '{}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/'); osctl db link "$LB" about "$LA" >/dev/null`,
+  `echo SMOKE db-links $(osctl db links "$LA" 2>&1 | grep -c '"path":"about"')`,
+  // A blob goes in from a file and comes back out through a passed descriptor.
+  `printf smoke-blob > /run/smoke-blob; SH=$(osctl db put-blob /run/smoke-blob | grep -o '"hash":"[0-9a-f]*"' | cut -d'"' -f4)`,
+  `echo SMOKE db-blob $(osctl db get-blob "$SH" 2>&1) $(ls /data/db/blobs/$(echo "$SH" | cut -c1-2) 2>&1 | wc -l)`,
+  // System schemas are enforced.
+  `echo SMOKE db-schema $(osctl db create Contact '{}' 2>&1 | grep -c 'name is required')`,
   "echo SMOKE end",
 ];
 
@@ -127,6 +137,14 @@ export function evaluate(log: string): Check[] {
     fact("db-roundtrip", "1", "a document went into the database and came back from a query"),
     fact("db-undo", '"v":1', "undoing a change brought the old value back"),
     fact("db-watch", '"kind":"initial" "kind":"diff"', "a live query reported a new document"),
+    {
+      name: "a snapshot was written to /data/db/snapshots",
+      ok: /^\/data\/db\/snapshots\/snapshot-\d+-\d+\.db$/.test(f.get("db-snapshot") ?? ""),
+      detail: f.get("db-snapshot") ?? "not reported",
+    },
+    fact("db-links", "1", "a link was followed back from its target"),
+    fact("db-blob", "smoke-blob 1", "a blob went in from a file and came back through a descriptor"),
+    fact("db-schema", "1", "the Contact schema refused a contact without a name"),
     {
       name: "bus benchmark ran",
       ok: rps > 0,

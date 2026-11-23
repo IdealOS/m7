@@ -16,6 +16,10 @@
 //! and `$nin` wrap their condition in `IFNULL(.., 0)` first, so a missing field
 //! counts as "not equal". Positive comparisons stay bare `json_extract(..) = ?`
 //! terms, which is the form SQLite's planner can match to an expression index.
+//!
+//! Links are matched through the `links` table rather than the JSON: `$link` on a
+//! field, and `$linksTo` / `$linkedFrom` on the whole document, each become an
+//! `EXISTS` over its indexes.
 
 use protocol::db::{DEFAULT_QUERY_LIMIT, Direction, MAX_QUERY_LIMIT, Query, valid_type};
 use rusqlite::types::Value as Sql;
@@ -149,20 +153,38 @@ impl Compiler {
                     let Value::Object(o) = v else { return bad("$not takes a filter") };
                     not(&self.filter(o, depth + 1)?)
                 }
+                // Documents with any field linking to the given id.
+                "$linksTo" => {
+                    self.term()?;
+                    let id = self.bind(Sql::Text(link_id(key, v)?));
+                    format!(
+                        "EXISTS (SELECT 1 FROM links WHERE links.src = doc_json.doc AND links.dst = {id})"
+                    )
+                }
+                // Documents the given document links to.
+                "$linkedFrom" => {
+                    self.term()?;
+                    let id = self.bind(Sql::Text(link_id(key, v)?));
+                    format!(
+                        "EXISTS (SELECT 1 FROM links JOIN documents src ON src.doc = links.src \
+                         WHERE src.id = {id} AND src.deleted IS NULL AND links.dst = d.id)"
+                    )
+                }
                 k if k.starts_with('$') => return bad(format!("unknown filter operator {k}")),
-                field => self.field(&json_path(field)?, v)?,
+                field => self.field(field, v)?,
             });
         }
         Ok(if parts.is_empty() { "1".into() } else { format!("({})", parts.join(" AND ")) })
     }
 
     /// One field's condition: a scalar to equal, or an object of operators.
-    fn field(&mut self, path: &str, v: &Value) -> Result<String> {
+    fn field(&mut self, field: &str, v: &Value) -> Result<String> {
+        let path = &json_path(field)?;
         match v {
             Value::Object(ops) if ops.keys().all(|k| k.starts_with('$')) && !ops.is_empty() => {
                 let mut parts = Vec::new();
                 for (op, arg) in ops {
-                    parts.push(self.op(path, op, arg)?);
+                    parts.push(if op == "$link" { self.link(field, arg)? } else { self.op(path, op, arg)? });
                 }
                 Ok(format!("({})", parts.join(" AND ")))
             }
@@ -223,6 +245,18 @@ impl Compiler {
         })
     }
 
+    /// The field (or, for an array, one of its items) links to the given id.
+    fn link(&mut self, field: &str, arg: &Value) -> Result<String> {
+        self.term()?;
+        let id = self.bind(Sql::Text(link_id("$link", arg)?));
+        let exact = self.bind(Sql::Text(field.to_owned()));
+        let below = self.bind(Sql::Text(format!("{field}.")));
+        Ok(format!(
+            "EXISTS (SELECT 1 FROM links WHERE links.src = doc_json.doc AND links.dst = {id} \
+             AND (links.path = {exact} OR substr(links.path, 1, length({below})) = {below}))"
+        ))
+    }
+
     /// The field equals `v`, with types: `true` never equals `1`. `null` matches a
     /// null or missing field.
     fn equals(&mut self, path: &str, v: &Value) -> Result<String> {
@@ -256,6 +290,14 @@ impl Compiler {
 /// before negating, so it comes out true.
 fn not(cond: &str) -> String {
     format!("(NOT IFNULL({cond}, 0))")
+}
+
+/// The document id a link operator takes.
+fn link_id(op: &str, v: &Value) -> Result<String> {
+    match v {
+        Value::String(id) if !id.is_empty() => Ok(id.clone()),
+        _ => bad(format!("{op} takes a document id")),
+    }
 }
 
 fn scalar<'a>(op: &str, v: &'a Value) -> Result<&'a Value> {

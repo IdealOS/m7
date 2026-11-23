@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/App",
+  "title": "App",
+  "description": "An installed app: its manifest and code bundle.",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "type": "string", "description": "Reverse-DNS app id, such as org.idealos.mail." },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string" },
+    "entry": { "type": "string", "description": "The bundle's entry module." },
+    "bundle": { "x-kind": "blob", "description": "The code bundle." },
+    "icon": { "x-kind": "blob" },
+    "permissions": { "type": "array", "items": { "type": "string" } },
+    "signature": { "type": "string", "description": "The developer's ed25519 signature over the manifest." }
+  },
+  "x-indexes": ["id"]
+}

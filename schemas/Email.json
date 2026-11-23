@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Email",
+  "title": "Email",
+  "description": "One email message.",
+  "type": "object",
+  "required": ["from", "date"],
+  "properties": {
+    "messageId": { "type": "string", "description": "The Message-ID header." },
+    "threadId": { "type": "string" },
+    "inReplyTo": { "type": "string" },
+    "subject": { "type": "string" },
+    "from": { "$ref": "#/$defs/address" },
+    "to": { "type": "array", "items": { "$ref": "#/$defs/address" } },
+    "cc": { "type": "array", "items": { "$ref": "#/$defs/address" } },
+    "bcc": { "type": "array", "items": { "$ref": "#/$defs/address" } },
+    "date": { "type": "integer", "description": "When it was sent, in milliseconds since the Unix epoch." },
+    "text": { "type": "string", "description": "The plain-text body." },
+    "html": { "type": "string", "description": "The HTML body, if any." },
+    "labels": { "type": "array", "items": { "type": "string" }, "examples": [["INBOX", "IMPORTANT"]] },
+    "read": { "type": "boolean" },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "blob"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "description": "The MIME type." },
+          "blob": { "x-kind": "blob" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "address": {
+      "type": "object",
+      "required": ["address"],
+      "properties": {
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "contact": { "x-kind": "link", "description": "The Contact, once matched." }
+      }
+    }
+  },
+  "x-indexes": ["date", "threadId", "messageId", "read"]
+}

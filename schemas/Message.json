@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Message",
+  "title": "Message",
+  "description": "A chat message.",
+  "type": "object",
+  "required": ["conversation", "sent"],
+  "properties": {
+    "conversation": { "type": "string", "description": "Which conversation it belongs to, in the chat service's terms." },
+    "sender": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "contact": { "x-kind": "link" }
+      }
+    },
+    "text": { "type": "string" },
+    "sent": { "type": "integer", "description": "Milliseconds since the Unix epoch." },
+    "read": { "type": "boolean" },
+    "attachments": { "type": "array", "items": { "x-kind": "blob" } }
+  },
+  "x-indexes": ["conversation", "sent"]
+}

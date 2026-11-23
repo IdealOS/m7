@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Setting",
+  "title": "Setting",
+  "description": "One setting: a key and any JSON value.",
+  "type": "object",
+  "required": ["key"],
+  "properties": {
+    "key": { "type": "string", "minLength": 1, "examples": ["display.scale"] },
+    "value": { "description": "Any JSON value." }
+  },
+  "x-indexes": ["key"]
+}

@@ -69,8 +69,18 @@ impl Watches {
         }
         let types = store.types_changed_between(self.seen, newest)?;
         self.seen = newest;
-        let mut keys: Vec<u64> =
-            self.watches.iter().filter(|(_, w)| types.contains(&w.query.doc_type)).map(|(&k, _)| k).collect();
+        Ok(self.rerun(store, |w| types.contains(&w.query.doc_type)))
+    }
+
+    /// Re-run every live query, as after a restore replaced the database under
+    /// them, and take everything now in the store as seen.
+    pub fn reset(&mut self, store: &Store) -> Result<Vec<(u64, Result<WatchEvent>)>> {
+        self.seen = store.newest_change_set()?;
+        Ok(self.rerun(store, |_| true))
+    }
+
+    fn rerun(&mut self, store: &Store, wanted: impl Fn(&Watch) -> bool) -> Vec<(u64, Result<WatchEvent>)> {
+        let mut keys: Vec<u64> = self.watches.iter().filter(|(_, w)| wanted(w)).map(|(&k, _)| k).collect();
         keys.sort_unstable(); // deterministic order for tests
         let mut out = Vec::new();
         for key in keys {
@@ -88,7 +98,7 @@ impl Watches {
                 }
             }
         }
-        Ok(out)
+        out
     }
 }
 

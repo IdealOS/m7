@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/Contact",
+  "title": "Contact",
+  "description": "A person or organization.",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "description": "How the contact is shown." },
+    "emails": { "type": "array", "items": { "$ref": "#/$defs/labeled", "required": ["value"] } },
+    "phones": { "type": "array", "items": { "$ref": "#/$defs/labeled" } },
+    "organization": { "type": "string" },
+    "notes": { "type": "string" },
+    "photo": { "x-kind": "blob", "description": "An image." }
+  },
+  "$defs": {
+    "labeled": {
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "type": "string" },
+        "label": { "type": "string", "examples": ["home", "work"] }
+      }
+    }
+  },
+  "x-indexes": ["name"]
+}

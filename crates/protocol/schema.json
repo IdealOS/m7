@@ -82,6 +82,59 @@
       ],
       "type": "object"
     },
+    "BacklinkInfo": {
+      "description": "A link into a document from another live document.",
+      "properties": {
+        "id": {
+          "description": "The linking document.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Its field holding the link.",
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "path"
+      ],
+      "type": "object"
+    },
+    "BlobInfo": {
+      "description": "A stored blob.",
+      "properties": {
+        "created": {
+          "description": "When it was first stored, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "refs": {
+          "description": "How many fields of live documents refer to it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hash",
+        "size",
+        "created",
+        "refs"
+      ],
+      "type": "object"
+    },
     "BrokerErrorCode": {
       "description": "Error codes the broker itself sends. Services may send their own.",
       "oneOf": [
@@ -254,6 +307,43 @@
       ],
       "type": "object"
     },
+    "DiffParams": {
+      "description": "Params of `diff`: document `id` from just after change set `from` (0 for\nbefore it was created) to just after change set `to`.",
+      "properties": {
+        "from": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "DiffResult": {
+      "description": "Result of `diff`, sorted by path.",
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/FieldChangeInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "changes"
+      ],
+      "type": "object"
+    },
     "Direction": {
       "enum": [
         "asc",
@@ -311,6 +401,37 @@
       ],
       "type": "object"
     },
+    "FieldChangeInfo": {
+      "description": "One field that differs. Objects are compared field by field, arrays and other\nvalues as a whole.",
+      "properties": {
+        "after": {
+          "description": "Absent when the field doesn't exist after."
+        },
+        "before": {
+          "description": "Absent when the field didn't exist before."
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "HashParams": {
+      "description": "Params of `get_blob` and `blob_info`.",
+      "properties": {
+        "hash": {
+          "description": "The blob's SHA-256, lowercase hex.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hash"
+      ],
+      "type": "object"
+    },
     "HelloResult": {
       "description": "Result of `hello`: who the broker says this connection is.",
       "properties": {
@@ -355,6 +476,51 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "LinkInfo": {
+      "description": "A link out of a document.",
+      "properties": {
+        "exists": {
+          "description": "Whether the target exists (and isn't deleted).",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "The target's id.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The field holding the link, such as `from.contact` or `tracks.3`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "id",
+        "exists"
+      ],
+      "type": "object"
+    },
+    "LinksResult": {
+      "description": "Result of `links`.",
+      "properties": {
+        "incoming": {
+          "items": {
+            "$ref": "#/$defs/BacklinkInfo"
+          },
+          "type": "array"
+        },
+        "outgoing": {
+          "items": {
+            "$ref": "#/$defs/LinkInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outgoing",
+        "incoming"
       ],
       "type": "object"
     },
@@ -687,6 +853,30 @@
       ],
       "type": "object"
     },
+    "RestoreParams": {
+      "description": "Params of `restore`: replace the database with snapshot `name`.",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "RestoreResult": {
+      "description": "Result of `restore`: the snapshot of the state it replaced, so restoring that\none undoes the restore.",
+      "properties": {
+        "saved": {
+          "$ref": "#/$defs/SnapshotInfo"
+        }
+      },
+      "required": [
+        "saved"
+      ],
+      "type": "object"
+    },
     "SceneOp": {
       "description": "One change to a window's scene graph.",
       "oneOf": [
@@ -840,6 +1030,19 @@
         }
       ]
     },
+    "SchemasResult": {
+      "description": "Result of `schemas`: each system type's JSON Schema.",
+      "properties": {
+        "schemas": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "schemas"
+      ],
+      "type": "object"
+    },
     "SearchParams": {
       "description": "Params of `search`: documents containing every word of `text`, best first.",
       "properties": {
@@ -927,6 +1130,52 @@
           "type": "object"
         }
       ]
+    },
+    "SnapshotInfo": {
+      "description": "A snapshot of the database.",
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "change_set": {
+          "description": "The newest change set it holds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "description": "Its name, which `restore` takes.",
+          "type": "string"
+        },
+        "taken": {
+          "description": "When it was taken, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "taken",
+        "change_set",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "SnapshotsResult": {
+      "description": "Result of `snapshots`, newest first.",
+      "properties": {
+        "snapshots": {
+          "items": {
+            "$ref": "#/$defs/SnapshotInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "snapshots"
+      ],
+      "type": "object"
     },
     "SystemTrust": {
       "description": "The one trust level `adopt` names explicitly.",
@@ -1141,6 +1390,10 @@
     "DEFAULT_TIMEOUT_MS": {
       "description": "How long the broker waits for a response before answering `timeout` itself, unless the request sets `timeout_ms`.",
       "value": 30000
+    },
+    "MAX_BLOB_BYTES": {
+      "description": "Largest blob `put_blob` takes.",
+      "value": 4294967296
     },
     "MAX_FDS_PER_MESSAGE": {
       "description": "Most file descriptors one message may carry.",

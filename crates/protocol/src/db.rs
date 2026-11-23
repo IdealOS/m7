@@ -16,6 +16,16 @@
 //! `$nin`, `$exists` and `$contains` (array membership). Comparisons are typed: a
 //! number never equals a string or a boolean. `{"field": null}` matches documents
 //! where the field is null or missing, and `$ne` matches documents without the field.
+//!
+//! A field whose value is `{"$link": "<id>"}` links to another document, and one
+//! whose value is `{"$blob": "<sha-256>"}` refers to a stored blob. Filters follow
+//! links: `{"from": {"$link": id}}` matches documents whose `from` field (or a field
+//! under it, or an item of it) links to `id`; top-level `{"$linksTo": id}` matches
+//! documents with any link to `id`, and `{"$linkedFrom": id}` the documents `id`
+//! links to.
+//!
+//! Documents of a system type (`Email`, `Contact`, ...; see `schemas/`) must match
+//! that type's schema; other types are free-form.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -38,6 +48,18 @@ pub const SERVICE: &str = "db";
 /// | `changes` | [`ChangesParams`] | [`ChangesResult`] |
 /// | `undo`   | [`UndoParams`]   | [`UndoResult`] |
 /// | `watch`  | [`Query`]        | streamed [`WatchEvent`]s |
+/// | `links`  | [`IdParams`]     | [`LinksResult`] |
+/// | `diff`   | [`DiffParams`]   | [`DiffResult`] |
+/// | `schemas` | none            | [`SchemasResult`] |
+/// | `snapshot` | none           | [`SnapshotInfo`] |
+/// | `snapshots` | none          | [`SnapshotsResult`] |
+/// | `restore` | [`RestoreParams`] | [`RestoreResult`] |
+/// | `put_blob` | one descriptor | [`BlobInfo`] |
+/// | `get_blob` | [`HashParams`] | [`BlobInfo`] and one descriptor |
+/// | `blob_info` | [`HashParams`] | [`BlobInfo`] |
+///
+/// `put_blob` stores the contents of a regular file (or memfd) passed with the
+/// request, and `get_blob` answers with a read-only descriptor for the blob.
 ///
 /// `watch` is a live query, sent as a streamed request (`"stream": true`). Its
 /// first part is the query's result; each later part is what changed since the
@@ -55,6 +77,15 @@ pub mod method {
     pub const CHANGES: &str = "changes";
     pub const UNDO: &str = "undo";
     pub const WATCH: &str = "watch";
+    pub const LINKS: &str = "links";
+    pub const DIFF: &str = "diff";
+    pub const SCHEMAS: &str = "schemas";
+    pub const SNAPSHOT: &str = "snapshot";
+    pub const SNAPSHOTS: &str = "snapshots";
+    pub const RESTORE: &str = "restore";
+    pub const PUT_BLOB: &str = "put_blob";
+    pub const GET_BLOB: &str = "get_blob";
+    pub const BLOB_INFO: &str = "blob_info";
 }
 
 /// Error codes the `db` service sends, besides the broker's `bad_request`.
@@ -232,6 +263,134 @@ pub struct UndoParams {
 pub struct UndoResult {
     pub change_set: i64,
 }
+
+/// A link out of a document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LinkInfo {
+    /// The field holding the link, such as `from.contact` or `tracks.3`.
+    pub path: String,
+    /// The target's id.
+    pub id: String,
+    /// Whether the target exists (and isn't deleted).
+    pub exists: bool,
+}
+
+/// A link into a document from another live document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BacklinkInfo {
+    /// The linking document.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub doc_type: String,
+    /// Its field holding the link.
+    pub path: String,
+}
+
+/// Result of `links`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LinksResult {
+    pub outgoing: Vec<LinkInfo>,
+    pub incoming: Vec<BacklinkInfo>,
+}
+
+/// Params of `diff`: document `id` from just after change set `from` (0 for
+/// before it was created) to just after change set `to`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DiffParams {
+    pub id: String,
+    pub from: i64,
+    pub to: i64,
+}
+
+/// One field that differs. Objects are compared field by field, arrays and other
+/// values as a whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FieldChangeInfo {
+    pub path: String,
+    /// Absent when the field didn't exist before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Value>,
+    /// Absent when the field doesn't exist after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Value>,
+}
+
+/// Result of `diff`, sorted by path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DiffResult {
+    pub changes: Vec<FieldChangeInfo>,
+}
+
+/// Result of `schemas`: each system type's JSON Schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SchemasResult {
+    pub schemas: std::collections::BTreeMap<String, Value>,
+}
+
+/// A snapshot of the database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SnapshotInfo {
+    /// Its name, which `restore` takes.
+    pub name: String,
+    /// When it was taken, in milliseconds since the Unix epoch.
+    pub taken: i64,
+    /// The newest change set it holds.
+    pub change_set: i64,
+    pub bytes: u64,
+}
+
+/// Result of `snapshots`, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SnapshotsResult {
+    pub snapshots: Vec<SnapshotInfo>,
+}
+
+/// Params of `restore`: replace the database with snapshot `name`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RestoreParams {
+    pub name: String,
+}
+
+/// Result of `restore`: the snapshot of the state it replaced, so restoring that
+/// one undoes the restore.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RestoreResult {
+    pub saved: SnapshotInfo,
+}
+
+/// Params of `get_blob` and `blob_info`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HashParams {
+    /// The blob's SHA-256, lowercase hex.
+    pub hash: String,
+}
+
+/// A stored blob.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BlobInfo {
+    pub hash: String,
+    pub size: u64,
+    /// When it was first stored, in milliseconds since the Unix epoch.
+    pub created: i64,
+    /// How many fields of live documents refer to it.
+    pub refs: u64,
+}
+
+/// Largest blob `put_blob` takes.
+pub const MAX_BLOB_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Most documents one query returns; a larger `limit` is an error.
 pub const MAX_QUERY_LIMIT: u32 = 10_000;

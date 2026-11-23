@@ -10,6 +10,6 @@ publish = false
 [dependencies]
 protocol.workspace = true
 loro.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
 serde_json.workspace = true
 uuid.workspace = true

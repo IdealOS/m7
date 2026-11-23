@@ -184,3 +184,41 @@ impl Store {
             .ok_or_else(|| Error::NotFound(id.into()))
     }
 }
+
+/// One field that differs between two versions of a document. Objects are compared
+/// field by field; arrays and scalars as whole values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldChange {
+    pub path: String,
+    /// `None` when the field didn't exist in the first version.
+    pub before: Option<Value>,
+    /// `None` when it doesn't exist in the second.
+    pub after: Option<Value>,
+}
+
+impl Store {
+    /// What changed in document `id` from just after change set `from` to just after
+    /// change set `to` (0 for `from` means before it was created).
+    pub fn diff(&self, id: &str, from: i64, to: i64) -> Result<Vec<FieldChange>> {
+        let before = if from == 0 { Map::new() } else { self.at(id, from)? };
+        let after = self.at(id, to)?;
+        let mut out = Vec::new();
+        diff_maps(&before, &after, "", &mut out);
+        Ok(out)
+    }
+}
+
+fn diff_maps(a: &Map<String, Value>, b: &Map<String, Value>, at: &str, out: &mut Vec<FieldChange>) {
+    let path = |k: &str| if at.is_empty() { k.to_owned() } else { format!("{at}.{k}") };
+    let mut keys: Vec<&String> = a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))).collect();
+    keys.sort();
+    for k in keys {
+        match (a.get(k), b.get(k)) {
+            (Some(Value::Object(x)), Some(Value::Object(y))) => diff_maps(x, y, &path(k), out),
+            (x, y) if x != y => {
+                out.push(FieldChange { path: path(k), before: x.cloned(), after: y.cloned() })
+            }
+            _ => {}
+        }
+    }
+}

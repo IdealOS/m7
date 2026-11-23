@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/TextDocument",
+  "title": "TextDocument",
+  "description": "A text file, note or other writing.",
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "body": { "type": "string" },
+    "format": { "enum": ["plain", "markdown"], "default": "plain" }
+  },
+  "x-indexes": ["title"]
+}
