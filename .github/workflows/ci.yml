@@ -30,8 +30,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          # 24 runs tools/*.ts directly (type stripping) and finds *.test.ts files.
-          node-version: 24
+          # The same major version as development machines. It runs tools/*.ts
+          # directly (type stripping) and finds *.test.ts files.
+          node-version: 26
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       # Type-checks and tests tools/, including that sdk/src/protocol.ts is

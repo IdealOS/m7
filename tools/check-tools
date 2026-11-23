@@ -3,7 +3,7 @@
 # Node's types come from npx's cache, so nothing is added to the repo.
 set -eu
 cd "$(dirname "$0")"
-npx --yes -p typescript@5.9 -p @types/node@24 sh -c \
+npx --yes -p typescript@5.9 -p @types/node@26 sh -c \
 	'tsc -p . --typeRoots "$(dirname "$(dirname "$(command -v tsc)")")/@types"'
-# A glob, not a directory: Node 24 (as in CI) rejects a directory here.
+# A glob, not a directory: older Node versions (24) reject a directory here.
 node --test "*.test.ts"
