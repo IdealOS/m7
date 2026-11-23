@@ -25,23 +25,36 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Error codes the broker itself sends. Services may send their own.
 pub mod code {
-    /// The frame was valid JSON but the message makes no sense (unknown method,
-    /// bad params).
-    pub const BAD_REQUEST: &str = "bad_request";
-    /// No connection has claimed the name the request was sent to.
-    pub const NO_SUCH_SERVICE: &str = "no_such_service";
-    /// Another connection already holds the name.
-    pub const NAME_TAKEN: &str = "name_taken";
-    /// The permission hook refused the message.
-    pub const PERMISSION_DENIED: &str = "permission_denied";
-    /// The service didn't answer within the request's timeout.
-    pub const TIMEOUT: &str = "timeout";
-    /// The service disconnected before answering.
-    pub const SERVICE_GONE: &str = "service_gone";
+    /// Declares each code as a constant, and lists them all with their docs for
+    /// the JSON Schema export.
+    macro_rules! codes {
+        ($($(#[doc = $doc:literal])+ $name:ident = $value:literal;)+) => {
+            $($(#[doc = $doc])+ pub const $name: &str = $value;)+
+            /// Every code above, with its description.
+            pub const ALL: &[(&str, &str)] = &[$(($value, concat!($($doc),+))),+];
+        };
+    }
+
+    codes! {
+        /// The frame was valid JSON but the message makes no sense (unknown method,
+        /// bad params).
+        BAD_REQUEST = "bad_request";
+        /// No connection has claimed the name the request was sent to.
+        NO_SUCH_SERVICE = "no_such_service";
+        /// Another connection already holds the name.
+        NAME_TAKEN = "name_taken";
+        /// The permission hook refused the message.
+        PERMISSION_DENIED = "permission_denied";
+        /// The service didn't answer within the request's timeout.
+        TIMEOUT = "timeout";
+        /// The service disconnected before answering.
+        SERVICE_GONE = "service_gone";
+    }
 }
 
 /// Who sent a message, as stamped by the broker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Sender {
     /// A system service that claimed a well-known name such as `db`.
@@ -53,13 +66,17 @@ pub enum Sender {
     Conn(u64),
 }
 
+/// Why a request failed. `code` is one of the broker's codes or a service's own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BusError {
     pub code: String,
     pub message: String,
 }
 
+/// One bus frame's JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Message {
     Request {

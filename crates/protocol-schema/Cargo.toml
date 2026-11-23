@@ -1,0 +1,12 @@
+[package]
+name = "protocol-schema"
+description = "Exports the protocol crate's wire types as JSON Schema, for the TypeScript SDK."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+protocol = { workspace = true, features = ["schema"] }
+schemars = "1.2"
+serde_json.workspace = true

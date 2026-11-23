@@ -16,6 +16,7 @@ pub type Props = Map<String, Value>;
 /// Node types understood by the compositor. Phase 0 renders the primitives
 /// (`rect`, `text`, `group`); widgets arrive in M4 and M5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
     Group,
@@ -28,7 +29,9 @@ pub enum NodeKind {
     Button,
 }
 
+/// One change to a window's scene graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum SceneOp {
     Create {
@@ -63,6 +66,7 @@ pub enum SceneOp {
 
 /// Params of a `compositor.commit` request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Commit {
     pub window: u64,
     pub ops: Vec<SceneOp>,

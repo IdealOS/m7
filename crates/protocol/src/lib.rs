@@ -1,8 +1,9 @@
 //! Wire types shared by every service and app.
 //!
 //! These mirror the "Key interfaces" section of `docs/implementation-plan.md`.
-//! They are drafts: JSON Schema export and generated TypeScript types are still to do
-//! (M2); until then `sdk/src/protocol.ts` mirrors them by hand.
+//! With the `schema` feature they derive `JsonSchema`; `crates/protocol-schema`
+//! exports them to `schema.json`, and `sdk/src/protocol.ts` is generated from that
+//! (`make protocol`). A test fails when either is out of date.
 
 pub mod bus;
 pub mod scene;

@@ -111,7 +111,8 @@ docs/               feature list, implementation plan, screenshots
 | `bus-client` | Async Rust client: requests (dropping one before it finishes cancels it), subscriptions (dropping the last one on a pattern unsubscribes), publishing, serving claimed names, and descriptors on all of them. Uses the connection session handed over when there is one. |
 | `osctl bus` | `list`, `hello`, `call`, `pub`, `sub`, `tap` (a live trace of every message), `echo` (a test service), `bench`. |
 | Benchmarks | `osctl bus bench`, through a running broker. Apple M3 Mac (release build): 37.5 µs round trip p50, 290,000 requests/s with 64 in flight, 1.24 million publishes/s. QEMU image on the same Mac (`make smoke-report`, 3 s runs): 18.5 µs p50, 262,000 requests/s and 1.47 million publishes/s with 64-byte payloads; 47.7 µs, 124,000 requests/s and 237,000 publishes/s with 4 KiB. `make smoke-qemu` checks a 1 s run. `make pi-report` runs it on a Pi; not yet run there. |
-| Not started | JSON Schema export and generated TypeScript types (`sdk/src/protocol.ts` is still hand-written), fuzzing the frame parser, a limit on pending requests per connection. |
+| Schema and TypeScript types | `crates/protocol-schema` exports the wire types (and the protocol's constants and broker error codes) as JSON Schema to `crates/protocol/schema.json`, and `tools/gen-protocol.ts` generates `sdk/src/protocol.ts` from it; `make protocol` does both. A Rust test and a tools test fail when either file is out of date. The generator fails on any schema it doesn't understand instead of writing `unknown`. |
+| Not started | Fuzzing the frame parser, a limit on pending requests per connection, typed params and results for the broker's own methods. |
 
 ### Spikes
 

@@ -1,0 +1,519 @@
+{
+  "$comment": "Generated from crates/protocol by crates/protocol-schema; do not edit. Run `make protocol`.",
+  "$defs": {
+    "BrokerErrorCode": {
+      "description": "Error codes the broker itself sends. Services may send their own.",
+      "oneOf": [
+        {
+          "const": "bad_request",
+          "description": "The frame was valid JSON but the message makes no sense (unknown method, bad params)."
+        },
+        {
+          "const": "no_such_service",
+          "description": "No connection has claimed the name the request was sent to."
+        },
+        {
+          "const": "name_taken",
+          "description": "Another connection already holds the name."
+        },
+        {
+          "const": "permission_denied",
+          "description": "The permission hook refused the message."
+        },
+        {
+          "const": "timeout",
+          "description": "The service didn't answer within the request's timeout."
+        },
+        {
+          "const": "service_gone",
+          "description": "The service disconnected before answering."
+        }
+      ]
+    },
+    "BusError": {
+      "description": "Why a request failed. `code` is one of the broker's codes or a service's own.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Commit": {
+      "description": "Params of a `compositor.commit` request.",
+      "properties": {
+        "ops": {
+          "items": {
+            "$ref": "#/$defs/SceneOp"
+          },
+          "type": "array"
+        },
+        "window": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "window",
+        "ops"
+      ],
+      "type": "object"
+    },
+    "Message": {
+      "description": "One bus frame's JSON.",
+      "oneOf": [
+        {
+          "properties": {
+            "fds": {
+              "description": "How many file descriptors travel with this message (see `unix`).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Sender"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "request",
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "params": {
+              "default": null
+            },
+            "timeout_ms": {
+              "description": "Overrides `DEFAULT_TIMEOUT_MS`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "to",
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BusError"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "response",
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "result": true
+          },
+          "required": [
+            "kind",
+            "id",
+            "ok"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The requester no longer wants the answer to request `id`. The broker\nforwards it to the service and drops the response if one still comes.",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "cancel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`topic` is an exact topic, or a prefix ending in `.*` (see\n`topic_matches`). The broker answers with a response carrying `id`.",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "subscribe",
+              "type": "string"
+            },
+            "topic": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "topic"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "unsubscribe",
+              "type": "string"
+            },
+            "topic": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "topic"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "default": null
+            },
+            "fds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Sender"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "const": "publish",
+              "type": "string"
+            },
+            "topic": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "topic"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NodeKind": {
+      "description": "Node types understood by the compositor. Phase 0 renders the primitives\n(`rect`, `text`, `group`); widgets arrive in M4 and M5.",
+      "enum": [
+        "group",
+        "rect",
+        "text",
+        "image",
+        "vstack",
+        "hstack",
+        "label",
+        "button"
+      ],
+      "type": "string"
+    },
+    "SceneOp": {
+      "description": "One change to a window's scene graph.",
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "create",
+              "type": "string"
+            },
+            "props": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "type": {
+              "$ref": "#/$defs/NodeKind"
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Merge `props` into the node's existing props.",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "set",
+              "type": "string"
+            },
+            "props": {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "props"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "child": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "insert",
+              "type": "string"
+            },
+            "parent": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "op",
+            "parent",
+            "child",
+            "index"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "child": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "remove",
+              "type": "string"
+            },
+            "parent": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "op",
+            "parent",
+            "child"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "destroy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "events": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "op": {
+              "const": "listen",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "events"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sender": {
+      "description": "Who sent a message, as stamped by the broker.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A system service that claimed a well-known name such as `db`.",
+          "properties": {
+            "service": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "service"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An app, identified by its app id and bus connection number.",
+          "properties": {
+            "app": {
+              "properties": {
+                "app": {
+                  "type": "string"
+                },
+                "conn": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "app",
+                "conn"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "app"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A trusted local connection (a tool such as `osctl`, or a service before it\nclaims a name), identified by its bus connection number.",
+          "properties": {
+            "conn": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "conn"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "idealos:protocol",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Bus frames are a 4-byte big-endian length followed by one UTF-8 JSON `Message`.",
+  "title": "idealos wire protocol",
+  "x-constants": {
+    "BROKER": {
+      "description": "The broker's own name: `hello`, `claim`, `release` and `list` go to it, and `adopt`, with which session hands it connections for services and apps.",
+      "value": "bus"
+    },
+    "DEFAULT_TIMEOUT_MS": {
+      "description": "How long the broker waits for a response before answering `timeout` itself, unless the request sets `timeout_ms`.",
+      "value": 30000
+    },
+    "MAX_FDS_PER_MESSAGE": {
+      "description": "Most file descriptors one message may carry.",
+      "value": 16
+    },
+    "MAX_FRAME_BYTES": {
+      "description": "Largest frame the broker accepts, not counting the 4-byte length prefix.",
+      "value": 4194304
+    },
+    "TAP_TOPIC": {
+      "description": "The broker's trace of every message; only trusted connections may subscribe.",
+      "value": "bus.tap"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench bus bus-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk tools-check
+.PHONY: hosted bench bus bus-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk protocol tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -38,6 +38,10 @@ lint-device:       ## Clippy on the Linux-only KMS code, in the build VM
 
 fmt:
 	cargo fmt --all
+
+protocol:          ## Regenerate crates/protocol/schema.json and sdk/src/protocol.ts from the Rust types
+	cargo run -q -p protocol-schema > crates/protocol/schema.json
+	node tools/gen-protocol.ts
 
 sdk:               ## Type-check the TypeScript SDK
 	cd sdk && npx --yes -p typescript@5.9 tsc --noEmit -p .
