@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! osctl [--socket PATH] bus list                      services and connection count
+//! osctl [--socket PATH] bus hello                     this connection's number and identity
 //! osctl [--socket PATH] bus call TO METHOD [JSON] [--timeout MS]
 //! osctl [--socket PATH] bus pub TOPIC [JSON]
 //! osctl [--socket PATH] bus sub PATTERN               print publications as JSON lines
@@ -9,6 +10,9 @@
 //! osctl [--socket PATH] bus echo NAME                 serve NAME, answering with the params
 //! osctl [--socket PATH] bus bench [--seconds N] [--size BYTES]
 //! ```
+//!
+//! Without `--socket`, osctl uses the bus connection session gave it, if it was
+//! started as a `bus=` service, and otherwise the default socket.
 //!
 //! Exit status: 0 on success, 1 when the bus or a service answers with an error or
 //! can't be reached, 2 for bad usage.
@@ -22,7 +26,7 @@ use std::time::Duration;
 
 use commands::Command;
 
-const USAGE: &str = "usage: osctl [--socket PATH] bus (list | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
+const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO METHOD [JSON] [--timeout MS] | pub TOPIC [JSON] \
 | sub PATTERN | tap | echo NAME | bench [--seconds N] [--size BYTES])";
 
 fn main() {
@@ -35,8 +39,12 @@ fn main() {
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
     let result = runtime.block_on(async {
+        let bus = match &socket {
+            Some(path) => bus_client::Client::connect(path).await,
+            None => bus_client::Client::connect_default().await,
+        }
+        .map_err(|e| e.to_string())?;
         let path = socket.unwrap_or_else(protocol::bus::default_socket_path);
-        let bus = bus_client::Client::connect(&path).await.map_err(|e| e.to_string())?;
         let mut out = std::io::stdout().lock();
         commands::run(&bus, &path, command, &mut out).await
     });
@@ -105,6 +113,11 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
             allowed(&[])?;
             Command::List
         }
+        "hello" => {
+            arity(0, 0)?;
+            allowed(&[])?;
+            Command::Hello
+        }
         "call" => {
             arity(2, 3)?;
             allowed(&["timeout"])?;
@@ -159,6 +172,7 @@ mod tests {
     #[test]
     fn parses_each_subcommand() {
         assert_eq!(parse_str("bus list").unwrap(), (None, Command::List));
+        assert_eq!(parse_str("bus hello").unwrap().1, Command::Hello);
         assert_eq!(
             parse_str("--socket /tmp/b.sock bus call db query {\"a\":1} --timeout 250").unwrap(),
             (

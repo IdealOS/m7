@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 #[derive(Debug, PartialEq)]
 pub enum Command {
     List,
+    Hello,
     Call { to: String, method: String, params: Value, timeout: Option<Duration> },
     Pub { topic: String, data: Value },
     Sub { pattern: String },
@@ -27,6 +28,10 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
         Command::List => {
             let list = bus.request(BROKER, "list", Value::Null).await.map_err(|e| e.to_string())?;
             write_list(&list, out).map_err(w)
+        }
+        Command::Hello => {
+            let (conn, sender) = bus.hello().await.map_err(|e| e.to_string())?;
+            writeln!(out, "{}", json!({"conn": conn, "sender": sender})).map_err(w)
         }
         Command::Call { to, method, params, timeout } => {
             let answer = match timeout {
@@ -153,7 +158,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("bus.sock");
-            tokio::spawn(busd::serve(UnixListener::bind(&path).unwrap(), Box::new(busd::AllowAll)));
+            tokio::spawn(busd::serve(UnixListener::bind(&path).unwrap(), Box::new(busd::AllowAll), None));
             Bus { path, dir }
         }
 
@@ -226,7 +231,9 @@ mod tests {
 
     #[test]
     fn tap_lines_read_as_who_did_what() {
-        let line = |data: Value| tap_line(&Publication { topic: TAP_TOPIC.into(), data, from: None });
+        let line = |data: Value| {
+            tap_line(&Publication { topic: TAP_TOPIC.into(), data, from: None, fds: Vec::new() })
+        };
         assert_eq!(
             line(json!({"conn": 3, "sender": {"conn": 3}, "bus_id": 9,
                 "msg": {"kind": "request", "id": 1, "to": "db", "method": "query", "params": {"a": 1}}})),

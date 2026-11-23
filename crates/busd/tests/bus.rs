@@ -16,10 +16,12 @@ struct Bus {
 
 impl Bus {
     fn start(name: &str) -> Bus {
+        // As busd does: these tests run the broker and many clients in one process.
+        busd::raise_fd_limit().unwrap();
         let dir = TempDir::new(name);
         let path = dir.0.join("bus.sock");
         let listener = UnixListener::bind(&path).unwrap();
-        tokio::spawn(busd::serve(listener, Box::new(busd::AllowAll)));
+        tokio::spawn(busd::serve(listener, Box::new(busd::AllowAll), None));
         Bus { path, _dir: dir }
     }
 
@@ -55,7 +57,7 @@ async fn echo_service(bus: &Bus, name: &str) -> Client {
     let responder = client.clone();
     tokio::spawn(async move {
         while let Some(incoming) = requests.next().await {
-            if let Incoming::Request { id, from, method, params } = incoming {
+            if let Incoming::Request { id, from, method, params, .. } = incoming {
                 let answer = match method.as_str() {
                     "echo" => params,
                     "whoami" => serde_json::to_value(from).unwrap(),
@@ -151,7 +153,7 @@ async fn giving_up_on_a_request_cancels_it_at_the_service() {
         tokio::time::timeout(Duration::from_millis(50), client.request("slow", "work", Value::Null)).await;
     assert!(gave_up.is_err(), "the service never answers");
     let Some(Incoming::Request { id, .. }) = requests.next().await else { panic!() };
-    assert_eq!(requests.next().await, Some(Incoming::Cancel { id }));
+    assert!(matches!(requests.next().await, Some(Incoming::Cancel { id: cancelled }) if cancelled == id));
     // Answering anyway is harmless.
     svc.respond(id, Ok(Value::Null)).await.unwrap();
 }
@@ -269,12 +271,159 @@ async fn a_stuck_subscriber_is_dropped_by_queued_bytes() {
     drop(raw);
 }
 
+/// A file with `text` in it, already unlinked, as a descriptor.
+fn file_with(text: &str) -> std::os::fd::OwnedFd {
+    use std::io::Write;
+    // Unique per call: tests run in parallel and each unlinks its file at once.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("busd-fd-{}-{n}", std::process::id()));
+    let mut f =
+        std::fs::File::options().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    f.write_all(text.as_bytes()).unwrap();
+    f.into()
+}
+
+fn read_all(fd: std::os::fd::OwnedFd) -> String {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::from(fd);
+    f.rewind().unwrap();
+    let mut text = String::new();
+    f.read_to_string(&mut text).unwrap();
+    text
+}
+
+/// Descriptors cross the broker in both directions and still work on the far side.
+#[tokio::test]
+async fn descriptors_travel_with_requests_responses_and_publishes() {
+    let bus = Bus::start("fds");
+    let svc = bus.client().await;
+    svc.claim("files").await.unwrap();
+    let mut requests = svc.take_requests().unwrap();
+    let responder = svc.clone();
+    tokio::spawn(async move {
+        while let Some(Incoming::Request { id, fds, .. }) = requests.next().await {
+            // Read what came in; answer with a new file holding it reversed.
+            let text: String = fds.into_iter().map(read_all).collect::<Vec<_>>().join("+");
+            let reply = file_with(&text.chars().rev().collect::<String>());
+            responder.respond_with(id, Ok(json!(text.len())), vec![reply]).await.unwrap();
+        }
+    });
+    let client = bus.client().await;
+    let reply = client
+        .request_with("files", "put", Value::Null, vec![file_with("ab"), file_with("cd")], None)
+        .await
+        .unwrap();
+    assert_eq!(reply.result, json!(5));
+    assert_eq!(read_all(reply.fds.into_iter().next().unwrap()), "dc+ba");
+
+    // Two subscribers, one with two matching patterns: each copy works.
+    let other = bus.client().await;
+    let mut a = client.subscribe("frames.*").await.unwrap();
+    let mut b = client.subscribe("frames.new").await.unwrap();
+    let mut c = other.subscribe("frames.new").await.unwrap();
+    svc.publish_with("frames.new", Value::Null, vec![file_with("pixels")]).await.unwrap();
+    for sub in [&mut a, &mut b, &mut c] {
+        let p = sub.next().await.unwrap();
+        assert_eq!(read_all(p.fds.into_iter().next().unwrap()), "pixels");
+    }
+}
+
+/// A connection that declares descriptors it didn't send is broken, not trusted
+/// to line up later.
+#[tokio::test]
+async fn a_message_missing_its_descriptors_drops_the_connection() {
+    use tokio::io::AsyncWriteExt;
+    let bus = Bus::start("liar");
+    let mut raw = tokio::net::UnixStream::connect(&bus.path).await.unwrap();
+    let lie = protocol::bus::encode_frame(&protocol::Message::publish("x", Value::Null).with_fds(1)).unwrap();
+    raw.write_all(&lie).await.unwrap();
+    let mut buf = [0u8; 16];
+    use tokio::io::AsyncReadExt;
+    let n = tokio::time::timeout(Duration::from_secs(5), raw.read(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(n, 0, "the broker closed the connection");
+}
+
+/// Descriptors waiting for a connection that stopped reading count against its
+/// queue, so it can't make the broker hold thousands of them open.
+#[tokio::test]
+async fn a_stuck_subscriber_is_dropped_by_queued_descriptors() {
+    use tokio::io::AsyncWriteExt;
+    let bus = Bus::start("fdcap");
+    let mut raw = tokio::net::UnixStream::connect(&bus.path).await.unwrap();
+    let sub =
+        protocol::bus::encode_frame(&protocol::Message::Subscribe { id: 1, topic: "fds".into() }).unwrap();
+    raw.write_all(&sub).await.unwrap();
+    let publisher = bus.client().await;
+    publisher.hello().await.unwrap(); // the subscribe has been routed by now
+    // Small frames, far under the frame and byte limits; 16 descriptors each.
+    for _ in 0..(busd::server::OUTBOX_FDS / 16) * 4 {
+        let fds = (0..16).map(|_| file_with("x")).collect();
+        publisher.publish_with("fds", Value::Null, fds).await.unwrap();
+    }
+    let list = publisher.request("bus", "list", Value::Null).await.unwrap();
+    assert_eq!(list["connections"], json!(1), "the stuck subscriber is gone: {list}");
+    drop(raw);
+}
+
+/// Session's connection hands the broker connections for apps, which are stamped
+/// with their app id and can't act as services.
+#[tokio::test]
+async fn session_hands_over_app_connections() {
+    let dir = TempDir::new("adopt");
+    let path = dir.0.join("bus.sock");
+    let (session_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    tokio::spawn(busd::serve(listener, Box::new(busd::AllowAll), Some(broker_end)));
+    let session = Client::from_stream(session_end);
+
+    let (app_end, for_broker) = std::os::unix::net::UnixStream::pair().unwrap();
+    let reply = session
+        .request_with("bus", "adopt", json!({"app": "org.example.notes"}), vec![for_broker.into()], None)
+        .await
+        .unwrap();
+    let conn = reply.result["conn"].as_u64().unwrap();
+    app_end.set_nonblocking(true).unwrap();
+    let app = Client::from_stream(tokio::net::UnixStream::from_std(app_end).unwrap());
+    let (seen, sender) = app.hello().await.unwrap();
+    assert_eq!(seen, conn);
+    assert_eq!(sender, Sender::App { app: "org.example.notes".into(), conn });
+    assert_eq!(app.claim("db").await.unwrap_err().code(), code::PERMISSION_DENIED);
+    let Err(err) = app.subscribe(TAP_TOPIC).await else { panic!("an app tapped the bus") };
+    assert_eq!(err.code(), code::PERMISSION_DENIED);
+
+    // A system service's connection, handed over the same way, may claim names.
+    let (svc_end, for_broker) = std::os::unix::net::UnixStream::pair().unwrap();
+    session
+        .request_with("bus", "adopt", json!({"trust": "system"}), vec![for_broker.into()], None)
+        .await
+        .unwrap();
+    svc_end.set_nonblocking(true).unwrap();
+    let svc = Client::from_stream(tokio::net::UnixStream::from_std(svc_end).unwrap());
+    svc.claim("db").await.unwrap();
+
+    // Anyone else asking to adopt is refused, and a non-socket is refused too.
+    let outsider = Client::connect(&path).await.unwrap();
+    let (_keep, for_broker) = std::os::unix::net::UnixStream::pair().unwrap();
+    let err = outsider
+        .request_with("bus", "adopt", json!({"trust": "system"}), vec![for_broker.into()], None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), code::PERMISSION_DENIED);
+    let err = session
+        .request_with("bus", "adopt", json!({"trust": "system"}), vec![file_with("x")], None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), code::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn requests_after_the_broker_stops_fail_cleanly() {
     let dir = TempDir::new("stopped");
     let path = dir.0.join("bus.sock");
     let listener = UnixListener::bind(&path).unwrap();
-    let server = tokio::spawn(busd::serve(listener, Box::new(busd::AllowAll)));
+    let server = tokio::spawn(busd::serve(listener, Box::new(busd::AllowAll), None));
     let client = Client::connect(&path).await.unwrap();
     client.hello().await.unwrap();
     server.abort();

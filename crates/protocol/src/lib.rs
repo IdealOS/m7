@@ -6,6 +6,7 @@
 
 pub mod bus;
 pub mod scene;
+pub mod unix;
 
 pub use bus::{BROKER, BusError, Message, Sender};
 pub use scene::{Commit, NodeId, NodeKind, Props, SceneOp};

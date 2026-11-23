@@ -9,6 +9,10 @@
 //! id, so two clients can both use id 1, and maps the service's response back to
 //! the requester's id. A request ends exactly once: with the service's response, a
 //! `timeout` or `service_gone` error from the broker, or the requester's cancel.
+//!
+//! File descriptors never pass through the router. It only carries each message's
+//! `fds` count to the message it forwards; the shell sends the descriptors that
+//! arrived with a message along with whichever action declares them.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -26,6 +30,9 @@ pub enum Trust {
     System,
     /// An app's connection, handed over by `session`. May not claim names or tap.
     App { app: String },
+    /// The connection `session` holds, which `busd` inherited at startup. Trusted
+    /// like `System`, and the only one that may hand the broker new connections.
+    Session,
 }
 
 #[derive(Debug)]
@@ -33,6 +40,8 @@ pub enum Event {
     Opened {
         conn: ConnId,
         trust: Trust,
+        /// For a connection session handed over: the `adopt` request to answer.
+        adopted_for: Option<(ConnId, u64)>,
     },
     Message {
         conn: ConnId,
@@ -49,6 +58,9 @@ pub enum Event {
 pub enum Action {
     /// Send `msg` to each connection in `to`.
     Deliver { to: Vec<ConnId>, msg: Message },
+    /// Start a connection on the descriptor that came with request `id` from
+    /// `requester`, then report back with [`Event::Opened`]'s `adopted_for`.
+    Adopt { requester: ConnId, id: u64, trust: Trust },
 }
 
 /// Decides whether a message may be delivered. Every request (other than to the
@@ -113,8 +125,14 @@ impl Router {
 
     pub fn handle(&mut self, now: Instant, event: Event, out: &mut Vec<Action>) {
         match event {
-            Event::Opened { conn, trust } => {
+            Event::Opened { conn, trust, adopted_for } => {
                 self.conns.insert(conn, Conn { trust, names: Vec::new(), subs: Vec::new() });
+                if let Some((requester, id)) = adopted_for {
+                    out.push(Action::Deliver {
+                        to: vec![requester],
+                        msg: Message::ok(id, json!({"conn": conn})),
+                    });
+                }
             }
             Event::Message { conn, msg } => {
                 if let Some(sender) = self.sender(conn) {
@@ -133,17 +151,23 @@ impl Router {
         Some(match (&c.trust, c.names.first()) {
             (_, Some(name)) => Sender::Service(name.clone()),
             (Trust::App { app }, None) => Sender::App { app: app.clone(), conn },
-            (Trust::System, None) => Sender::Conn(conn),
+            (Trust::System | Trust::Session, None) => Sender::Conn(conn),
         })
     }
 
     fn message(&mut self, now: Instant, conn: ConnId, sender: Sender, msg: Message, out: &mut Vec<Action>) {
         match msg {
-            Message::Request { id, ref to, ref method, ref params, .. } if to == BROKER => {
+            Message::Request { id, ref to, ref method, ref params, fds, .. } if to == BROKER => {
+                if method == "adopt" {
+                    return match self.adopt(conn, params, fds) {
+                        Ok(trust) => out.push(Action::Adopt { requester: conn, id, trust }),
+                        Err(e) => out.push(Action::Deliver { to: vec![conn], msg: Message::failed(id, e) }),
+                    };
+                }
                 let reply = self.broker(conn, &sender, id, method, params);
                 out.push(Action::Deliver { to: vec![conn], msg: reply });
             }
-            Message::Request { id, to, method, params, timeout_ms, .. } => {
+            Message::Request { id, to, method, params, timeout_ms, fds, .. } => {
                 let mut reply = |msg| out.push(Action::Deliver { to: vec![conn], msg });
                 let Some(&service) = self.names.get(&to) else {
                     return reply(Message::err(id, code::NO_SUCH_SERVICE, format!("no service named {to}")));
@@ -161,10 +185,11 @@ impl Router {
                     method,
                     params,
                     timeout_ms,
+                    fds,
                     from: Some(sender.clone()),
                 };
                 if let Err(e) = self.policy.check(&sender, &forwarded) {
-                    return reply(Message::Response { id, ok: false, result: None, error: Some(e) });
+                    return reply(Message::failed(id, e));
                 }
                 let bus_id = self.next_id;
                 self.next_id += 1;
@@ -174,14 +199,14 @@ impl Router {
                 self.deadlines.insert((deadline, bus_id));
                 out.push(Action::Deliver { to: vec![service], msg: forwarded });
             }
-            Message::Response { id, ok, result, error } => {
+            Message::Response { id, ok, result, error, fds } => {
                 // Only the service a request went to may answer it; anything else
                 // (a late answer after a timeout or cancel, or a stray id) is dropped.
                 if self.pending.get(&id).is_some_and(|p| p.service == conn) {
                     let p = self.finish(id);
                     out.push(Action::Deliver {
                         to: vec![p.requester],
-                        msg: Message::Response { id: p.client_id, ok, result, error },
+                        msg: Message::Response { id: p.client_id, ok, result, error, fds },
                     });
                 }
             }
@@ -197,7 +222,7 @@ impl Router {
                 } else if topic.starts_with("bus") && !self.trusted(conn) {
                     Message::err(id, code::PERMISSION_DENIED, "only system connections may tap the bus")
                 } else if let Err(e) = self.policy.check(&sender, &msg) {
-                    Message::Response { id, ok: false, result: None, error: Some(e) }
+                    Message::failed(id, e)
                 } else {
                     let subs = &mut self.conns.get_mut(&conn).expect("sender exists").subs;
                     if !subs.contains(topic) {
@@ -211,7 +236,7 @@ impl Router {
                 self.conns.get_mut(&conn).expect("sender exists").subs.retain(|t| *t != topic);
                 out.push(Action::Deliver { to: vec![conn], msg: Message::ok(id, Value::Null) });
             }
-            Message::Publish { topic, data, .. } => {
+            Message::Publish { topic, data, fds, .. } => {
                 // A publish has no id to answer with, so a bad one is only logged.
                 if !bus::valid_topic(&topic) || topic.starts_with("bus.") {
                     log::warn!(
@@ -219,7 +244,7 @@ impl Router {
                     );
                     return;
                 }
-                let msg = Message::Publish { topic, data, from: Some(sender.clone()) };
+                let msg = Message::Publish { topic, data, fds, from: Some(sender.clone()) };
                 if let Err(e) = self.policy.check(&sender, &msg) {
                     log::warn!("bus: dropped publish from {sender:?}: {}", e.message);
                     return;
@@ -230,6 +255,26 @@ impl Router {
                     out.push(Action::Deliver { to, msg });
                 }
             }
+        }
+    }
+
+    /// Check an `adopt` request: only session may hand over connections, with
+    /// exactly one descriptor, as `{"trust": "system"}` or `{"app": "<app id>"}`.
+    fn adopt(&self, conn: ConnId, params: &Value, fds: u32) -> Result<Trust, BusError> {
+        let refuse = |code: &str, message: &str| BusError { code: code.into(), message: message.into() };
+        if self.conns.get(&conn).map(|c| &c.trust) != Some(&Trust::Session) {
+            return Err(refuse(code::PERMISSION_DENIED, "only session may hand over connections"));
+        }
+        if fds != 1 {
+            return Err(refuse(code::BAD_REQUEST, "adopt takes exactly one descriptor"));
+        }
+        match (params.get("app").and_then(Value::as_str), params.get("trust").and_then(Value::as_str)) {
+            (Some(app), None) if valid_app_id(app) => Ok(Trust::App { app: app.into() }),
+            (None, Some("system")) => Ok(Trust::System),
+            _ => Err(refuse(
+                code::BAD_REQUEST,
+                r#"adopt needs {"app": "<reverse-DNS id>"} or {"trust": "system"}"#,
+            )),
         }
     }
 
@@ -281,7 +326,7 @@ impl Router {
     }
 
     fn trusted(&self, conn: ConnId) -> bool {
-        self.conns.get(&conn).is_some_and(|c| c.trust == Trust::System)
+        self.conns.get(&conn).is_some_and(|c| matches!(c.trust, Trust::System | Trust::Session))
     }
 
     /// Connections with a subscription matching `topic`, each once.
@@ -314,6 +359,7 @@ impl Router {
             msg: Message::Publish {
                 topic: TAP_TOPIC.into(),
                 data,
+                fds: 0,
                 from: Some(Sender::Service(BROKER.into())),
             },
         });
@@ -367,6 +413,13 @@ impl Router {
     }
 }
 
+/// App ids are reverse-DNS names such as `org.idealos.mail`: at least two
+/// dot-separated segments of letters, digits and `-`.
+fn valid_app_id(id: &str) -> bool {
+    id.split('.').count() >= 2
+        && id.split('.').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
 /// Service names: non-empty, lowercase letters, digits, `-` and `.`, and not the
 /// broker's own name.
 fn valid_name(name: &str) -> bool {
@@ -390,7 +443,7 @@ mod tests {
         }
 
         fn open(&mut self, conn: ConnId, trust: Trust) {
-            assert!(self.run(Event::Opened { conn, trust }).is_empty());
+            assert!(self.run(Event::Opened { conn, trust, adopted_for: None }).is_empty());
         }
 
         fn run(&mut self, event: Event) -> Vec<Action> {
@@ -412,6 +465,7 @@ mod tests {
                     method: method.into(),
                     params,
                     timeout_ms: None,
+                    fds: 0,
                     from: None,
                 },
             )
@@ -497,6 +551,7 @@ mod tests {
             method: "drop".into(),
             params: Value::Null,
             timeout_ms: None,
+            fds: 0,
             from: Some(Sender::Service("permd".into())),
         };
         let out = h.send(2, forged);
@@ -545,6 +600,7 @@ mod tests {
                 method: "x".into(),
                 params: Value::Null,
                 timeout_ms,
+                fds: 0,
                 from: None,
             };
             match &h.send(2, msg)[..] {
@@ -650,8 +706,7 @@ mod tests {
         sub(&mut h, 3, "db.*"); // two matching patterns, still one delivery
         sub(&mut h, 4, "ui.event");
 
-        let out =
-            h.send(1, Message::Publish { topic: "db.live.7".into(), data: json!({"added": []}), from: None });
+        let out = h.send(1, Message::publish("db.live.7", json!({"added": []})));
         assert_eq!(
             out,
             [Action::Deliver {
@@ -659,18 +714,23 @@ mod tests {
                 msg: Message::Publish {
                     topic: "db.live.7".into(),
                     data: json!({"added": []}),
+                    fds: 0,
                     from: Some(Sender::Conn(1)),
                 },
             }]
         );
         assert!(
-            h.send(1, Message::Publish { topic: "nobody.listens".into(), data: Value::Null, from: None })
-                .is_empty()
+            h.send(
+                1,
+                Message::Publish { topic: "nobody.listens".into(), data: Value::Null, fds: 0, from: None }
+            )
+            .is_empty()
         );
 
         h.send(3, Message::Unsubscribe { id: 2, topic: "db.live.*".into() });
         h.send(3, Message::Unsubscribe { id: 3, topic: "db.*".into() });
-        let out = h.send(1, Message::Publish { topic: "db.live.7".into(), data: Value::Null, from: None });
+        let out =
+            h.send(1, Message::Publish { topic: "db.live.7".into(), data: Value::Null, fds: 0, from: None });
         assert!(matches!(&out[..], [Action::Deliver { to, .. }] if to == &[2]));
     }
 
@@ -687,7 +747,8 @@ mod tests {
         h.send(1, Message::Subscribe { id: 2, topic: TAP_TOPIC.into() });
         h.send(1, Message::Subscribe { id: 3, topic: "a.*".into() });
         for topic in ["bus.tap", "a.*"] {
-            let out = h.send(2, Message::Publish { topic: topic.into(), data: Value::Null, from: None });
+            let out =
+                h.send(2, Message::Publish { topic: topic.into(), data: Value::Null, fds: 0, from: None });
             // Only the tap's own trace of the attempt comes out.
             assert!(out.iter().all(|a| matches!(a, Action::Deliver { msg: Message::Publish { topic, .. }, .. } if topic == TAP_TOPIC)));
         }
@@ -715,6 +776,74 @@ mod tests {
         assert_eq!(data["bus_id"], json!(bus_id));
     }
 
+    /// Descriptor counts survive routing, so the shell knows which outgoing
+    /// message the descriptors that came in belong to.
+    #[test]
+    fn descriptor_counts_follow_the_message() {
+        let mut h = Harness::new();
+        h.open(1, Trust::System);
+        h.open(2, Trust::System);
+        h.claim(1, "blobs");
+        let out = h.send(2, Message::request(1, "blobs", "put", Value::Null).with_fds(2));
+        let [Action::Deliver { msg: forwarded, .. }] = &out[..] else { panic!("{out:?}") };
+        assert_eq!(forwarded.fds(), 2);
+        let Message::Request { id: bus_id, .. } = forwarded else { panic!() };
+        let out = h.send(1, Message::ok(*bus_id, Value::Null).with_fds(1));
+        let [Action::Deliver { msg: answer, .. }] = &out[..] else { panic!("{out:?}") };
+        assert_eq!(answer.fds(), 1);
+
+        h.send(2, Message::Subscribe { id: 2, topic: "frames".into() });
+        let out = h.send(1, Message::publish("frames", Value::Null).with_fds(1));
+        let [Action::Deliver { msg: published, .. }] = &out[..] else { panic!("{out:?}") };
+        assert_eq!(published.fds(), 1);
+    }
+
+    fn adopt(h: &mut Harness, conn: ConnId, params: Value, fds: u32) -> Vec<Action> {
+        h.send(conn, Message::request(7, BROKER, "adopt", params).with_fds(fds))
+    }
+
+    #[test]
+    fn session_hands_over_connections_with_their_trust() {
+        let mut h = Harness::new();
+        h.open(1, Trust::Session);
+        let out = adopt(&mut h, 1, json!({"app": "org.example.notes"}), 1);
+        assert_eq!(out, [Action::Adopt { requester: 1, id: 7, trust: app("org.example.notes") }]);
+        let out = adopt(&mut h, 1, json!({"trust": "system"}), 1);
+        assert_eq!(out, [Action::Adopt { requester: 1, id: 7, trust: Trust::System }]);
+
+        // The shell starts the connection and reports it; session gets its number.
+        let out =
+            h.run(Event::Opened { conn: 5, trust: app("org.example.notes"), adopted_for: Some((1, 7)) });
+        assert_eq!(out, [deliver(1, Message::ok(7, json!({"conn": 5})))]);
+        let out = h.request(5, 1, BROKER, "hello", Value::Null);
+        let sender = json!({"app": {"app": "org.example.notes", "conn": 5}});
+        assert_eq!(out, [deliver(5, Message::ok(1, json!({"conn": 5, "sender": sender})))]);
+        // Session itself is trusted like a system connection.
+        h.claim(1, "session");
+    }
+
+    #[test]
+    fn only_session_may_adopt_and_only_well_formed_requests() {
+        let mut h = Harness::new();
+        h.open(1, Trust::Session);
+        h.open(2, Trust::System);
+        h.open(3, app("org.example.app"));
+        let refused = |out: Vec<Action>| error_code(&out[0]).to_owned();
+        assert_eq!(refused(adopt(&mut h, 2, json!({"trust": "system"}), 1)), code::PERMISSION_DENIED);
+        assert_eq!(refused(adopt(&mut h, 3, json!({"trust": "system"}), 1)), code::PERMISSION_DENIED);
+        assert_eq!(refused(adopt(&mut h, 1, json!({"trust": "system"}), 0)), code::BAD_REQUEST);
+        assert_eq!(refused(adopt(&mut h, 1, json!({"trust": "system"}), 2)), code::BAD_REQUEST);
+        for bad in [
+            json!({}),
+            json!({"trust": "root"}),
+            json!({"app": "notes"}),
+            json!({"app": "a..b"}),
+            json!({"app": "org.x", "trust": "system"}),
+        ] {
+            assert_eq!(refused(adopt(&mut h, 1, bad.clone(), 1)), code::BAD_REQUEST, "{bad}");
+        }
+    }
+
     /// A policy that refuses everything shows where the hook sits.
     #[test]
     fn the_policy_hook_sees_requests_publishes_and_subscribes() {
@@ -734,6 +863,9 @@ mod tests {
         assert_eq!(error_code(&out[0]), code::PERMISSION_DENIED);
         let out = h.send(2, Message::Subscribe { id: 2, topic: "x".into() });
         assert_eq!(error_code(&out[0]), code::PERMISSION_DENIED);
-        assert!(h.send(2, Message::Publish { topic: "x".into(), data: Value::Null, from: None }).is_empty());
+        assert!(
+            h.send(2, Message::Publish { topic: "x".into(), data: Value::Null, fds: 0, from: None })
+                .is_empty()
+        );
     }
 }

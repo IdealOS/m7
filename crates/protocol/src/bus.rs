@@ -12,7 +12,7 @@ use serde_json::Value;
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 
 /// The broker's own name: requests sent `to` it are handled by `busd` itself
-/// (`hello`, `claim`, `release`, `list`).
+/// (`hello`, `claim`, `release`, `list`, and `adopt` from session).
 pub const BROKER: &str = "bus";
 
 /// Topic the broker publishes a trace of every message it receives on. Only
@@ -71,6 +71,9 @@ pub enum Message {
         /// Overrides [`DEFAULT_TIMEOUT_MS`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        /// How many file descriptors travel with this message (see [`crate::unix`]).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        fds: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Sender>,
     },
@@ -81,6 +84,8 @@ pub enum Message {
         result: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<BusError>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        fds: u32,
     },
     /// The requester no longer wants the answer to request `id`. The broker
     /// forwards it to the service and drops the response if one still comes.
@@ -101,23 +106,64 @@ pub enum Message {
         topic: String,
         #[serde(default)]
         data: Value,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        fds: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Sender>,
     },
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 impl Message {
     pub fn ok(id: u64, result: Value) -> Message {
-        Message::Response { id, ok: true, result: Some(result), error: None }
+        Message::Response { id, ok: true, result: Some(result), error: None, fds: 0 }
     }
 
     pub fn err(id: u64, code: &str, message: impl Into<String>) -> Message {
-        Message::Response {
+        Message::failed(id, BusError { code: code.into(), message: message.into() })
+    }
+
+    pub fn failed(id: u64, error: BusError) -> Message {
+        Message::Response { id, ok: false, result: None, error: Some(error), fds: 0 }
+    }
+
+    pub fn request(id: u64, to: impl Into<String>, method: impl Into<String>, params: Value) -> Message {
+        Message::Request {
             id,
-            ok: false,
-            result: None,
-            error: Some(BusError { code: code.into(), message: message.into() }),
+            to: to.into(),
+            method: method.into(),
+            params,
+            timeout_ms: None,
+            fds: 0,
+            from: None,
         }
+    }
+
+    pub fn publish(topic: impl Into<String>, data: Value) -> Message {
+        Message::Publish { topic: topic.into(), data, fds: 0, from: None }
+    }
+
+    /// How many file descriptors travel with this message.
+    pub fn fds(&self) -> u32 {
+        match self {
+            Message::Request { fds, .. } | Message::Response { fds, .. } | Message::Publish { fds, .. } => {
+                *fds
+            }
+            _ => 0,
+        }
+    }
+
+    /// Set the descriptor count, where the message kind can carry descriptors.
+    pub fn with_fds(mut self, n: u32) -> Message {
+        if let Message::Request { fds, .. } | Message::Response { fds, .. } | Message::Publish { fds, .. } =
+            &mut self
+        {
+            *fds = n;
+        }
+        self
     }
 }
 
@@ -241,6 +287,11 @@ mod tests {
         assert!(matches!(msg, Message::Request { timeout_ms: Some(500), .. }));
         let cancel: Message = serde_json::from_str(r#"{"kind": "cancel", "id": 7}"#).unwrap();
         assert_eq!(cancel, Message::Cancel { id: 7 });
+        let with_fds: Message =
+            serde_json::from_str(r#"{"kind": "publish", "topic": "t", "fds": 2}"#).unwrap();
+        assert_eq!(with_fds.fds(), 2);
+        // A zero count stays off the wire, so the plan's examples are unchanged.
+        assert!(!serde_json::to_string(&Message::publish("t", Value::Null)).unwrap().contains("fds"));
         let conn = serde_json::to_value(Sender::Conn(3)).unwrap();
         assert_eq!(conn, serde_json::json!({"conn": 3}));
     }

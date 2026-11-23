@@ -28,6 +28,8 @@ export const GUEST_SCRIPT = [
   "echo SMOKE shader-cache-files $(find /data/cache -type f 2>/dev/null | wc -l)",
   // session starts busd; a service and a client talk through it.
   "echo SMOKE bus-socket $(ls /run/idealos/bus.sock 2>&1)",
+  // busd inherited session's connection, and session claimed its name on it.
+  "echo SMOKE bus-session $(osctl bus list 2>&1 | grep -c '^session ')",
   "osctl bus echo smoke-echo >/dev/null 2>&1 & sleep 0.5",
   `echo SMOKE bus-call $(osctl bus call smoke-echo ping '{"n":1}' 2>&1)`,
   "echo SMOKE bus-bench $(osctl bus bench --seconds 1 2>&1 | grep ^BENCH)",
@@ -109,6 +111,7 @@ export function evaluate(log: string): Check[] {
       ok: /busd: listening on \/run\/idealos\/bus\.sock/.test(log) && f.get("bus-socket") === "/run/idealos/bus.sock",
       detail: f.get("bus-socket") ?? "not reported",
     },
+    fact("bus-session", "1", "session has its own connection to busd"),
     fact("bus-call", '{"n":1}', "a request went through the bus and back"),
     {
       name: "bus benchmark ran",

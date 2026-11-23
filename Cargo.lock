@@ -266,6 +266,7 @@ checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 name = "bus-client"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "protocol",
  "serde_json",
@@ -2298,6 +2299,7 @@ version = "0.1.0"
 dependencies = [
  "bus-client",
  "busd",
+ "libc",
  "protocol",
  "serde_json",
  "tokio",
@@ -2493,6 +2495,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
 ]
@@ -2947,6 +2950,8 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "protocol",
+ "serde_json",
 ]
 
 [[package]]

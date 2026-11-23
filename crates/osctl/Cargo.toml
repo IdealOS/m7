@@ -13,3 +13,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 busd = { path = "../busd" }
+libc = "0.2"

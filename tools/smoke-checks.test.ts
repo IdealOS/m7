@@ -31,6 +31,7 @@ const GOOD = [
   "SMOKE console-keyboard The keyboard is in off mode",
   "SMOKE shader-cache-files 3",
   "SMOKE bus-socket /run/idealos/bus.sock",
+  "SMOKE bus-session 1",
   'SMOKE bus-call {"n":1}',
   "SMOKE bus-bench BENCH size=64 rtt_p50_us=180.2 rtt_p99_us=410.0 requests_per_s=21000 publishes_per_s=90000",
   "SMOKE end",
@@ -246,10 +247,12 @@ test("a missing broker is reported", () => {
   const log = GOOD.replace("[2026-11-21T10:00:00Z INFO  busd] busd: listening on /run/idealos/bus.sock\n", "")
     .replace("SMOKE bus-socket /run/idealos/bus.sock", "SMOKE bus-socket ls: /run/idealos/bus.sock: No such file or directory")
     .replace('SMOKE bus-call {"n":1}', "SMOKE bus-call osctl: connect to the bus at /run/idealos/bus.sock: No such file or directory")
-    .replace(/SMOKE bus-bench .*/, "SMOKE bus-bench ");
+    .replace(/SMOKE bus-bench .*/, "SMOKE bus-bench ")
+    .replace("SMOKE bus-session 1", "SMOKE bus-session 0");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, [
     "session started busd on /run/idealos/bus.sock",
+    "session has its own connection to busd",
     "a request went through the bus and back",
     "bus benchmark ran",
   ]);

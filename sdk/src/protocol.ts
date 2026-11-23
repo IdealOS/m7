@@ -26,7 +26,8 @@ export interface Commit {
  * service before it claims a name). */
 export type Sender = { service: string } | { app: { app: string; conn: number } } | { conn: number };
 
-/** The broker's own name: `hello`, `claim`, `release` and `list` go to it. */
+/** The broker's own name: `hello`, `claim`, `release` and `list` go to it, and
+ * `adopt`, with which session hands it connections for services and apps. */
 export const BROKER = "bus";
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
@@ -43,9 +44,9 @@ export interface BusError {
 }
 
 export type Message =
-  | { kind: "request"; id: number; to: string; method: string; params?: unknown; timeout_ms?: number; from?: Sender }
-  | { kind: "response"; id: number; ok: boolean; result?: unknown; error?: BusError }
+  | { kind: "request"; id: number; to: string; method: string; params?: unknown; timeout_ms?: number; fds?: number; from?: Sender }
+  | { kind: "response"; id: number; ok: boolean; result?: unknown; error?: BusError; fds?: number }
   | { kind: "cancel"; id: number }
   | { kind: "subscribe"; id: number; topic: string }
   | { kind: "unsubscribe"; id: number; topic: string }
-  | { kind: "publish"; topic: string; data?: unknown; from?: Sender };
+  | { kind: "publish"; topic: string; data?: unknown; fds?: number; from?: Sender };

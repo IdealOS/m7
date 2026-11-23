@@ -14,6 +14,6 @@ vm_run "set -e; cd ~/idealos
 		-p compositor --no-default-features --features kms -p kms-probe -p session \\
 		-p protocol -p busd -p bus-client -p osctl \\
 		--all-targets -- -D warnings
-	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q -p protocol -p busd -p bus-client -p osctl
+	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q -p protocol -p busd -p bus-client -p osctl -p session
 	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q \\
 		-p compositor --no-default-features --features kms --lib backend::kms"

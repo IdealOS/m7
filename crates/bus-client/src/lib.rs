@@ -16,24 +16,35 @@
 //! service) the queue returned by [`Client::take_requests`]. Dropping a request's
 //! future before it finishes sends the broker a `cancel`; dropping a subscription
 //! unsubscribes once no other subscription uses the same pattern.
+//!
+//! Requests, responses and publishes can carry file descriptors (`*_with`
+//! methods); received ones arrive on [`Reply`], [`Incoming::Request`] and
+//! [`Publication`].
+
+pub mod wire;
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use protocol::bus::{self, BROKER, BusError, MAX_FRAME_BYTES, Message, Sender, encode_frame};
+use protocol::bus::{self, BROKER, BusError, Message, Sender, encode_frame};
+use protocol::unix::{MAX_FDS_PER_MESSAGE, MAX_FDS_PER_SEND};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{mpsc, oneshot};
+use wire::{FrameReader, write_with_fds};
 
 /// Frames waiting to be written.
 const OUTGOING_FRAMES: usize = 1024;
+
+/// Set by `session` for a service it gave a bus connection: the descriptor number.
+pub const BUS_FD_ENV: &str = "IDEALOS_BUS_FD";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallError {
@@ -51,6 +62,10 @@ impl CallError {
             CallError::Disconnected => "disconnected",
         }
     }
+
+    fn bad_request(message: impl Into<String>) -> CallError {
+        CallError::Bus(BusError { code: bus::code::BAD_REQUEST.into(), message: message.into() })
+    }
 }
 
 impl fmt::Display for CallError {
@@ -64,19 +79,27 @@ impl fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// A successful answer and the descriptors that came with it.
+#[derive(Debug)]
+pub struct Reply {
+    pub result: Value,
+    pub fds: Vec<OwnedFd>,
+}
+
 /// A message published on a topic this client subscribed to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Publication {
     pub topic: String,
     pub data: Value,
     pub from: Option<Sender>,
+    pub fds: Vec<OwnedFd>,
 }
 
 /// Something addressed to a name this client claimed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum Incoming {
     /// Answer it with [`Client::respond`], using `id`.
-    Request { id: u64, from: Option<Sender>, method: String, params: Value },
+    Request { id: u64, from: Option<Sender>, method: String, params: Value, fds: Vec<OwnedFd> },
     /// The requester gave up on request `id`; any answer will be dropped.
     Cancel { id: u64 },
 }
@@ -88,7 +111,7 @@ struct Sub {
 }
 
 struct State {
-    pending: HashMap<u64, oneshot::Sender<Result<Value, CallError>>>,
+    pending: HashMap<u64, oneshot::Sender<Result<Reply, CallError>>>,
     subs: Vec<Sub>,
     /// Incoming requests queue here from the start, so none are lost between
     /// `claim` and `take_requests`. `None` once the connection closes.
@@ -98,13 +121,16 @@ struct State {
     closed: bool,
 }
 
+/// An encoded frame and the descriptors to send with it.
+type Outgoing = (Vec<u8>, Vec<OwnedFd>);
+
 /// What clients, subscriptions and in-flight requests share. Only they hold it,
 /// not the background reader, so when the last one is dropped the outgoing queue
 /// closes, the writer shuts down its half of the socket, and the broker sees the
 /// connection end.
 struct Shared {
     state: Arc<Mutex<State>>,
-    out: mpsc::Sender<Vec<u8>>,
+    out: mpsc::Sender<Outgoing>,
     next_id: AtomicU64,
 }
 
@@ -113,7 +139,7 @@ impl Shared {
         // Best effort, for cleanup in Drop: if the queue is full, the broker's
         // timeout ends the request anyway.
         if let Ok(frame) = encode_frame(msg) {
-            let _ = self.out.try_send(frame);
+            let _ = self.out.try_send((frame, Vec::new()));
         }
     }
 }
@@ -124,9 +150,17 @@ pub struct Client {
     shared: Arc<Shared>,
 }
 
+/// Whether this process already took the connection in `IDEALOS_BUS_FD`.
+static TOOK_BUS_FD: AtomicBool = AtomicBool::new(false);
+
 impl Client {
-    /// Connect to the broker at `protocol::bus::default_socket_path()`.
+    /// The connection `session` handed this process (`IDEALOS_BUS_FD`), the first
+    /// time it's asked for; otherwise the broker at
+    /// `protocol::bus::default_socket_path()`.
     pub async fn connect_default() -> io::Result<Client> {
+        if let Some(stream) = take_handed_connection()? {
+            return Ok(Client::from_stream(stream));
+        }
         Client::connect(bus::default_socket_path()).await
     }
 
@@ -152,7 +186,7 @@ impl Client {
         };
         let state = Arc::new(Mutex::new(state));
         tokio::spawn(write_frames(write, frames));
-        tokio::spawn(read_frames(read, state.clone()));
+        tokio::spawn(read_frames(FrameReader::new(read), state.clone()));
         let shared = Arc::new(Shared { state, out, next_id: AtomicU64::new(1) });
         Client { shared }
     }
@@ -161,17 +195,21 @@ impl Client {
         self.shared.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn send(&self, msg: &Message) -> Result<(), CallError> {
-        let frame = encode_frame(msg).map_err(|e| {
-            CallError::Bus(BusError { code: bus::code::BAD_REQUEST.into(), message: e.to_string() })
-        })?;
-        self.shared.out.send(frame).await.map_err(|_| CallError::Disconnected)
+    async fn send(&self, msg: Message, fds: Vec<OwnedFd>) -> Result<(), CallError> {
+        if fds.len() > MAX_FDS_PER_MESSAGE {
+            return Err(CallError::bad_request(format!(
+                "at most {MAX_FDS_PER_MESSAGE} descriptors per message"
+            )));
+        }
+        let msg = msg.with_fds(fds.len() as u32);
+        let frame = encode_frame(&msg).map_err(|e| CallError::bad_request(e.to_string()))?;
+        self.shared.out.send((frame, fds)).await.map_err(|_| CallError::Disconnected)
     }
 
     /// Send a request and wait for its answer, for up to the broker's default
     /// timeout.
     pub async fn request(&self, to: &str, method: &str, params: Value) -> Result<Value, CallError> {
-        self.call(to, method, params, None).await
+        Ok(self.request_with(to, method, params, Vec::new(), None).await?.result)
     }
 
     /// Like [`Client::request`], but the broker answers `timeout` after `timeout`.
@@ -182,16 +220,18 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {
-        self.call(to, method, params, Some(timeout.as_millis().min(u64::MAX as u128) as u64)).await
+        Ok(self.request_with(to, method, params, Vec::new(), Some(timeout)).await?.result)
     }
 
-    async fn call(
+    /// A request carrying descriptors, whose answer may carry some back.
+    pub async fn request_with(
         &self,
         to: &str,
         method: &str,
         params: Value,
-        timeout_ms: Option<u64>,
-    ) -> Result<Value, CallError> {
+        fds: Vec<OwnedFd>,
+        timeout: Option<Duration>,
+    ) -> Result<Reply, CallError> {
         let id = self.next_id();
         let (tx, rx) = oneshot::channel();
         {
@@ -203,9 +243,17 @@ impl Client {
         }
         // From here on, being dropped means the caller gave up: tell the broker.
         let guard = CancelOnDrop { shared: &self.shared, id, armed: true };
-        let msg =
-            Message::Request { id, to: to.into(), method: method.into(), params, timeout_ms, from: None };
-        self.send(&msg).await?;
+        let timeout_ms = timeout.map(|t| t.as_millis().min(u64::MAX as u128) as u64);
+        let msg = Message::Request {
+            id,
+            to: to.into(),
+            method: method.into(),
+            params,
+            timeout_ms,
+            fds: 0,
+            from: None,
+        };
+        self.send(msg, fds).await?;
         let result = rx.await.unwrap_or(Err(CallError::Disconnected));
         guard.disarm();
         result
@@ -215,9 +263,8 @@ impl Client {
     pub async fn hello(&self) -> Result<(u64, Sender), CallError> {
         let v = self.request(BROKER, "hello", Value::Null).await?;
         let conn = v["conn"].as_u64().unwrap_or_default();
-        let sender = serde_json::from_value(v["sender"].clone()).map_err(|e| {
-            CallError::Bus(BusError { code: bus::code::BAD_REQUEST.into(), message: e.to_string() })
-        })?;
+        let sender =
+            serde_json::from_value(v["sender"].clone()).map_err(|e| CallError::bad_request(e.to_string()))?;
         Ok((conn, sender))
     }
 
@@ -235,11 +282,20 @@ impl Client {
 
     /// Answer request `id` from [`Client::take_requests`].
     pub async fn respond(&self, id: u64, result: Result<Value, BusError>) -> Result<(), CallError> {
-        let msg = match result {
-            Ok(v) => Message::ok(id, v),
-            Err(e) => Message::Response { id, ok: false, result: None, error: Some(e) },
-        };
-        self.send(&msg).await
+        self.respond_with(id, result, Vec::new()).await
+    }
+
+    /// Answer request `id` with descriptors (only sent with a successful answer).
+    pub async fn respond_with(
+        &self,
+        id: u64,
+        result: Result<Value, BusError>,
+        fds: Vec<OwnedFd>,
+    ) -> Result<(), CallError> {
+        match result {
+            Ok(v) => self.send(Message::ok(id, v), fds).await,
+            Err(e) => self.send(Message::failed(id, e), Vec::new()).await,
+        }
     }
 
     /// Subscribe to a topic or `prefix.*` pattern. The broker confirms before this
@@ -258,15 +314,51 @@ impl Client {
             let id = self.next_id();
             let (done, answer) = oneshot::channel();
             self.shared.state.lock().unwrap().pending.insert(id, done);
-            self.send(&Message::Subscribe { id, topic: pattern.into() }).await?;
+            self.send(Message::Subscribe { id, topic: pattern.into() }, Vec::new()).await?;
             answer.await.unwrap_or(Err(CallError::Disconnected))?;
         }
         Ok(sub)
     }
 
     pub async fn publish(&self, topic: &str, data: Value) -> Result<(), CallError> {
-        self.send(&Message::Publish { topic: topic.into(), data, from: None }).await
+        self.publish_with(topic, data, Vec::new()).await
     }
+
+    /// Publish with descriptors; each subscriber gets its own copies.
+    pub async fn publish_with(&self, topic: &str, data: Value, fds: Vec<OwnedFd>) -> Result<(), CallError> {
+        self.send(Message::publish(topic, data), fds).await
+    }
+}
+
+/// The connection in `IDEALOS_BUS_FD`, the first time this is called in a process.
+/// The descriptor is checked to be a socket, so a stale number inherited by a
+/// grandchild (which `session` never meant to give one) isn't used by mistake.
+fn take_handed_connection() -> io::Result<Option<UnixStream>> {
+    let Some(text) = std::env::var_os(BUS_FD_ENV) else { return Ok(None) };
+    if TOOK_BUS_FD.swap(true, Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let fd: RawFd = text
+        .to_str()
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| io::Error::other(format!("{BUS_FD_ENV} is not a descriptor number: {text:?}")))?;
+    // SAFETY: fstat with a zeroed struct; any descriptor number is safe to ask about.
+    let is_socket = unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK
+    };
+    if !is_socket {
+        return Err(io::Error::other(format!("{BUS_FD_ENV}={fd} is not an open socket")));
+    }
+    // SAFETY: session gave this process the descriptor for exactly this use, and
+    // TOOK_BUS_FD makes sure it's only wrapped once. Mark it close-on-exec again so
+    // programs this process starts don't inherit the connection.
+    let stream = unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        std::os::unix::net::UnixStream::from(OwnedFd::from_raw_fd(fd))
+    };
+    stream.set_nonblocking(true)?;
+    Ok(Some(UnixStream::from_std(stream)?))
 }
 
 /// Sends a cancel for request `id` if dropped before [`CancelOnDrop::disarm`].
@@ -327,40 +419,44 @@ impl Drop for Subscription {
     }
 }
 
-async fn write_frames(mut write: OwnedWriteHalf, mut frames: mpsc::Receiver<Vec<u8>>) {
-    let mut batch = Vec::new();
-    while let Some(frame) = frames.recv().await {
-        batch.clear();
-        batch.extend_from_slice(&frame);
-        while let Ok(more) = frames.try_recv() {
-            batch.extend_from_slice(&more);
+async fn write_frames(write: OwnedWriteHalf, mut frames: mpsc::Receiver<Outgoing>) {
+    let mut bytes = Vec::new();
+    let mut fds: Vec<OwnedFd> = Vec::new();
+    let mut next = frames.recv().await;
+    while let Some((frame, frame_fds)) = next.take() {
+        // Write everything that's queued in one go, as long as its descriptors fit
+        // in one send.
+        bytes.clear();
+        fds.clear();
+        bytes.extend_from_slice(&frame);
+        fds.extend(frame_fds);
+        while let Ok((more, more_fds)) = frames.try_recv() {
+            if fds.len() + more_fds.len() > MAX_FDS_PER_SEND {
+                next = Some((more, more_fds));
+                break;
+            }
+            bytes.extend_from_slice(&more);
+            fds.extend(more_fds);
         }
-        if write.write_all(&batch).await.is_err() {
+        let borrowed: Vec<BorrowedFd> = fds.iter().map(|f| f.as_fd()).collect();
+        if write_with_fds(&write, &bytes, &borrowed).await.is_err() {
             return;
+        }
+        if next.is_none() {
+            next = frames.recv().await;
         }
     }
 }
 
-async fn read_frames(read: OwnedReadHalf, state: Arc<Mutex<State>>) {
-    let mut read = BufReader::new(read);
-    let mut body = Vec::new();
+async fn read_frames(mut reader: FrameReader, state: Arc<Mutex<State>>) {
     loop {
-        let mut header = [0u8; 4];
-        if read.read_exact(&mut header).await.is_err() {
-            break;
-        }
-        let len = u32::from_be_bytes(header);
-        if len > MAX_FRAME_BYTES {
-            log::warn!("bus-client: frame of {len} bytes from the broker; disconnecting");
-            break;
-        }
-        body.resize(len as usize, 0);
-        if read.read_exact(&mut body).await.is_err() {
-            break;
-        }
-        match serde_json::from_slice::<Message>(&body) {
-            Ok(msg) => dispatch(&mut state.lock().unwrap(), msg),
-            Err(e) => log::warn!("bus-client: ignoring a message it can't parse: {e}"),
+        match reader.next().await {
+            Ok(Some((msg, fds))) => dispatch(&mut state.lock().unwrap(), msg, fds),
+            Ok(None) => break,
+            Err(e) => {
+                log::warn!("bus-client: disconnecting: {e}");
+                break;
+            }
         }
     }
     // Fail everything still waiting, and end every stream.
@@ -373,12 +469,12 @@ async fn read_frames(read: OwnedReadHalf, state: Arc<Mutex<State>>) {
     state.requests = None;
 }
 
-fn dispatch(state: &mut State, msg: Message) {
+fn dispatch(state: &mut State, msg: Message, fds: Vec<OwnedFd>) {
     match msg {
-        Message::Response { id, ok, result, error } => {
+        Message::Response { id, ok, result, error, .. } => {
             if let Some(waiter) = state.pending.remove(&id) {
                 let answer = if ok {
-                    Ok(result.unwrap_or(Value::Null))
+                    Ok(Reply { result: result.unwrap_or(Value::Null), fds })
                 } else {
                     Err(CallError::Bus(error.unwrap_or_else(|| BusError {
                         code: "unknown".into(),
@@ -388,15 +484,21 @@ fn dispatch(state: &mut State, msg: Message) {
                 let _ = waiter.send(answer);
             }
         }
-        Message::Publish { topic, data, from } => {
-            for sub in state.subs.iter().filter(|s| bus::topic_matches(&s.pattern, &topic)) {
-                let _ =
-                    sub.tx.send(Publication { topic: topic.clone(), data: data.clone(), from: from.clone() });
+        Message::Publish { topic, data, from, .. } => {
+            let matching: Vec<&Sub> =
+                state.subs.iter().filter(|s| bus::topic_matches(&s.pattern, &topic)).collect();
+            let Some((last, rest)) = matching.split_last() else { return };
+            // Every subscription but the last gets duplicates of the descriptors.
+            for sub in rest {
+                let copies = fds.iter().filter_map(|f| f.try_clone().ok()).collect();
+                let p =
+                    Publication { topic: topic.clone(), data: data.clone(), from: from.clone(), fds: copies };
+                let _ = sub.tx.send(p);
             }
+            let _ = last.tx.send(Publication { topic, data, from, fds });
         }
         Message::Request { id, method, params, from, .. } => {
-            let incoming = Incoming::Request { id, from, method, params };
-            send_incoming(state, incoming);
+            send_incoming(state, Incoming::Request { id, from, method, params, fds });
         }
         Message::Cancel { id } => send_incoming(state, Incoming::Cancel { id }),
         Message::Subscribe { .. } | Message::Unsubscribe { .. } => {
