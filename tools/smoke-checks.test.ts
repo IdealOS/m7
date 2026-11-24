@@ -43,6 +43,7 @@ const GOOD = [
   "SMOKE db-blob smoke-blob 1",
   "SMOKE db-schema 1",
   "SMOKE apps-running 2",
+  "SMOKE app-gallery installed",
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.notes", conn: 10 }: "Notes"',
   "SMOKE end",

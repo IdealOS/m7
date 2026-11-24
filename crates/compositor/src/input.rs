@@ -29,7 +29,79 @@ pub enum Input {
     Button {
         pressed: bool,
     },
+    /// A key press (or a repeat). Releases aren't reported.
+    Key {
+        key: Key,
+        mods: Mods,
+    },
+    /// Scrolling, in pixels: positive `dy` moves content up (a wheel turned
+    /// toward you), as on every desktop.
+    Scroll {
+        dx: f32,
+        dy: f32,
+    },
     Shortcut(Shortcut),
+}
+
+/// A key, as text editing and shortcuts need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Tab,
+    Enter,
+    Escape,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    /// A key that types this character, with Shift applied (`A`, `!`, ` `).
+    Char(char),
+}
+
+/// Modifier keys held during a key press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// Super or Command.
+    pub logo: bool,
+}
+
+impl Mods {
+    /// The editing-shortcut modifier: Command on a Mac keyboard, Ctrl elsewhere.
+    pub fn primary(&self) -> bool {
+        self.ctrl || self.logo
+    }
+}
+
+/// The [`Key`] for an XKB keysym, given the character it types (`utf32`, 0 if
+/// none). Used by the KMS backend; here so it's tested everywhere.
+pub fn key_from_keysym(keysym: u32, utf32: u32) -> Option<Key> {
+    Some(match keysym {
+        0xff09 | 0xfe20 => Key::Tab, // Tab, ISO_Left_Tab (Shift+Tab)
+        0xff0d | 0xff8d => Key::Enter,
+        0xff1b => Key::Escape,
+        0xff08 => Key::Backspace,
+        0xffff => Key::Delete,
+        0xff51 => Key::Left,
+        0xff52 => Key::Up,
+        0xff53 => Key::Right,
+        0xff54 => Key::Down,
+        0xff50 => Key::Home,
+        0xff57 => Key::End,
+        0xff55 => Key::PageUp,
+        0xff56 => Key::PageDown,
+        _ => match char::from_u32(utf32) {
+            Some(c) if !c.is_control() => Key::Char(c),
+            _ => return None,
+        },
+    })
 }
 
 /// Keyboard shortcuts the compositor handles itself, before any app sees the key.
@@ -95,6 +167,8 @@ impl Seat {
                 Effect::default()
             }
             Input::Button { pressed: false } => Effect { dropped: wm.pointer_up(), ..Effect::default() },
+            // The desktop handles keys and scrolling before the seat sees input.
+            Input::Key { .. } | Input::Scroll { .. } => Effect::default(),
             Input::Shortcut(Shortcut::NextWindow) => {
                 Effect { raised: wm.raise_next(scene), ..Effect::default() }
             }
@@ -190,6 +264,18 @@ mod tests {
         }
         assert_eq!(raised, start, "each press raises the bottom-most window");
         assert_eq!(windows(&scene), start, "a full cycle restores the stacking order");
+    }
+
+    #[test]
+    fn keysyms_map_to_keys() {
+        assert_eq!(key_from_keysym(0xff09, 0), Some(Key::Tab));
+        assert_eq!(key_from_keysym(0xfe20, 0), Some(Key::Tab));
+        assert_eq!(key_from_keysym(0xff51, 0), Some(Key::Left));
+        assert_eq!(key_from_keysym('a' as u32, 'a' as u32), Some(Key::Char('a')));
+        assert_eq!(key_from_keysym('A' as u32, 'A' as u32), Some(Key::Char('A')));
+        assert_eq!(key_from_keysym(0x20ac, 0x20ac), Some(Key::Char('€')));
+        assert_eq!(key_from_keysym(0xffe1, 0), None, "Shift alone types nothing");
+        assert!(Mods { logo: true, ..Mods::default() }.primary());
     }
 
     #[test]

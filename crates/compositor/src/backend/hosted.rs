@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -16,7 +16,7 @@ use crate::backend::Options;
 use crate::bus::{self, Bridge};
 use crate::demo;
 use crate::desktop::Desktop;
-use crate::input::{self, Input};
+use crate::input::{self, Input, Mods};
 use crate::render::Renderer;
 use crate::scene::Rgba;
 use crate::stats::FrameTimer;
@@ -113,7 +113,7 @@ impl App {
         let started = Instant::now();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let list = self.desktop.scene.draw_list();
+        let list = self.desktop.draw_list();
         let stats = gpu.renderer.render(
             &gpu.device,
             &gpu.queue,
@@ -167,7 +167,7 @@ impl ApplicationHandler<Wake> for App {
             gpu.config.format
         );
         self.desktop.scene.apply_all(demo::build(w, h, self.opts.windows));
-        self.desktop.seat.set_bounds(w, h);
+        self.desktop.set_screen(w, h);
         gpu.window.request_redraw();
         self.gpu = Some(gpu);
     }
@@ -182,7 +182,7 @@ impl ApplicationHandler<Wake> for App {
                 gpu.surface.configure(&gpu.device, &gpu.config);
                 let (w, h) = App::logical_size(gpu);
                 self.desktop.scene.apply_all(demo::resize(w, h));
-                self.desktop.seat.set_bounds(w, h);
+                self.desktop.set_screen(w, h);
                 gpu.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -198,13 +198,29 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // Only Tab is a shortcut today. macOS keeps Cmd+Tab for itself, so use Option+Tab.
-                if event.logical_key == Key::Named(NamedKey::Tab)
-                    && let Some(s) =
-                        input::shortcut(input::KEY_TAB, self.modifiers.alt_key(), self.modifiers.super_key())
-                {
-                    self.input(Input::Shortcut(s));
+                // macOS keeps Cmd+Tab for itself, so the window switcher is Option+Tab here.
+                let m = self.modifiers;
+                let mods = Mods {
+                    ctrl: m.control_key(),
+                    alt: m.alt_key(),
+                    shift: m.shift_key(),
+                    logo: m.super_key(),
+                };
+                if let Some(key) = winit_key(&event.logical_key) {
+                    self.input(Input::Key { key, mods });
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some(gpu) = &self.gpu else { return };
+                // Our convention: positive dy moves content up. winit's is the reverse.
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (-x * 48.0, -y * 48.0),
+                    MouseScrollDelta::PixelDelta(p) => {
+                        let scale = gpu.window.scale_factor();
+                        ((-p.x / scale) as f32, (-p.y / scale) as f32)
+                    }
+                };
+                self.input(Input::Scroll { dx, dy });
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -227,10 +243,41 @@ impl ApplicationHandler<Wake> for App {
                 gpu.window.request_redraw();
             }
         }
+        // Coasting scroll views, the window switcher's timeout, the clock.
+        let animating = self.desktop.tick(now);
+        if (animating || self.desktop.scene.is_dirty())
+            && let Some(gpu) = &self.gpu
+        {
+            gpu.window.request_redraw();
+        }
         if !self.opts.continuous {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_hud));
+            event_loop
+                .set_control_flow(ControlFlow::WaitUntil(self.next_hud.min(self.desktop.next_wake(now))));
         }
     }
+}
+
+/// winit's key as ours, if it's one the compositor uses.
+fn winit_key(key: &Key) -> Option<input::Key> {
+    use input::Key as K;
+    Some(match key {
+        Key::Named(NamedKey::Tab) => K::Tab,
+        Key::Named(NamedKey::Enter) => K::Enter,
+        Key::Named(NamedKey::Escape) => K::Escape,
+        Key::Named(NamedKey::Backspace) => K::Backspace,
+        Key::Named(NamedKey::Delete) => K::Delete,
+        Key::Named(NamedKey::ArrowLeft) => K::Left,
+        Key::Named(NamedKey::ArrowRight) => K::Right,
+        Key::Named(NamedKey::ArrowUp) => K::Up,
+        Key::Named(NamedKey::ArrowDown) => K::Down,
+        Key::Named(NamedKey::Home) => K::Home,
+        Key::Named(NamedKey::End) => K::End,
+        Key::Named(NamedKey::PageUp) => K::PageUp,
+        Key::Named(NamedKey::PageDown) => K::PageDown,
+        Key::Named(NamedKey::Space) => K::Char(' '),
+        Key::Character(s) => K::Char(s.chars().next()?),
+        _ => return None,
+    })
 }
 
 async fn init_gpu(window: Arc<Window>, event_loop: &ActiveEventLoop) -> Gpu {

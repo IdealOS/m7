@@ -297,6 +297,24 @@
       ],
       "type": "object"
     },
+    "Clipboard": {
+      "description": "What's on the clipboard: text, and the document it came from, if any.",
+      "properties": {
+        "doc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
     "Commit": {
       "description": "Params of a `compositor.commit` request.",
       "properties": {
@@ -812,18 +830,43 @@
       "type": "object"
     },
     "NodeKind": {
-      "description": "Node types understood by the compositor. Phase 0 renders the primitives\n(`rect`, `text`, `group`); widgets arrive in M4 and M5.",
-      "enum": [
-        "group",
-        "rect",
-        "text",
-        "image",
-        "vstack",
-        "hstack",
-        "label",
-        "button"
-      ],
-      "type": "string"
+      "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`).",
+      "oneOf": [
+        {
+          "enum": [
+            "group",
+            "rect",
+            "text",
+            "image",
+            "vstack",
+            "hstack",
+            "toolbar",
+            "grid",
+            "split",
+            "scroll",
+            "dialog",
+            "label",
+            "button",
+            "checkbox",
+            "toggle",
+            "slider",
+            "select",
+            "text_field",
+            "text_area"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "menu",
+          "description": "A button labelled `label` that opens a menu of `options`; choosing one\nsends a `choose` event with it. Unlike a select, it keeps no value.",
+          "type": "string"
+        },
+        {
+          "const": "vlist",
+          "description": "A virtual list: `count` rows of `row_height`, of which the app creates only\nthe visible ones (it hears which, as `range` events), each with an `index`.",
+          "type": "string"
+        }
+      ]
     },
     "OpenWindowParams": {
       "description": "Params of `open_window`.",
@@ -1234,6 +1277,38 @@
       ],
       "type": "object"
     },
+    "SpliceParams": {
+      "description": "Params of `splice`: edit the text at field `path` (dotted, such as `body` or\n`notes.summary`) of document `id`: at character `at`, delete `delete`\ncharacters, then insert `insert`. The field becomes collaborative text (it reads\nas a plain string everywhere), so concurrent edits merge and each splice is its\nown change in history. Positions count Unicode characters, not bytes.",
+      "properties": {
+        "at": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "delete": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "insert": {
+          "default": "",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "at"
+      ],
+      "type": "object"
+    },
     "SystemTrust": {
       "description": "The one trust level `adopt` names explicitly.",
       "enum": [
@@ -1461,7 +1536,7 @@
           "type": "object"
         },
         {
-          "description": "Something happened to node `node` (an id from the app's commits) that the\napp listens for, such as `click`.",
+          "description": "Something happened to node `node` (an id from the app's commits): `click`\n(a button it listens to), `change` (a widget's new value: a checkbox's or\ntoggle's boolean, a slider's number, a select's option, a text field's text),\n`submit` (Enter in a text field, with its text), `range` (a virtual list's\nvisible rows, as `[first, last]`), `choose` (a menu's chosen option), or\n`cancel` (Escape in a dialog).",
           "properties": {
             "event": {
               "type": "string"
@@ -1474,12 +1549,38 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
-            }
+            },
+            "value": true
           },
           "required": [
             "kind",
             "node",
             "event"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The window's content area changed size (the user resized or maximized it).",
+          "properties": {
+            "height": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "resized",
+              "type": "string"
+            },
+            "width": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "width",
+            "height"
           ],
           "type": "object"
         },

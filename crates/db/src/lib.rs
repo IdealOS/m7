@@ -258,6 +258,41 @@ impl Store {
         Ok(Doc { id: id.into(), doc_type, created, updated, data: loro_json::read(&doc) })
     }
 
+    /// Edit the text at field `path` (dotted keys) of document `id`: at character
+    /// `at`, delete `delete` characters, insert `insert`. The field becomes
+    /// collaborative text. Returns the change set, or 0 if nothing changed.
+    pub fn splice(
+        &mut self,
+        id: &str,
+        path: &str,
+        at: usize,
+        delete: usize,
+        insert: &str,
+        origin: &str,
+    ) -> Result<i64> {
+        let keys: Vec<&str> = path.split('.').collect();
+        if keys.iter().any(|k| k.is_empty()) {
+            return invalid(format!("not a field path: {path:?}"));
+        }
+        let peer = self.peer;
+        let tx = self.conn.transaction()?;
+        let Some((row, doc_type, _)) = live_row(&tx, id)? else {
+            return Err(Error::NotFound(id.into()));
+        };
+        let doc = load(&tx, row, peer)?;
+        let before = Before::of(&doc);
+        loro_json::splice(&doc, &keys, at, delete, insert).map_err(Error::Invalid)?;
+        doc.commit();
+        if doc.oplog_vv() == before.vv {
+            return Ok(0);
+        }
+        let now = now_ms();
+        let set = change_set(&tx, now, origin, None)?;
+        log_change(&tx, row, &doc_type, &doc, &before, set, now)?;
+        tx.commit()?;
+        Ok(set)
+    }
+
     /// The live document `id`.
     pub fn get(&self, id: &str) -> Result<Doc> {
         self.conn

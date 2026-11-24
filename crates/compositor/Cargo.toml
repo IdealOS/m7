@@ -11,16 +11,18 @@ default = ["hosted"]
 hosted = ["dep:winit"]
 # Direct DRM/KMS output and libinput input on the device. Linux only; see
 # backend/kms/mod.rs. Needs libinput, libudev and libxkbcommon to link.
-kms = ["dep:drm", "dep:input", "dep:xkbcommon", "dep:libc"]
+kms = ["dep:drm", "dep:input", "dep:xkbcommon"]
 
 [dependencies]
 protocol.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+libc = "0.2"
 bus-client.workspace = true
 tokio.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true
+taffy.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 png.workspace = true
@@ -32,4 +34,4 @@ winit = { workspace = true, optional = true }
 drm = { version = "0.15", optional = true }
 input = { version = "0.10", optional = true, default-features = false, features = ["udev", "libinput_1_21"] }
 xkbcommon = { version = "0.9", optional = true, default-features = false }
-libc = { version = "0.2", optional = true }
+

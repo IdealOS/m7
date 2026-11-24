@@ -57,6 +57,7 @@ pub const SERVICE: &str = "db";
 /// | `put_blob` | one descriptor | [`BlobInfo`] |
 /// | `get_blob` | [`HashParams`] | [`BlobInfo`] and one descriptor |
 /// | `blob_info` | [`HashParams`] | [`BlobInfo`] |
+/// | `splice`  | [`SpliceParams`] | [`UndoResult`] (the change set) |
 ///
 /// `put_blob` stores the contents of a regular file (or memfd) passed with the
 /// request, and `get_blob` answers with a read-only descriptor for the blob.
@@ -86,6 +87,7 @@ pub mod method {
     pub const PUT_BLOB: &str = "put_blob";
     pub const GET_BLOB: &str = "get_blob";
     pub const BLOB_INFO: &str = "blob_info";
+    pub const SPLICE: &str = "splice";
 }
 
 /// Error codes the `db` service sends, besides the broker's `bad_request`.
@@ -262,6 +264,23 @@ pub struct UndoParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UndoResult {
     pub change_set: i64,
+}
+
+/// Params of `splice`: edit the text at field `path` (dotted, such as `body` or
+/// `notes.summary`) of document `id`: at character `at`, delete `delete`
+/// characters, then insert `insert`. The field becomes collaborative text (it reads
+/// as a plain string everywhere), so concurrent edits merge and each splice is its
+/// own change in history. Positions count Unicode characters, not bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SpliceParams {
+    pub id: String,
+    pub path: String,
+    pub at: u32,
+    #[serde(default)]
+    pub delete: u32,
+    #[serde(default)]
+    pub insert: String,
 }
 
 /// A link out of a document.

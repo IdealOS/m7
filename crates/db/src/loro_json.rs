@@ -114,6 +114,50 @@ fn value_json(v: &LoroValue) -> Value {
 }
 
 /// A document's data as a JSON object.
+/// Edit the text at `path` (map keys) of the document's data: at character `at`,
+/// delete `delete`, insert `insert`. The field becomes a Loro text (a plain string
+/// there is converted first); missing maps along the way are created. Returns a
+/// description of what's wrong if the path or range doesn't fit the document.
+pub fn splice(doc: &LoroDoc, path: &[&str], at: usize, delete: usize, insert: &str) -> Result<(), String> {
+    let fail = |e: loro::LoroError| e.to_string();
+    let (last, parents) = path.split_last().ok_or("an empty path")?;
+    let mut map = data(doc);
+    for key in parents {
+        map = match map.get(key) {
+            Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            None => map.insert_container(key, LoroMap::new()).map_err(fail)?,
+            Some(_) => return Err(format!("{key} isn't an object")),
+        };
+    }
+    let text = match map.get(last) {
+        Some(ValueOrContainer::Container(Container::Text(t))) => t,
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => {
+            let t = map.insert_container(last, loro::LoroText::new()).map_err(fail)?;
+            t.insert(0, s.as_ref()).map_err(fail)?;
+            t
+        }
+        None | Some(ValueOrContainer::Value(LoroValue::Null)) => {
+            map.insert_container(last, loro::LoroText::new()).map_err(fail)?
+        }
+        Some(_) => return Err(format!("{last} isn't text")),
+    };
+    let len = text.len_unicode();
+    // Written so a huge `delete` can't overflow past the check.
+    if at > len || delete > len - at {
+        return Err(format!(
+            "characters {at}..{} are past the end of {last} ({len} long)",
+            at.saturating_add(delete)
+        ));
+    }
+    if delete > 0 {
+        text.delete(at, delete).map_err(fail)?;
+    }
+    if !insert.is_empty() {
+        text.insert(at, insert).map_err(fail)?;
+    }
+    Ok(())
+}
+
 pub fn read(doc: &LoroDoc) -> Map<String, Value> {
     match value_json(&data(doc).get_deep_value()) {
         Value::Object(o) => o,

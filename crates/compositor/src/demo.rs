@@ -94,7 +94,7 @@ fn add_window(b: &mut Builder, i: usize, screen_w: f32, screen_h: f32) {
         id,
         ROOT,
         NodeKind::Group,
-        json!({"window": true, "x": x, "y": y, "w": ww, "h": wh, "clip": true}),
+        json!({"window": true, "x": x, "y": y, "w": ww, "h": wh, "clip": true, "title": format!("{app} — window {}", i + 1)}),
     );
     // Body with a hairline border, then the title bar on top of it.
     b.node(

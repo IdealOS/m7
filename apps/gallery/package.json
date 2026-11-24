@@ -1,0 +1,14 @@
+{
+  "name": "@idealos/app-gallery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": { "id": "org.idealos.gallery", "name": "Widget Gallery", "autostart": false },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

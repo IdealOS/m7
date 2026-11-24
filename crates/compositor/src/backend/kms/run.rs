@@ -85,6 +85,7 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     let background = Rgba::parse(demo::BACKGROUND).expect("valid color");
     let mut desktop = Desktop::new(w as f32, h as f32);
     desktop.scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
+    desktop.set_screen(w as f32, h as f32);
     let arrow = cursor::arrow();
     let mut timer = FrameTimer::default();
     let mut next_hud = Instant::now();
@@ -105,11 +106,15 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
             next_hud = now + Duration::from_secs(1);
         }
 
+        // Coasting scroll views, the window switcher's timeout, the clock; then
+        // layout, which can change what's drawn.
+        desktop.tick(Instant::now());
+        desktop.relayout();
         if desktop.scene.is_dirty() || opts.continuous {
             let started = Instant::now();
             rows.clear();
             let stats =
-                target.render(&desktop.scene.draw_list(), 1.0, background, |r| rows.extend_from_slice(r))?;
+                target.render(&desktop.draw_list(), 1.0, background, |r| rows.extend_from_slice(r))?;
             display.copy_into_back(&rows)?;
             // Render, readback and copy: the CPU-side cost of a frame on this path.
             timer.record(started.elapsed(), stats.quads, stats.texts);
@@ -131,7 +136,8 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         let timeout = if desktop.scene.is_dirty() || opts.continuous {
             Duration::ZERO
         } else {
-            next_hud.saturating_duration_since(Instant::now())
+            let now = Instant::now();
+            next_hud.min(desktop.next_wake(now)).saturating_duration_since(now)
         };
         let flip_fd = display.flip_pending().then(|| display.fd());
         let ready = wait(devices.as_ref().map(Devices::fd), flip_fd, signals.fd(), woken.as_fd(), timeout)?;

@@ -56,6 +56,8 @@ export const GUEST_SCRIPT = [
   `echo SMOKE db-schema $(osctl db create Contact '{}' 2>&1 | grep -c 'name is required')`,
   // session runs the bundled apps (installed at boot by app-host --install).
   `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl app list 2>/dev/null | grep -c running); [ "$n" -ge 2 ] && break; sleep 1; done; echo SMOKE apps-running $n`,
+  // The widget gallery ships too, but waits to be launched from the Apps menu.
+  "echo SMOKE app-gallery $(osctl app list 2>/dev/null | grep org.idealos.gallery | awk '{print $NF}')",
   "echo SMOKE end",
 ];
 
@@ -148,6 +150,7 @@ export function evaluate(log: string): Check[] {
     fact("db-blob", "smoke-blob 1", "a blob went in from a file and came back through a descriptor"),
     fact("db-schema", "1", "the Contact schema refused a contact without a name"),
     fact("apps-running", "2", "session runs the two bundled apps"),
+    fact("app-gallery", "installed", "the widget gallery is installed but not started"),
     {
       name: "the apps opened their windows under their own ids",
       ok: ["org.idealos.counter", "org.idealos.notes"].every((id) =>

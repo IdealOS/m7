@@ -23,6 +23,14 @@ pub fn system() -> FontSystem {
     fonts
 }
 
+/// A font system with only the bundled UI font: what tests use, since loading every
+/// system font takes a while.
+pub fn ui_only() -> FontSystem {
+    let mut db = Database::new();
+    add_ui_font(&mut db);
+    FontSystem::new_with_locale_and_db("en-US".into(), db)
+}
+
 /// Load Inter into `db` and make it what `Family::SansSerif` resolves to.
 fn add_ui_font(db: &mut Database) {
     // A borrowed static slice, so the 880 KB font isn't copied.

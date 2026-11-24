@@ -7,9 +7,11 @@
 //! A commit is checked whole before any of it is applied, and only the connection
 //! that opened a window may commit to it.
 //!
-//! Pointer presses on nodes an app listens to (and on the close button) become
-//! [`WindowEvent`]s for that app; everything else stays with the window manager.
-//! No I/O here: the bus side feeds requests in and sends the replies out.
+//! Pointer presses on nodes an app listens to (and on the close and maximize
+//! buttons) become [`WindowEvent`]s for that app; widgets the desktop drives send
+//! theirs through [`Apps::event`]. Windows can be resized and maximized, which
+//! tells the app its new content size. No I/O here: the bus side feeds requests in
+//! and sends the replies out.
 
 use std::collections::HashMap;
 
@@ -41,6 +43,12 @@ struct Window {
     /// The frame (a root child) and the content area, as scene ids.
     frame: NodeId,
     content: NodeId,
+    /// The frame's own parts, which resizing moves.
+    parts: [NodeId; 5],
+    /// The content area's size.
+    size: (u32, u32),
+    /// Where and how big it was before it was maximized.
+    restore: Option<(f32, f32, u32, u32)>,
     /// The app's node ids to scene ids.
     ids: HashMap<NodeId, NodeId>,
 }
@@ -52,6 +60,8 @@ enum Target {
     Node(u64, NodeId),
     /// A window's close button.
     Close(u64),
+    /// A window's maximize button.
+    Max(u64),
 }
 
 #[derive(Default)]
@@ -67,11 +77,94 @@ pub struct Apps {
     /// Where the next window goes, and the bottom of the current row of windows.
     next_spot: (f32, f32),
     row_bottom: f32,
+    /// Each app node's window and app id, by scene id, for widget events.
+    owners: HashMap<NodeId, (u64, NodeId)>,
+    /// The area maximized windows fill: below the top bar.
+    work: (f32, f32, f32, f32),
+    /// The workspace new windows open on.
+    pub workspace: u32,
 }
 
 impl Apps {
     pub fn new() -> Apps {
-        Apps { next_window: 1, next_node: FIRST_NODE, next_spot: (MARGIN, MARGIN), ..Apps::default() }
+        Apps {
+            next_window: 1,
+            next_node: FIRST_NODE,
+            next_spot: (MARGIN, MARGIN),
+            work: (0.0, 30.0, 1280.0, 770.0),
+            workspace: 1,
+            ..Apps::default()
+        }
+    }
+
+    /// The area maximized windows fill.
+    pub fn set_work_area(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.work = (x, y, w, h);
+    }
+
+    /// The app window whose frame is scene node `frame`.
+    pub fn window_of(&self, frame: NodeId) -> Option<u64> {
+        self.windows.iter().find(|(_, w)| w.frame == frame).map(|(&id, _)| id)
+    }
+
+    /// Window `window`'s frame (a root child).
+    pub fn frame_of(&self, window: u64) -> Option<NodeId> {
+        self.windows.get(&window).map(|w| w.frame)
+    }
+
+    /// An event for the app that owns scene node `node`, if an app does.
+    pub fn event(&self, node: NodeId, event: &str, value: Option<Value>) -> Option<Reply> {
+        let &(window, app_id) = self.owners.get(&node)?;
+        let w = self.windows.get(&window)?;
+        Some(Reply {
+            request: w.request,
+            event: WindowEvent::Event { node: app_id, event: event.into(), value },
+        })
+    }
+
+    /// Resize window `window`'s content area to `w` by `h` (kept to sensible
+    /// limits). Returns the event telling the app, if the size changed.
+    pub fn resize(&mut self, scene: &mut Scene, window: u64, w: u32, h: u32) -> Option<Reply> {
+        let win = self.windows.get_mut(&window)?;
+        let (w, h) = (w.clamp(120, 4096), h.clamp(60, 4096));
+        if (w, h) == win.size {
+            return None;
+        }
+        win.size = (w, h);
+        let (fw, fh) = (w as f32, h as f32 + TITLE_BAR_HEIGHT);
+        let [bg, bar, title, close, max] = win.parts;
+        scene.apply_all([
+            set(win.frame, json!({"w": fw, "h": fh})),
+            set(bg, json!({"w": fw, "h": fh})),
+            set(bar, json!({"w": fw})),
+            set(title, json!({"w": (fw - 90.0).max(0.0)})),
+            set(close, json!({"x": fw - 34.0})),
+            set(max, json!({"x": fw - 62.0})),
+            set(win.content, json!({"w": fw, "h": h as f32})),
+        ]);
+        Some(Reply { request: win.request, event: WindowEvent::Resized { width: w, height: h } })
+    }
+
+    /// Maximize window `window` to the work area, or put it back.
+    pub fn toggle_maximize(&mut self, scene: &mut Scene, window: u64) -> Option<Reply> {
+        let win = self.windows.get_mut(&window)?;
+        let frame = win.frame;
+        let (x, y, w, h) = match win.restore.take() {
+            Some(r) => r,
+            None => {
+                let at = scene.local_rect(frame)?;
+                win.restore = Some((at.x, at.y, win.size.0, win.size.1));
+                let (wx, wy, ww, wh) = self.work;
+                (wx, wy, ww as u32, (wh - TITLE_BAR_HEIGHT).max(60.0) as u32)
+            }
+        };
+        scene.apply(set(frame, json!({"x": x, "y": y})));
+        self.resize(scene, window, w, h)
+    }
+
+    /// The content size of window `window`.
+    pub fn size_of(&self, window: u64) -> Option<(u32, u32)> {
+        self.windows.get(&window).map(|w| w.size)
     }
 
     /// Where to put a new `w` by `h` window: beside the last one, then on a new row
@@ -120,13 +213,14 @@ impl Apps {
         let w = params.width.unwrap_or(DEFAULT_SIZE.0).clamp(80, 4096);
         let h = params.height.unwrap_or(DEFAULT_SIZE.1).clamp(40, 4096);
         let (x, y) = self.place(w as f32, h as f32 + TITLE_BAR_HEIGHT, screen);
-        let [frame, bg, bar, title, close, content] = std::array::from_fn(|_| self.alloc());
+        let [frame, bg, bar, title, close, max, content] = std::array::from_fn(|_| self.alloc());
         let fw = w as f32;
         let ops = [
             create(
                 frame,
                 NodeKind::Group,
-                json!({"window": true, "x": x, "y": y, "w": fw, "h": h as f32 + TITLE_BAR_HEIGHT, "clip": true}),
+                json!({"window": true, "x": x, "y": y, "w": fw, "h": h as f32 + TITLE_BAR_HEIGHT, "clip": true,
+                       "title": params.title, "workspace": self.workspace}),
             ),
             create(
                 bg,
@@ -141,12 +235,17 @@ impl Apps {
             create(
                 title,
                 NodeKind::Text,
-                json!({"x": 14, "y": 10, "w": fw - 60.0, "h": 18, "text": params.title, "size": 13, "weight": "bold", "color": "#1f2937"}),
+                json!({"x": 14, "y": 10, "w": (fw - 90.0).max(0.0), "h": 18, "text": params.title, "size": 13, "weight": "bold", "color": "#1f2937"}),
             ),
             create(
                 close,
                 NodeKind::Button,
                 json!({"x": fw - 34.0, "y": 6, "w": 24, "h": 24, "label": "×", "size": 15}),
+            ),
+            create(
+                max,
+                NodeKind::Button,
+                json!({"x": fw - 62.0, "y": 6, "w": 24, "h": 24, "label": "□", "size": 13}),
             ),
             create(
                 content,
@@ -157,18 +256,37 @@ impl Apps {
             insert(frame, bar),
             insert(frame, title),
             insert(frame, close),
+            insert(frame, max),
             insert(frame, content),
             insert(ROOT, frame),
         ];
         scene.apply_all(ops);
         self.targets.insert(close, Target::Close(window));
-        self.windows.insert(window, Window { owner, request, frame, content, ids: HashMap::new() });
+        self.targets.insert(max, Target::Max(window));
+        let parts = [bg, bar, title, close, max];
+        let win = Window {
+            owner,
+            request,
+            frame,
+            content,
+            parts,
+            size: (w, h),
+            restore: None,
+            ids: HashMap::new(),
+        };
+        self.windows.insert(window, win);
         self.by_request.insert(request, window);
         Reply { request, event: WindowEvent::Opened { window, width: w, height: h } }
     }
 
     /// Apply `commit` from `from`. Nothing is applied unless every op is valid.
-    pub fn commit(&mut self, scene: &mut Scene, from: &Sender, commit: Commit) -> Result<(), String> {
+    /// Returns the scene ids of the nodes it created.
+    pub fn commit(
+        &mut self,
+        scene: &mut Scene,
+        from: &Sender,
+        commit: Commit,
+    ) -> Result<Vec<NodeId>, String> {
         let Some(w) = self.windows.get(&commit.window) else {
             return Err(format!("no window {}", commit.window));
         };
@@ -178,9 +296,15 @@ impl Apps {
         let mut ops = Vec::with_capacity(commit.ops.len());
         let mut listens = Vec::new();
         let mut result = Ok(());
+        let mut created = Vec::new();
         for op in commit.ops {
             match self.translate(commit.window, op) {
-                Ok(Translated::Op(op)) => ops.push(op),
+                Ok(Translated::Op(op)) => {
+                    if let SceneOp::Create { id, .. } = &op {
+                        created.push(*id);
+                    }
+                    ops.push(op)
+                }
                 Ok(Translated::Listen(global, app_id, events)) => listens.push((global, app_id, events)),
                 Err(e) => {
                     result = Err(e);
@@ -190,6 +314,10 @@ impl Apps {
         }
         if result.is_ok() {
             scene.apply_all(ops);
+            let w = &self.windows[&commit.window];
+            for (&app_id, &global) in &w.ids {
+                self.owners.insert(global, (commit.window, app_id));
+            }
             for (global, app_id, events) in listens {
                 if events.iter().any(|e| e == "click") {
                     self.targets.insert(global, Target::Node(commit.window, app_id));
@@ -201,7 +329,7 @@ impl Apps {
         // Forget ids whose nodes are gone: destroyed, or allocated by a commit that
         // was refused.
         self.prune(scene, commit.window);
-        result
+        result.map(|()| created)
     }
 
     fn translate(&mut self, window: u64, op: SceneOp) -> Result<Translated, String> {
@@ -239,7 +367,14 @@ impl Apps {
                 };
                 SceneOp::Create { id: global, kind, props: app_props(props) }
             }
-            SceneOp::Set { id, props } => SceneOp::Set { id: own(w, id)?, props: app_props(props) },
+            SceneOp::Set { id, props } => {
+                // An app setting a widget's value replaces what the user typed there.
+                let mut p = app_props(props);
+                if let Some(v) = p.get("value").cloned() {
+                    p.insert("_value".into(), v);
+                }
+                SceneOp::Set { id: own(w, id)?, props: p }
+            }
             SceneOp::Insert { parent, child, index } => {
                 SceneOp::Insert { parent: lookup(w, parent)?, child: own(w, child)?, index }
             }
@@ -255,6 +390,7 @@ impl Apps {
         let Some(w) = self.windows.get_mut(&window) else { return };
         w.ids.retain(|_, g| scene.node(*g).is_some());
         self.targets.retain(|g, _| scene.node(*g).is_some());
+        self.owners.retain(|g, _| scene.node(*g).is_some());
     }
 
     /// The app's request `request` ended (cancelled, answered, or its connection
@@ -264,6 +400,7 @@ impl Apps {
         let w = self.windows.remove(&window).expect("indexes agree");
         scene.apply(SceneOp::Destroy { id: w.frame });
         self.targets.retain(|g, _| scene.node(*g).is_some());
+        self.owners.retain(|g, _| scene.node(*g).is_some());
         if self.pressed.is_some_and(|p| scene.node(p).is_none()) {
             self.pressed = None;
         }
@@ -274,10 +411,48 @@ impl Apps {
     /// window there). Returns true if it landed on a node that takes presses, which
     /// is then shown pressed until the pointer comes up.
     pub fn press(&mut self, scene: &mut Scene, window: NodeId, x: f32, y: f32) -> bool {
-        let Some(node) = scene.hit(window, x, y, |id| self.targets.contains_key(&id)) else { return false };
+        self.press_where(scene, window, x, y, |_| true)
+    }
+
+    /// Like [`Apps::press`], but only on nodes `allow` accepts (an open dialog
+    /// blocks the rest of its window).
+    pub fn press_where(
+        &mut self,
+        scene: &mut Scene,
+        window: NodeId,
+        x: f32,
+        y: f32,
+        allow: impl Fn(NodeId) -> bool,
+    ) -> bool {
+        let Some(node) = scene.hit(window, x, y, |id| self.targets.contains_key(&id) && allow(id)) else {
+            return false;
+        };
         self.pressed = Some(node);
         scene.apply(SceneOp::Set { id: node, props: props(json!({"pressed": true})) });
         true
+    }
+
+    /// Whether scene node `node` is one of an app's own.
+    pub fn owns(&self, node: NodeId) -> bool {
+        self.owners.contains_key(&node)
+    }
+
+    /// Window `window`'s close and maximize buttons.
+    pub fn frame_buttons(&self, window: u64) -> Vec<NodeId> {
+        self.windows.get(&window).map(|w| vec![w.parts[3], w.parts[4]]).unwrap_or_default()
+    }
+
+    /// Whether `node` is a window's close or maximize button.
+    pub fn is_frame_button(&self, node: NodeId) -> bool {
+        matches!(self.targets.get(&node), Some(Target::Close(_) | Target::Max(_)))
+    }
+
+    /// A click on `node` from the keyboard: the app's event if it listens for clicks.
+    pub fn click(&self, node: NodeId) -> Option<Reply> {
+        match self.targets.get(&node)? {
+            Target::Node(..) => self.event(node, "click", None),
+            _ => None,
+        }
     }
 
     /// Whether a press is being held on one of the windows' nodes.
@@ -292,14 +467,17 @@ impl Apps {
         scene.apply(SceneOp::Set { id: node, props: props(json!({"pressed": false})) });
         let target = *self.targets.get(&node)?;
         let window = match target {
-            Target::Node(w, _) | Target::Close(w) => w,
+            Target::Node(w, _) | Target::Close(w) | Target::Max(w) => w,
         };
         let w = self.windows.get(&window)?;
         // Dragged off before letting go: no click.
         scene.hit(w.frame, x, y, |id| id == node)?;
         let event = match target {
-            Target::Node(_, app_id) => WindowEvent::Event { node: app_id, event: "click".into() },
+            Target::Node(_, app_id) => {
+                WindowEvent::Event { node: app_id, event: "click".into(), value: None }
+            }
             Target::Close(_) => WindowEvent::Close,
+            Target::Max(window) => return self.toggle_maximize(scene, window),
         };
         Some(Reply { request: w.request, event })
     }
@@ -317,11 +495,15 @@ enum Translated {
     Listen(NodeId, NodeId, Vec<String>),
 }
 
-/// An app's props, minus the ones only the compositor may set.
+/// An app's props, minus the ones only the compositor may set: `window`,
+/// `workspace`, `pressed`, and everything starting with `_` (widget state).
 fn app_props(mut p: Props) -> Props {
-    p.remove("window");
-    p.remove("pressed");
+    p.retain(|k, _| !matches!(k.as_str(), "window" | "workspace" | "pressed") && !k.starts_with('_'));
     p
+}
+
+fn set(id: NodeId, v: Value) -> SceneOp {
+    SceneOp::Set { id, props: props(v) }
 }
 
 fn props(v: Value) -> Props {
@@ -372,6 +554,11 @@ mod tests {
         ]))
     }
 
+    /// Lay out the scene, as the desktop does before drawing or hit-testing.
+    fn lay(scene: &mut Scene) {
+        crate::layout::Layout::new(crate::fonts::ui_only()).run(scene);
+    }
+
     fn text_of(scene: &Scene, apps: &Apps, window: u64, id: NodeId) -> String {
         let g = apps.windows[&window].ids[&id];
         scene.node(g).unwrap().props["text"].as_str().unwrap().to_owned()
@@ -392,6 +579,7 @@ mod tests {
         let w = open(&mut apps, &mut scene, app(5), 77);
         apps.commit(&mut scene, &app(5), Commit { window: w, ops: counter_ui() }).unwrap();
         assert_eq!(text_of(&scene, &apps, w, 3), "Count: 0");
+        lay(&mut scene);
 
         // The stack laid the button out below the label, inside the content area.
         let (bx, by) = find_button(&scene, &apps, w, 4);
@@ -402,7 +590,7 @@ mod tests {
         let reply = apps.release(&mut scene, bx, by).unwrap();
         assert_eq!(
             reply,
-            Reply { request: 77, event: WindowEvent::Event { node: 4, event: "click".into() } }
+            Reply { request: 77, event: WindowEvent::Event { node: 4, event: "click".into(), value: None } }
         );
         assert_eq!(scene.node(pressed).unwrap().props["pressed"], false);
 
@@ -427,6 +615,7 @@ mod tests {
         let mut apps = Apps::new();
         let w = open(&mut apps, &mut scene, app(5), 9);
         apps.commit(&mut scene, &app(5), Commit { window: w, ops: counter_ui() }).unwrap();
+        lay(&mut scene);
         let frame = apps.windows[&w].frame;
         let r = scene.local_rect(frame).unwrap();
         let (cx, cy) = (r.x + r.w - 22.0, r.y + 18.0);
@@ -437,8 +626,8 @@ mod tests {
         let before = scene.len();
         assert!(apps.close_request(&mut scene, 9));
         assert!(scene.node(frame).is_none());
-        assert_eq!(before - scene.len(), 6 + 3, "the frame's six nodes and the app's three");
-        assert!(apps.is_empty() && apps.targets.is_empty());
+        assert_eq!(before - scene.len(), 7 + 3, "the frame's seven nodes and the app's three");
+        assert!(apps.is_empty() && apps.targets.is_empty() && apps.owners.is_empty());
         assert!(!apps.close_request(&mut scene, 9));
     }
 
@@ -502,7 +691,7 @@ mod tests {
         apps.commit(&mut scene, &app(5), Commit { window: w, ops: ops(json!([{"op": "destroy", "id": 2}])) })
             .unwrap();
         assert!(apps.windows[&w].ids.is_empty(), "the stack and its children");
-        assert_eq!(apps.targets.len(), 1, "only the close button");
+        assert_eq!(apps.targets.len(), 2, "only the close and maximize buttons");
         // The id can be used again.
         apps.commit(&mut scene, &app(5), Commit { window: w, ops: counter_ui() }).unwrap();
         assert_eq!(text_of(&scene, &apps, w, 3), "Count: 0");
@@ -528,6 +717,56 @@ mod tests {
             x >= 0.0 && y >= 0.0 && x + 300.0 <= 1000.0 && y + 236.0 <= 700.0,
             "full: cascaded on screen ({x}, {y})"
         );
+    }
+
+    #[test]
+    fn windows_resize_and_maximize_and_tell_the_app() {
+        let mut scene = Scene::new();
+        let mut apps = Apps::new();
+        let w = open(&mut apps, &mut scene, app(5), 3);
+        apps.commit(&mut scene, &app(5), Commit { window: w, ops: counter_ui() }).unwrap();
+        let reply = apps.resize(&mut scene, w, 500, 320).unwrap();
+        assert_eq!(reply, Reply { request: 3, event: WindowEvent::Resized { width: 500, height: 320 } });
+        assert!(apps.resize(&mut scene, w, 500, 320).is_none(), "no change, no event");
+        let frame = apps.windows[&w].frame;
+        assert_eq!(scene.local_rect(frame).unwrap().w, 500.0);
+        // The content reflows: the app's stack fills the new size.
+        lay(&mut scene);
+        let stack = apps.windows[&w].ids[&2];
+        assert_eq!(scene.layout_rect(stack).unwrap().w, 500.0);
+
+        apps.set_work_area(0.0, 30.0, 1280.0, 770.0);
+        let before = scene.local_rect(frame).unwrap();
+        let max = apps.toggle_maximize(&mut scene, w).unwrap();
+        assert_eq!(max.event, WindowEvent::Resized { width: 1280, height: 770 - 36 });
+        assert_eq!((scene.local_rect(frame).unwrap().x, scene.local_rect(frame).unwrap().y), (0.0, 30.0));
+        apps.toggle_maximize(&mut scene, w).unwrap();
+        assert_eq!(scene.local_rect(frame).unwrap(), before, "put back where it was");
+    }
+
+    #[test]
+    fn widget_events_go_to_the_owning_app_with_its_id() {
+        let mut scene = Scene::new();
+        let mut apps = Apps::new();
+        let w = open(&mut apps, &mut scene, app(5), 8);
+        let created = apps.commit(&mut scene, &app(5), Commit { window: w, ops: counter_ui() }).unwrap();
+        assert_eq!(created.len(), 3);
+        let label = apps.windows[&w].ids[&3];
+        let reply = apps.event(label, "change", Some(json!(true))).unwrap();
+        assert_eq!(
+            reply,
+            Reply {
+                request: 8,
+                event: WindowEvent::Event { node: 3, event: "change".into(), value: Some(json!(true)) }
+            }
+        );
+        assert!(apps.event(apps.windows[&w].frame, "change", None).is_none(), "frame parts aren't the app's");
+        // Apps can't set the compositor's widget state.
+        let sneaky =
+            ops(json!([{"op": "set", "id": 3, "props": {"_value": "x", "_focus": true, "workspace": 3}}]));
+        apps.commit(&mut scene, &app(5), Commit { window: w, ops: sneaky }).unwrap();
+        let p = &scene.node(label).unwrap().props;
+        assert!(p.get("_value").is_none() && p.get("_focus").is_none() && p.get("workspace").is_none());
     }
 
     #[test]

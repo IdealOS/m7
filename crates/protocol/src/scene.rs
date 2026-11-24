@@ -20,11 +20,14 @@ pub type NodeId = u64;
 /// protocol bump; the compositor ignores props it does not understand.
 pub type Props = Map<String, Value>;
 
-/// Node types understood by the compositor. Phase 0 renders the primitives
-/// (`rect`, `text`, `group`); widgets arrive in M4 and M5.
+/// Node types understood by the compositor: primitives (`group`, `rect`, `text`,
+/// `image`), containers that lay out their children (`vstack`, `hstack`,
+/// `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
+/// draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
+/// `select`, `menu`, `text_field`, `text_area`, `vlist`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Group,
     Rect,
@@ -32,8 +35,25 @@ pub enum NodeKind {
     Image,
     Vstack,
     Hstack,
+    Toolbar,
+    Grid,
+    Split,
+    Scroll,
+    Dialog,
     Label,
     Button,
+    Checkbox,
+    Toggle,
+    Slider,
+    Select,
+    /// A button labelled `label` that opens a menu of `options`; choosing one
+    /// sends a `choose` event with it. Unlike a select, it keeps no value.
+    Menu,
+    TextField,
+    TextArea,
+    /// A virtual list: `count` rows of `row_height`, of which the app creates only
+    /// the visible ones (it hears which, as `range` events), each with an `index`.
+    Vlist,
 }
 
 /// One change to a window's scene graph.
@@ -80,9 +100,26 @@ pub const SERVICE: &str = "compositor";
 /// |---------------|----------------------|--------|
 /// | `open_window` | [`OpenWindowParams`] | streamed [`WindowEvent`]s |
 /// | `commit`      | [`Commit`]           | null   |
+/// | `get_clipboard` | none             | [`Clipboard`] |
+/// | `set_clipboard` | [`Clipboard`]    | null   |
+///
+/// The clipboard belongs to the compositor: text fields copy and paste through it
+/// without asking the app, and apps can read and write it, with text and,
+/// optionally, the id of a document it refers to.
 pub mod method {
     pub const OPEN_WINDOW: &str = "open_window";
     pub const COMMIT: &str = "commit";
+    pub const GET_CLIPBOARD: &str = "get_clipboard";
+    pub const SET_CLIPBOARD: &str = "set_clipboard";
+}
+
+/// What's on the clipboard: text, and the document it came from, if any.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Clipboard {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 /// The node id of a window's content area in that window's commits.
@@ -110,9 +147,20 @@ pub struct OpenWindowParams {
 pub enum WindowEvent {
     /// The first part: the window's id, for commits, and its content size.
     Opened { window: u64, width: u32, height: u32 },
-    /// Something happened to node `node` (an id from the app's commits) that the
-    /// app listens for, such as `click`.
-    Event { node: NodeId, event: String },
+    /// Something happened to node `node` (an id from the app's commits): `click`
+    /// (a button it listens to), `change` (a widget's new value: a checkbox's or
+    /// toggle's boolean, a slider's number, a select's option, a text field's text),
+    /// `submit` (Enter in a text field, with its text), `range` (a virtual list's
+    /// visible rows, as `[first, last]`), `choose` (a menu's chosen option), or
+    /// `cancel` (Escape in a dialog).
+    Event {
+        node: NodeId,
+        event: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<Value>,
+    },
+    /// The window's content area changed size (the user resized or maximized it).
+    Resized { width: u32, height: u32 },
     /// The user asked to close the window. It stays until the app cancels the
     /// request (or answers it).
     Close,

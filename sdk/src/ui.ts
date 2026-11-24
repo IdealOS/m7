@@ -9,6 +9,9 @@
 //       button({ label: "Add one", onClick: () => setCount((n) => n + 1) }));
 //   });
 //
+// Widgets run in the compositor: typing, sliders, scrolling and menus happen
+// there without waiting for the app, which hears the results through `on*`
+// handlers (`onChange` with the new value, `onSubmit`, `onCancel`, `onRange`).
 // A window lasts as long as its `open_window` request: closing it cancels the
 // request, and the compositor removes the window when the app goes away.
 
@@ -25,15 +28,30 @@ export interface UiNode {
   readonly id: number;
 }
 
+/** A size: pixels, a percentage of the parent (`"50%"`), or `"fill"` for the free space. */
+export type Size = number | `${number}%` | "fill";
+
 /** The node id of a window's content area. */
 const CONTENT = 1;
+
+/** Which handler prop each compositor event calls. */
+const HANDLERS: Record<string, string> = {
+  onClick: "click",
+  onChange: "change",
+  onSubmit: "submit",
+  onCancel: "cancel",
+  onRange: "range",
+  onChoose: "choose",
+};
+
+type Handler = (value: unknown) => void;
 
 class Win {
   nextId = CONTENT + 1;
   ops: SceneOp[] = [];
   scheduled = false;
   closed = false;
-  handlers = new Map<number, () => void>();
+  handlers = new Map<number, Map<string, Handler>>();
   readonly id: number;
 
   constructor(id: number) {
@@ -58,6 +76,12 @@ class Win {
       logError(`commit to window ${this.id} failed: ${e.message}`),
     );
   }
+
+  on(id: number, event: string, handler: Handler) {
+    let byEvent = this.handlers.get(id);
+    if (!byEvent) this.handlers.set(id, (byEvent = new Map()));
+    byEvent.set(event, handler);
+  }
 }
 
 /** The window whose content is being built. */
@@ -68,14 +92,19 @@ function win(): Win {
   return building;
 }
 
-/** Make a node of `kind`. Function-valued props are reactive; `on*` props are skipped. */
+/** Make a node of `kind`. Function-valued props are reactive; `on*` props are handlers. */
 export function node(kind: NodeKind, props: Record<string, unknown> = {}, children: UiNode[] = []): UiNode {
   const w = win();
   const id = w.nextId++;
   const fixed: Record<string, unknown> = {};
   const reactive: [string, () => unknown][] = [];
+  const handlers: [string, Handler][] = [];
   for (const [k, v] of Object.entries(props)) {
-    if (k.startsWith("on") || v === undefined) continue;
+    if (v === undefined) continue;
+    if (k in HANDLERS) {
+      if (typeof v === "function") handlers.push([HANDLERS[k], v as Handler]);
+      continue;
+    }
     if (typeof v === "function") reactive.push([k, v as () => unknown]);
     else fixed[k] = v;
   }
@@ -93,16 +122,34 @@ export function node(kind: NodeKind, props: Record<string, unknown> = {}, childr
       w.send({ op: "set", id, props: { [k]: value } });
     });
   }
+  for (const [event, handler] of handlers) {
+    w.on(id, event, handler);
+    // Buttons only report clicks to apps that listen; other widgets always report.
+    if (event === "click") w.send({ op: "listen", id, events: ["click"] });
+  }
+  if (handlers.length > 0) onCleanup(() => w.handlers.delete(id));
   children.forEach((child, index) => w.send({ op: "insert", parent: id, child: child.id, index }));
   return { id };
 }
 
-export interface StackProps {
-  gap?: Prop<number>;
-  padding?: Prop<number>;
-  w?: Prop<number>;
-  h?: Prop<number>;
+/** Layout props every node takes. */
+export interface Common {
+  w?: Prop<Size>;
+  h?: Prop<Size>;
+  grow?: Prop<number>;
+  min_w?: Prop<number>;
+  min_h?: Prop<number>;
+  max_w?: Prop<number>;
+  max_h?: Prop<number>;
   hidden?: Prop<boolean>;
+}
+
+export interface StackProps extends Common {
+  gap?: Prop<number>;
+  /** One number, `[vertical, horizontal]`, or `[top, right, bottom, left]`. */
+  padding?: Prop<number | number[]>;
+  align?: Prop<"start" | "center" | "end" | "stretch">;
+  justify?: Prop<"start" | "center" | "end" | "between" | "around">;
 }
 
 /** Children in a column. */
@@ -115,53 +162,211 @@ export function hstack(props: StackProps, ...children: UiNode[]): UiNode {
   return node("hstack", { ...props }, children);
 }
 
-export interface LabelProps {
+/** A row of controls on a bar. */
+export function toolbar(props: StackProps, ...children: UiNode[]): UiNode {
+  return node("toolbar", { ...props }, children);
+}
+
+/** Children in `columns` equal columns, filling row by row. */
+export function grid(props: StackProps & { columns: Prop<number> }, ...children: UiNode[]): UiNode {
+  return node("grid", { ...props }, children);
+}
+
+/** A column that scrolls (wheel, or drag with momentum) when its content is taller. */
+export function scroll(props: StackProps, ...children: UiNode[]): UiNode {
+  return node("scroll", { ...props }, children);
+}
+
+export interface SplitProps extends Common {
+  /** The first pane's share of the space, 0 to 1 (default 0.5). */
+  ratio?: Prop<number>;
+  /** Panes above and below each other rather than side by side. */
+  vertical?: Prop<boolean>;
+  /** The user dragged the divider. */
+  onChange?: (ratio: number) => void;
+}
+
+/** Two panes with a divider the user can drag. */
+export function split(props: SplitProps, first: UiNode, second: UiNode): UiNode {
+  return node("split", { ...props }, [first, second]);
+}
+
+export interface DialogProps extends StackProps {
+  /** Escape was pressed. */
+  onCancel?: () => void;
+}
+
+/** A panel over its window, which takes all of the window's input while shown. */
+export function dialog(props: DialogProps, ...children: UiNode[]): UiNode {
+  return node("dialog", { ...props }, children);
+}
+
+export interface LabelProps extends Common {
   text: Prop<string>;
   size?: Prop<number>;
+  /** A color (`#rrggbb`) or a theme token (`$muted`, `$accent`, ...). */
   color?: Prop<string>;
   weight?: Prop<"normal" | "bold">;
   align?: Prop<"left" | "center">;
-  w?: Prop<number>;
-  h?: Prop<number>;
-  hidden?: Prop<boolean>;
 }
 
 export function label(props: LabelProps): UiNode {
   return node("label", { ...props });
 }
 
-export interface ButtonProps {
+export interface ButtonProps extends Common {
   label: Prop<string>;
   onClick?: () => void;
-  w?: Prop<number>;
-  h?: Prop<number>;
   size?: Prop<number>;
-  hidden?: Prop<boolean>;
+  color?: Prop<string>;
+  text_color?: Prop<string>;
 }
 
 export function button(props: ButtonProps): UiNode {
-  const w = win();
-  const n = node("button", { ...props });
-  if (props.onClick) {
-    w.handlers.set(n.id, props.onClick);
-    w.send({ op: "listen", id: n.id, events: ["click"] });
-    onCleanup(() => w.handlers.delete(n.id));
-  }
-  return n;
+  return node("button", { ...props });
 }
 
-export interface RectProps {
-  w?: Prop<number>;
-  h?: Prop<number>;
+export interface CheckProps extends Common {
+  label?: Prop<string>;
+  checked?: Prop<boolean>;
+  onChange?: (checked: boolean) => void;
+}
+
+export function checkbox(props: CheckProps): UiNode {
+  return node("checkbox", { ...props });
+}
+
+export function toggle(props: CheckProps): UiNode {
+  return node("toggle", { ...props });
+}
+
+export interface SliderProps extends Common {
+  value?: Prop<number>;
+  min?: Prop<number>;
+  max?: Prop<number>;
+  step?: Prop<number>;
+  onChange?: (value: number) => void;
+}
+
+export function slider(props: SliderProps): UiNode {
+  return node("slider", { ...props });
+}
+
+export interface SelectProps extends Common {
+  options: Prop<string[]>;
+  value?: Prop<string>;
+  onChange?: (value: string) => void;
+}
+
+/** A button that opens a menu of `options`. */
+export function select(props: SelectProps): UiNode {
+  return node("select", { ...props });
+}
+
+export interface MenuProps extends Common {
+  label: Prop<string>;
+  options: Prop<string[]>;
+  /** Called with the option chosen. */
+  onChoose?: (option: string) => void;
+}
+
+/** A button labelled `label` that opens a menu of actions (`options`). Unlike
+ * a select it keeps no value: each choice is an action, sent to `onChoose`. */
+export function menu(props: MenuProps): UiNode {
+  return node("menu", { ...props });
+}
+
+export interface TextProps extends Common {
+  /** The text. Setting it replaces what the user typed. */
+  value?: Prop<string>;
+  placeholder?: Prop<string>;
+  /** Edit a text field of a document directly: typing goes straight to the
+   * database (it's collaborative text there), with no round trip to the app. */
+  bind?: { doc: string; path: string };
+  size?: Prop<number>;
+  onChange?: (value: string) => void;
+}
+
+/** One line of editable text. */
+export function textField(props: TextProps & { onSubmit?: (value: string) => void }): UiNode {
+  return node("text_field", { ...props });
+}
+
+/** Several lines of editable text. */
+export function textArea(props: TextProps): UiNode {
+  return node("text_area", { ...props });
+}
+
+export interface RectProps extends Common {
   color?: Prop<string>;
   radius?: Prop<number>;
   border_color?: Prop<string>;
   border_width?: Prop<number>;
-  hidden?: Prop<boolean>;
 }
 
 export function rect(props: RectProps): UiNode {
   return node("rect", { ...props });
+}
+
+export interface ImageProps extends Common {
+  /** The blob holding the image (a PNG), by its SHA-256. */
+  blob: Prop<string>;
+  radius?: Prop<number>;
+}
+
+/** An image from a blob; its natural size unless given `w` and `h`. */
+export function image(props: ImageProps): UiNode {
+  return node("image", { ...props });
+}
+
+export interface VirtualListProps extends Common {
+  count: Prop<number>;
+  rowHeight: number;
+  /** Rows to keep beyond the visible ones, so scrolling doesn't show gaps. */
+  overscan?: number;
+}
+
+/**
+ * A long list that only has nodes for the rows on screen: the compositor says
+ * which rows are visible as the user scrolls, and `render(index)` makes each one
+ * as it appears; rows that scroll away are destroyed.
+ */
+export function virtualList(props: VirtualListProps, render: (index: number) => UiNode): UiNode {
+  const w = win();
+  const { rowHeight, overscan = 3, ...rest } = props;
+  type Row = { node: UiNode; dispose: () => void };
+  const rows = new Map<number, Row>();
+  const list = node("vlist", {
+    ...rest,
+    row_height: rowHeight,
+    onRange: (value: unknown) => {
+      const [first, last] = value as [number, number];
+      const count = untrack(() => (typeof props.count === "function" ? props.count() : props.count));
+      const from = Math.max(0, first - overscan);
+      const to = Math.min(count - 1, last + overscan);
+      const previous = building;
+      building = w;
+      try {
+        for (const [i, row] of rows) {
+          if (i < from || i > to) {
+            row.dispose();
+            w.send({ op: "destroy", id: row.node.id });
+            rows.delete(i);
+          }
+        }
+        for (let i = from; i <= to; i++) {
+          if (rows.has(i)) continue;
+          const row = root((dispose) => ({ node: render(i), dispose }));
+          w.send({ op: "set", id: row.node.id, props: { index: i } });
+          w.send({ op: "insert", parent: list.id, child: row.node.id, index: 0 });
+          rows.set(i, row);
+        }
+      } finally {
+        building = previous;
+      }
+    },
+  });
+  return list;
 }
 
 /**
@@ -232,6 +437,8 @@ export interface WindowOptions {
 export interface AppWindow {
   /** The compositor's id for the window. */
   readonly id: number;
+  /** The content area's size, following resizes. */
+  size(): { width: number; height: number };
   /** Close the window and stop its effects. */
   close(): void;
   /** Resolves when the window has closed, by either side. */
@@ -245,6 +452,7 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
     let dispose = () => {};
     let ended = () => {};
     const closed = new Promise<void>((r) => (ended = r));
+    const [size, setSize] = signal({ width: options.width ?? 0, height: options.height ?? 0 });
     const finish = () => {
       if (w) w.closed = true;
       dispose();
@@ -258,6 +466,7 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
         if (event.kind === "opened") {
           const opened = new Win(event.window);
           w = opened;
+          setSize({ width: event.width, height: event.height });
           root((d) => {
             dispose = d;
             const previous = building;
@@ -269,13 +478,15 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
               building = previous;
             }
           });
-          resolve({ id: event.window, close, closed });
-        } else if (event.kind === "event" && event.event === "click") {
+          resolve({ id: event.window, size, close, closed });
+        } else if (event.kind === "event") {
           try {
-            w?.handlers.get(event.node)?.();
+            w?.handlers.get(event.node)?.get(event.event)?.(event.value);
           } catch (e) {
-            logError("a click handler threw:", e);
+            logError(`a ${event.event} handler threw:`, e);
           }
+        } else if (event.kind === "resized") {
+          setSize({ width: event.width, height: event.height });
         } else if (event.kind === "close") {
           if (options.onClose?.() !== false) close();
         }
@@ -290,4 +501,13 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
       cancel();
     }
   });
+}
+
+/** What's on the compositor's clipboard: text, and the document it came from, if any. */
+export function clipboard(): Promise<{ text: string; doc?: string }> {
+  return request("compositor", "get_clipboard");
+}
+
+export function setClipboard(text: string, doc?: string): Promise<void> {
+  return request("compositor", "set_clipboard", doc ? { text, doc } : { text }).then(() => undefined);
 }

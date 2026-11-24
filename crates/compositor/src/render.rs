@@ -1,4 +1,5 @@
-//! wgpu renderer for a [`DrawList`]: instanced SDF quads plus glyphon text.
+//! wgpu renderer for a [`DrawList`]: instanced SDF quads, textured images, and
+//! glyphon text, in that order within each layer.
 //!
 //! The renderer knows nothing about windows or backends. It records into a
 //! command encoder targeting any texture view, so the hosted window, the KMS
@@ -14,7 +15,7 @@ use glyphon::{
 use protocol::NodeId;
 use wgpu::util::DeviceExt;
 
-use crate::scene::{DrawList, Rect, Rgba, TextItem};
+use crate::scene::{DrawList, ImageItem, Rect, Rgba, TextItem};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -33,6 +34,20 @@ struct QuadInstance {
     clip: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ImageInstance {
+    rect: [f32; 4],
+    params: [f32; 4],
+    clip: [f32; 4],
+}
+
+/// An image uploaded to the GPU, kept while it's drawn.
+struct GpuImage {
+    bind_group: wgpu::BindGroup,
+    used: bool,
+}
+
 /// A shaped text buffer, reused across frames until its inputs change.
 struct CachedText {
     buffer: Buffer,
@@ -48,13 +63,21 @@ pub struct Renderer {
     instances: wgpu::Buffer,
     instance_capacity: usize,
 
+    image_pipeline: wgpu::RenderPipeline,
+    image_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    image_instances: wgpu::Buffer,
+    image_capacity: usize,
+    /// Uploaded images by blob hash.
+    images: HashMap<String, GpuImage>,
+
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     /// One text renderer per layer, so text draws in stacking order.
     text_renderers: Vec<TextRenderer>,
-    texts: HashMap<NodeId, CachedText>,
+    texts: HashMap<(NodeId, u8), CachedText>,
 }
 
 pub struct FrameStats {
@@ -135,6 +158,78 @@ impl Renderer {
         let instance_capacity = 256;
         let instances = Self::instance_buffer(device, instance_capacity);
 
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("image"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("image.wgsl").into()),
+        });
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("image"),
+            bind_group_layouts: &[Some(&bgl), Some(&image_layout)],
+            immediate_size: 0,
+        });
+        let image_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("image"),
+            layout: Some(&image_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &image_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ImageInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &image_attributes,
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let image_capacity = 16;
+        let image_instances = Self::image_buffer(device, image_capacity);
+
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let atlas = TextAtlas::new(device, queue, &cache, format);
@@ -146,6 +241,12 @@ impl Renderer {
             bind_group,
             instances,
             instance_capacity,
+            image_pipeline,
+            image_layout,
+            sampler,
+            image_instances,
+            image_capacity,
+            images: HashMap::new(),
             font_system: crate::fonts::system(),
             swash_cache: SwashCache::new(),
             viewport,
@@ -157,6 +258,61 @@ impl Renderer {
 
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
+    }
+
+    fn image_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image instances"),
+            size: (capacity * std::mem::size_of::<ImageInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Upload `item`'s pixels unless they're already on the GPU. False if it has none.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, item: &ImageItem) -> bool {
+        if let Some(gpu) = self.images.get_mut(&item.blob) {
+            gpu.used = true;
+            return true;
+        }
+        let Some(img) = &item.pixels else { return false };
+        let size = wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * img.width),
+                rows_per_image: Some(img.height),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image"),
+            layout: &self.image_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.images.insert(item.blob.clone(), GpuImage { bind_group, used: true });
+        true
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -213,6 +369,35 @@ impl Renderer {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
         }
 
+        // Images likewise: one instance each, drawn after each layer's quads.
+        for gpu in self.images.values_mut() {
+            gpu.used = false;
+        }
+        let mut image_instances = Vec::new();
+        let mut image_ranges: Vec<Vec<(u32, String)>> = Vec::with_capacity(list.layers.len());
+        for layer in &list.layers {
+            let mut drawn = Vec::new();
+            for item in &layer.images {
+                if self.upload(device, queue, item) {
+                    drawn.push((image_instances.len() as u32, item.blob.clone()));
+                    image_instances.push(ImageInstance {
+                        rect: phys(item.rect, scale),
+                        params: [item.radius * scale, 0.0, 0.0, 0.0],
+                        clip: phys(item.clip, scale),
+                    });
+                }
+            }
+            image_ranges.push(drawn);
+        }
+        if image_instances.len() > self.image_capacity {
+            self.image_capacity = image_instances.len().next_power_of_two();
+            self.image_instances = Self::image_buffer(device, self.image_capacity);
+        }
+        if !image_instances.is_empty() {
+            queue.write_buffer(&self.image_instances, 0, bytemuck::cast_slice(&image_instances));
+        }
+        self.images.retain(|_, gpu| gpu.used);
+
         // Shape (or reuse) text, then prepare one text renderer per layer.
         self.viewport.update(queue, Resolution { width: w, height: h });
         for cached in self.texts.values_mut() {
@@ -235,7 +420,7 @@ impl Renderer {
             let areas = layer.texts.iter().map(|t| {
                 let clip = phys(t.rect.intersect(&t.clip), scale);
                 TextArea {
-                    buffer: &self.texts[&t.node].buffer,
+                    buffer: &self.texts[&(t.node, t.slot)].buffer,
                     left: t.rect.x * scale,
                     top: t.rect.y * scale,
                     scale,
@@ -295,6 +480,15 @@ impl Renderer {
                     pass.set_vertex_buffer(0, self.instances.slice(..));
                     pass.draw(0..4, range);
                 }
+                if !image_ranges[i].is_empty() {
+                    pass.set_pipeline(&self.image_pipeline);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.image_instances.slice(..));
+                    for (at, blob) in &image_ranges[i] {
+                        pass.set_bind_group(1, &self.images[blob].bind_group, &[]);
+                        pass.draw(0..4, *at..*at + 1);
+                    }
+                }
                 if let Err(e) = self.text_renderers[i].render(&self.atlas, &self.viewport, &mut pass) {
                     log::error!("text render failed: {e}");
                 }
@@ -310,7 +504,7 @@ impl Renderer {
     /// logical pixels; glyphon applies the display scale at prepare time.
     fn shape(&mut self, t: &TextItem) {
         let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold, t.center);
-        if let Some(c) = self.texts.get_mut(&t.node)
+        if let Some(c) = self.texts.get_mut(&(t.node, t.slot))
             && c.key == key
         {
             c.used = true;
@@ -326,7 +520,7 @@ impl Renderer {
         let align = t.center.then_some(glyphon::cosmic_text::Align::Center);
         buffer.set_text(&t.text, &attrs, Shaping::Advanced, align);
         buffer.shape_until_scroll(&mut self.font_system, false);
-        self.texts.insert(t.node, CachedText { buffer, key, used: true });
+        self.texts.insert((t.node, t.slot), CachedText { buffer, key, used: true });
     }
 }
 

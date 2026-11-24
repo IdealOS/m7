@@ -13,4 +13,4 @@ pub mod session;
 pub mod unix;
 
 pub use bus::{BROKER, BusError, Message, Sender};
-pub use scene::{Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, WindowEvent};
+pub use scene::{Clipboard, Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, WindowEvent};

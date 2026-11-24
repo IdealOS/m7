@@ -11,12 +11,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use input::event::keyboard::{KeyState, KeyboardEventTrait};
-use input::event::pointer::ButtonState;
+use input::event::pointer::{Axis, ButtonState, PointerScrollEvent};
 use input::event::{DeviceEvent, EventTrait, KeyboardEvent, PointerEvent};
 use input::{DeviceCapability, Libinput, LibinputInterface};
 use xkbcommon::xkb;
 
-use crate::input::{Input, shortcut};
+use crate::input::{Input, Mods, key_from_keysym};
+
+/// Pixels one wheel click scrolls.
+const WHEEL_STEP: f64 = 48.0;
 
 /// `BTN_LEFT` from linux/input-event-codes.h.
 const BTN_LEFT: u32 = 0x110;
@@ -89,17 +92,36 @@ impl Devices {
                 input::Event::Pointer(PointerEvent::Button(b)) if b.button() == BTN_LEFT => {
                     out.push(Input::Button { pressed: b.button_state() == ButtonState::Pressed });
                 }
+                input::Event::Pointer(PointerEvent::ScrollWheel(e)) => {
+                    let v = |axis| {
+                        if e.has_axis(axis) { e.scroll_value_v120(axis) / 120.0 * WHEEL_STEP } else { 0.0 }
+                    };
+                    out.push(Input::Scroll { dx: v(Axis::Horizontal) as f32, dy: v(Axis::Vertical) as f32 });
+                }
+                input::Event::Pointer(PointerEvent::ScrollFinger(e)) => {
+                    let v = |axis| if e.has_axis(axis) { e.scroll_value(axis) } else { 0.0 };
+                    out.push(Input::Scroll { dx: v(Axis::Horizontal) as f32, dy: v(Axis::Vertical) as f32 });
+                }
+                input::Event::Pointer(PointerEvent::ScrollContinuous(e)) => {
+                    let v = |axis| if e.has_axis(axis) { e.scroll_value(axis) } else { 0.0 };
+                    out.push(Input::Scroll { dx: v(Axis::Horizontal) as f32, dy: v(Axis::Vertical) as f32 });
+                }
                 input::Event::Keyboard(KeyboardEvent::Key(k)) => {
                     let code = xkb::Keycode::new(k.key() + EVDEV_TO_XKB);
                     let pressed = k.key_state() == KeyState::Pressed;
                     if pressed {
                         // Look up the symbol before updating, so a modifier's own
-                        // press doesn't count toward itself.
-                        let sym = self.keyboard.key_get_one_sym(code).raw();
-                        let alt = modifier(&self.keyboard, xkb::MOD_NAME_ALT);
-                        let logo = modifier(&self.keyboard, xkb::MOD_NAME_LOGO);
-                        if let Some(s) = shortcut(sym, alt, logo) {
-                            out.push(Input::Shortcut(s));
+                        // press doesn't count toward itself. The character comes from
+                        // the keysym, so Ctrl+C still reads as "c".
+                        let sym = self.keyboard.key_get_one_sym(code);
+                        let mods = Mods {
+                            ctrl: modifier(&self.keyboard, xkb::MOD_NAME_CTRL),
+                            alt: modifier(&self.keyboard, xkb::MOD_NAME_ALT),
+                            shift: modifier(&self.keyboard, xkb::MOD_NAME_SHIFT),
+                            logo: modifier(&self.keyboard, xkb::MOD_NAME_LOGO),
+                        };
+                        if let Some(key) = key_from_keysym(sym.raw(), xkb::keysym_to_utf32(sym)) {
+                            out.push(Input::Key { key, mods });
                         }
                     }
                     let direction = if pressed { xkb::KeyDirection::Down } else { xkb::KeyDirection::Up };

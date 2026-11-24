@@ -1216,3 +1216,40 @@ fn version_2_databases_migrate_and_backfill_links() {
     assert_eq!(rows, [("to".to_string(), "n2".to_string())]);
     assert_eq!(s.links("n2").unwrap().1[0].id, "n1");
 }
+
+#[test]
+fn splicing_text_edits_a_field_as_collaborative_text() {
+    let mut s = Store::open_in_memory().unwrap();
+    let d = s.create("Note", &obj(json!({"title": "hello", "meta": {"n": 1}})), "t").unwrap();
+    // A plain string becomes text on the first splice; positions are characters.
+    s.splice(&d.id, "title", 5, 0, " wörld", "t").unwrap();
+    assert_eq!(data(&s, &d.id)["title"], "hello wörld");
+    s.splice(&d.id, "title", 6, 5, "there", "t").unwrap();
+    assert_eq!(data(&s, &d.id)["title"], "hello there");
+    // Missing fields and maps are created.
+    s.splice(&d.id, "meta.body", 0, 0, "x", "t").unwrap();
+    s.splice(&d.id, "draft.text", 0, 0, "y", "t").unwrap();
+    assert_eq!(
+        data(&s, &d.id),
+        json!({"title": "hello there", "meta": {"n": 1, "body": "x"}, "draft": {"text": "y"}})
+    );
+    // Searchable, in history, and undoable like any change.
+    assert_eq!(ids(&s.search("there", None, 5).unwrap()), [d.id.as_str()]);
+    let last = s.history(&d.id).unwrap().last().unwrap().change_set;
+    s.undo(last, "t").unwrap();
+    assert!(data(&s, &d.id).get("draft").and_then(|v| v.get("text")).is_none());
+    // An edit that changes nothing writes nothing; bad ranges and paths are refused.
+    assert_eq!(s.splice(&d.id, "title", 0, 0, "", "t").unwrap(), 0);
+    assert!(matches!(s.splice(&d.id, "title", 50, 0, "x", "t"), Err(Error::Invalid(_))));
+    assert!(
+        matches!(s.splice(&d.id, "title", 1, usize::MAX, "", "t"), Err(Error::Invalid(_))),
+        "no overflow"
+    );
+    assert!(matches!(s.splice(&d.id, "meta.n", 0, 0, "x", "t"), Err(Error::Invalid(_))));
+    assert!(matches!(s.splice(&d.id, "title..x", 0, 0, "x", "t"), Err(Error::Invalid(_))));
+    assert!(matches!(s.splice("nope", "title", 0, 0, "x", "t"), Err(Error::NotFound(_))));
+    // A merge patch can still replace the whole field.
+    s.update(&d.id, &obj(json!({"title": "fresh"})), "t").unwrap();
+    assert_eq!(data(&s, &d.id)["title"], "fresh");
+    assert!(s.verify(&d.id).unwrap());
+}

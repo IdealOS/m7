@@ -28,7 +28,36 @@ pub struct Scene {
     /// Set by every mutation, cleared by the renderer. This is frame-level damage
     /// tracking: an idle desktop costs no GPU work. Region damage comes later.
     dirty: bool,
+    /// Set by mutations that can change layout; cleared by a layout pass.
+    layout_dirty: bool,
+    /// Laid-out nodes' rectangles, relative to their parent (see [`crate::layout`]).
+    layout: HashMap<NodeId, Rect>,
+    /// Scroll views' content sizes.
+    content: HashMap<NodeId, (f32, f32)>,
 }
+
+/// Props that only change how a node looks, not the layout: setting just these
+/// (as a window drag or a button press does) skips the next layout pass.
+const VISUAL: &[&str] = &[
+    "x",
+    "y",
+    "pressed",
+    "color",
+    "border_color",
+    "border_width",
+    "radius",
+    "text_color",
+    "_scroll",
+    "_focus",
+    "_caret",
+    "_sel",
+    "_scroll_x",
+    "_hover",
+    "_active",
+    "_content",
+    "_divider",
+    "_range",
+];
 
 /// sRGB color with alpha, as written in props (`"#rrggbb"` or `"#rrggbbaa"`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,6 +125,8 @@ pub struct QuadItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextItem {
     pub node: NodeId,
+    /// Which of the node's texts this is (a checkbox draws its label and its check).
+    pub slot: u8,
     pub text: String,
     pub size: f32,
     pub color: Rgba,
@@ -106,6 +137,19 @@ pub struct TextItem {
     pub clip: Rect,
 }
 
+/// A blob image, drawn over the layer's rects and under its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageItem {
+    pub node: NodeId,
+    /// The blob's SHA-256.
+    pub blob: String,
+    /// The decoded pixels, once loaded (the desktop fills these in).
+    pub pixels: Option<std::sync::Arc<crate::image::Image>>,
+    pub rect: Rect,
+    pub clip: Rect,
+    pub radius: f32,
+}
+
 /// Everything under one child of the root draws as one layer: its rects, then its
 /// text. Windows are root children, so a window on top covers the text of the
 /// windows beneath it.
@@ -113,6 +157,7 @@ pub struct TextItem {
 pub struct Layer {
     pub quads: Vec<QuadItem>,
     pub texts: Vec<TextItem>,
+    pub images: Vec<ImageItem>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -133,11 +178,75 @@ impl Scene {
             ROOT,
             Node { kind: NodeKind::Group, props: Props::new(), children: Vec::new(), parent: None },
         );
-        Scene { nodes, dirty: true }
+        Scene { nodes, dirty: true, layout_dirty: true, layout: HashMap::new(), content: HashMap::new() }
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(&id)
+    }
+
+    /// Every node id, in no particular order.
+    pub fn ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes.keys().copied()
+    }
+
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes.get(&id)?.parent
+    }
+
+    /// Whether something layout depends on changed since the last layout pass.
+    pub fn needs_layout(&self) -> bool {
+        self.layout_dirty
+    }
+
+    /// Keep a layout pass's results.
+    pub fn set_layout(&mut self, computed: crate::layout::Computed) {
+        self.layout = computed.rects;
+        self.content = computed.content;
+        self.layout_dirty = false;
+        self.dirty = true;
+    }
+
+    /// Where the last layout pass put `id`, relative to its parent.
+    pub fn layout_rect(&self, id: NodeId) -> Option<Rect> {
+        self.layout.get(&id).copied()
+    }
+
+    /// A scroll view's content size, from the last layout pass.
+    pub fn scroll_content(&self, id: NodeId) -> Option<(f32, f32)> {
+        self.content.get(&id).copied()
+    }
+
+    /// Root child `root` and its visible descendants in paint order, with each one's
+    /// rectangle on screen and its clip (from the last layout).
+    pub fn paint_order(&self, root: NodeId) -> Vec<(NodeId, Rect, Rect)> {
+        let mut out = Vec::new();
+        self.walk(root, SCREEN, None, Rect::INFINITE, &mut |id, _, rect, clip| out.push((id, rect, clip)));
+        out
+    }
+
+    /// Whether `id` is `ancestor` or inside it.
+    pub fn is_within(&self, mut id: NodeId, ancestor: NodeId) -> bool {
+        loop {
+            if id == ancestor {
+                return true;
+            }
+            match self.parent(id) {
+                Some(p) => id = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// Every visible node's rectangle on screen and its clip, from the last layout.
+    pub fn screen_rects(&self) -> HashMap<NodeId, (Rect, Rect)> {
+        let mut out = HashMap::new();
+        for &child in self.top_level() {
+            self.walk(child, SCREEN, None, Rect::INFINITE, &mut |id, _, rect, clip| {
+                out.insert(id, (rect, clip));
+            });
+        }
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -170,6 +279,9 @@ impl Scene {
     /// a buggy app must never be able to crash the compositor.
     pub fn apply(&mut self, op: SceneOp) {
         self.dirty = true;
+        if !matches!(&op, SceneOp::Set { props, .. } if props.keys().all(|k| VISUAL.contains(&k.as_str()))) {
+            self.layout_dirty = true;
+        }
         match op {
             SceneOp::Create { id, kind, props } => {
                 if id == ROOT {
@@ -270,8 +382,8 @@ impl Scene {
         let mut list = DrawList::default();
         for &child in self.top_level() {
             let mut layer = Layer::default();
-            self.walk(child, 0.0, 0.0, None, Rect::INFINITE, &mut |id, node, rect, clip| {
-                draw(id, node, rect, clip, &mut layer)
+            self.walk(child, SCREEN, None, Rect::INFINITE, &mut |id, node, rect, clip| {
+                crate::draw::draw(id, node, rect, clip, &mut layer)
             });
             list.layers.push(layer);
         }
@@ -283,7 +395,7 @@ impl Scene {
     /// count). Pass the topmost window under the point, so covered nodes can't be hit.
     pub fn hit(&self, root: NodeId, x: f32, y: f32, wanted: impl Fn(NodeId) -> bool) -> Option<NodeId> {
         let mut found = None;
-        self.walk(root, 0.0, 0.0, None, Rect::INFINITE, &mut |id, _, rect, clip| {
+        self.walk(root, SCREEN, None, Rect::INFINITE, &mut |id, _, rect, clip| {
             if wanted(id) && rect.intersect(&clip).contains(x, y) {
                 found = Some(id);
             }
@@ -292,14 +404,14 @@ impl Scene {
     }
 
     /// Visit `id` and its descendants in paint order with each one's rectangle on
-    /// screen and its clip. `layout` replaces the node's own rectangle when its
-    /// parent is a stack that placed it.
+    /// screen and its clip. `parent` is the parent's rectangle on screen (shifted by
+    /// its scroll offset, for a scroll view's children); `forced` places the node
+    /// itself (a virtual list's rows).
     fn walk(
         &self,
         id: NodeId,
-        ox: f32,
-        oy: f32,
-        layout: Option<Rect>,
+        parent: Rect,
+        forced: Option<Rect>,
         clip: Rect,
         visit: &mut dyn FnMut(NodeId, &Node, Rect, Rect),
     ) {
@@ -308,149 +420,60 @@ impl Scene {
         if p.get("hidden").and_then(Value::as_bool) == Some(true) {
             return;
         }
-        let local = layout.unwrap_or_else(|| rect_of(p));
-        let rect = Rect { x: ox + local.x, y: oy + local.y, ..local };
+        let own = rect_of(p);
+        let in_flow = node
+            .parent
+            .and_then(|p| self.nodes.get(&p))
+            .is_some_and(|p| crate::layout::container_kind(p.kind));
+        let mut local = match (forced, self.layout.get(&id)) {
+            (Some(f), _) => f,
+            // Laid out by its parent container.
+            (None, Some(l)) if in_flow && node.kind != NodeKind::Dialog => *l,
+            // A layout root: its own position, the computed size.
+            (None, Some(l)) => Rect { x: own.x, y: own.y, w: l.w, h: l.h },
+            (None, None) => own,
+        };
+        if node.kind == NodeKind::Dialog {
+            // A dialog floats over its parent: centered across, a third of the way down.
+            local.x = ((parent.w - local.w) / 2.0).max(0.0);
+            local.y = ((parent.h - local.h) / 3.0).max(0.0);
+        }
+        let rect = Rect { x: parent.x + local.x, y: parent.y + local.y, ..local };
         visit(id, node, rect, clip);
-        // Groups translate their children; with `clip: true` they also clip them.
-        let child_clip =
-            if p.get("clip").and_then(Value::as_bool) == Some(true) { clip.intersect(&rect) } else { clip };
-        let vertical = match node.kind {
-            NodeKind::Vstack => true,
-            NodeKind::Hstack => false,
-            _ => {
-                for &c in &node.children {
-                    self.walk(c, rect.x, rect.y, None, child_clip, visit);
-                }
-                return;
-            }
-        };
-        let pad = num(p, "padding", 0.0);
-        let gap = num(p, "gap", 0.0);
-        let mut at = pad;
+        // Groups with `clip: true` clip their children; scrolling views always do.
+        let clips = p.get("clip").and_then(Value::as_bool) == Some(true)
+            || matches!(node.kind, NodeKind::Scroll | NodeKind::Vlist | NodeKind::Dialog);
+        let child_clip = if clips { clip.intersect(&rect) } else { clip };
+        let scrolled = num(p, "_scroll", 0.0);
+        let inner = Rect { y: rect.y - scrolled, ..rect };
+        let row_height = num(p, "row_height", 28.0).max(1.0);
         for &c in &node.children {
-            let Some(child) = self.nodes.get(&c) else { continue };
-            if child.props.get("hidden").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let (iw, ih) = self.measure(c);
-            // Across the stack, a child fills it unless it says its own size.
-            let placed = if vertical {
-                let w =
-                    explicit(&child.props, "w").unwrap_or(if rect.w > 0.0 { rect.w - 2.0 * pad } else { iw });
-                Rect { x: pad, y: at, w, h: ih }
-            } else {
-                let h =
-                    explicit(&child.props, "h").unwrap_or(if rect.h > 0.0 { rect.h - 2.0 * pad } else { ih });
-                Rect { x: at, y: pad, w: iw, h }
-            };
-            at += if vertical { placed.h } else { placed.w } + gap;
-            self.walk(c, rect.x, rect.y, Some(placed), child_clip, visit);
+            let forced = (node.kind == NodeKind::Vlist).then(|| {
+                let index = self.nodes.get(&c).map_or(0.0, |n| num(&n.props, "index", 0.0));
+                Rect { x: 0.0, y: index * row_height, w: rect.w, h: row_height }
+            });
+            self.walk(c, inner, forced, child_clip, visit);
         }
     }
-
-    /// A node's size from its `w`/`h` props, or from its content: text by an
-    /// estimate of its width (exact shaping happens in the renderer), stacks from
-    /// their children.
-    pub fn measure(&self, id: NodeId) -> (f32, f32) {
-        let Some(node) = self.nodes.get(&id) else { return (0.0, 0.0) };
-        let p = &node.props;
-        let text = |key: &str| p.get(key).and_then(Value::as_str).unwrap_or_default().chars().count() as f32;
-        let size = num(p, "size", 14.0);
-        let (w, h) = match node.kind {
-            NodeKind::Text | NodeKind::Label => (text("text") * size * 0.6 + 2.0, (size * 1.3).ceil()),
-            NodeKind::Button => (text("label") * size * 0.6 + 28.0, 32.0),
-            NodeKind::Vstack | NodeKind::Hstack => {
-                let vertical = node.kind == NodeKind::Vstack;
-                let pad = num(p, "padding", 0.0);
-                let gap = num(p, "gap", 0.0);
-                let kids: Vec<(f32, f32)> = node
-                    .children
-                    .iter()
-                    .filter(|c| {
-                        self.nodes
-                            .get(c)
-                            .is_some_and(|n| n.props.get("hidden").and_then(Value::as_bool) != Some(true))
-                    })
-                    .map(|&c| self.measure(c))
-                    .collect();
-                let gaps = gap * kids.len().saturating_sub(1) as f32;
-                let (along, across): (f32, f32) = if vertical {
-                    (kids.iter().map(|k| k.1).sum(), kids.iter().map(|k| k.0).fold(0.0, f32::max))
-                } else {
-                    (kids.iter().map(|k| k.0).sum(), kids.iter().map(|k| k.1).fold(0.0, f32::max))
-                };
-                let (along, across) = (along + gaps + 2.0 * pad, across + 2.0 * pad);
-                if vertical { (across, along) } else { (along, across) }
-            }
-            _ => (0.0, 0.0),
-        };
-        (explicit(p, "w").unwrap_or(w), explicit(p, "h").unwrap_or(h))
-    }
 }
 
-/// What one node draws.
-fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, out: &mut Layer) {
-    let p = &node.props;
-    let text = |key: &str| p.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
-    match node.kind {
-        NodeKind::Rect => out.quads.push(QuadItem {
-            rect,
-            color: color(p, "color", Rgba::TRANSPARENT),
-            border_color: color(p, "border_color", Rgba::TRANSPARENT),
-            border_width: num(p, "border_width", 0.0),
-            radius: num(p, "radius", 0.0),
-            clip,
-        }),
-        NodeKind::Text | NodeKind::Label => out.texts.push(TextItem {
-            node: id,
-            text: text("text"),
-            size: num(p, "size", 14.0),
-            color: color(p, "color", Rgba::BLACK),
-            bold: p.get("weight").and_then(Value::as_str) == Some("bold"),
-            center: p.get("align").and_then(Value::as_str) == Some("center"),
-            rect,
-            clip,
-        }),
-        // A button is a rounded box with its label centered; the compositor sets
-        // `pressed` while the pointer holds it down.
-        NodeKind::Button => {
-            let pressed = p.get("pressed").and_then(Value::as_bool) == Some(true);
-            let fill = if pressed { "#c9d2df" } else { "#eef1f6" };
-            out.quads.push(QuadItem {
-                rect,
-                color: color(p, "color", Rgba::parse(fill).expect("valid color")),
-                border_color: Rgba::parse("#aeb8c6").expect("valid color"),
-                border_width: 1.0,
-                radius: num(p, "radius", 6.0),
-                clip,
-            });
-            let size = num(p, "size", 14.0);
-            let line = (size * 1.3).ceil();
-            out.texts.push(TextItem {
-                node: id,
-                text: text("label"),
-                size,
-                color: color(p, "text_color", Rgba::parse("#1f2937").expect("valid color")),
-                bold: false,
-                center: true,
-                rect: Rect { x: rect.x, y: rect.y + ((rect.h - line) / 2.0).max(0.0), w: rect.w, h: line },
-                clip: clip.intersect(&rect),
-            });
-        }
-        _ => {}
-    }
-}
-
-fn explicit(p: &Props, key: &str) -> Option<f32> {
-    p.get(key).and_then(Value::as_f64).map(|v| v as f32)
-}
+/// The screen as the parent of the root's children.
+const SCREEN: Rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
 
 pub fn num(p: &Props, key: &str, default: f32) -> f32 {
     p.get(key).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(default)
 }
 
 pub fn color(p: &Props, key: &str, default: Rgba) -> Rgba {
-    p.get(key).and_then(Value::as_str).and_then(Rgba::parse).unwrap_or(default)
+    p.get(key).and_then(Value::as_str).and_then(parse_color).unwrap_or(default)
+}
+
+/// A color prop: `#rrggbb`, `#rrggbbaa`, or a theme token such as `$accent`.
+pub fn parse_color(s: &str) -> Option<Rgba> {
+    match s.strip_prefix('$') {
+        Some(name) => Rgba::parse(crate::theme::token(name)?),
+        None => Rgba::parse(s),
+    }
 }
 
 fn rect_of(p: &Props) -> Rect {

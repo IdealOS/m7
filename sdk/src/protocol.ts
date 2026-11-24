@@ -172,6 +172,9 @@ export type ChangesParams = {
 /** Result of `changes`, newest first. */
 export type ChangesResult = { change_sets: ChangeSetInfo[] };
 
+/** What's on the clipboard: text, and the document it came from, if any. */
+export type Clipboard = { text: string; doc?: string | null };
+
 /** Params of a `compositor.commit` request. */
 export type Commit = { window: number; ops: SceneOp[] };
 
@@ -312,10 +315,24 @@ export type NameParams = {
 };
 
 /**
- * Node types understood by the compositor. Phase 0 renders the primitives
- * (`rect`, `text`, `group`); widgets arrive in M4 and M5.
+ * Node types understood by the compositor: primitives (`group`, `rect`, `text`,
+ * `image`), containers that lay out their children (`vstack`, `hstack`,
+ * `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
+ * draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
+ * `select`, `menu`, `text_field`, `text_area`, `vlist`).
  */
-export type NodeKind = "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "label" | "button";
+export type NodeKind =
+  | "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "toolbar" | "grid" | "split" | "scroll" | "dialog" | "label" | "button" | "checkbox" | "toggle" | "slider" | "select" | "text_field" | "text_area"
+  /**
+   * A button labelled `label` that opens a menu of `options`; choosing one
+   * sends a `choose` event with it. Unlike a select, it keeps no value.
+   */
+  | "menu"
+  /**
+   * A virtual list: `count` rows of `row_height`, of which the app creates only
+   * the visible ones (it hears which, as `range` events), each with an `index`.
+   */
+  | "vlist";
 
 /** Params of `open_window`. */
 export type OpenWindowParams = {
@@ -402,6 +419,15 @@ export type SnapshotInfo = {
 /** Result of `snapshots`, newest first. */
 export type SnapshotsResult = { snapshots: SnapshotInfo[] };
 
+/**
+ * Params of `splice`: edit the text at field `path` (dotted, such as `body` or
+ * `notes.summary`) of document `id`: at character `at`, delete `delete`
+ * characters, then insert `insert`. The field becomes collaborative text (it reads
+ * as a plain string everywhere), so concurrent edits merge and each splice is its
+ * own change in history. Positions count Unicode characters, not bytes.
+ */
+export type SpliceParams = { id: string; path: string; at: number; delete?: number; insert?: string };
+
 /** The one trust level `adopt` names explicitly. */
 export type SystemTrust = "system";
 
@@ -483,10 +509,16 @@ export type WindowEvent =
   /** The first part: the window's id, for commits, and its content size. */
   | { kind: "opened"; window: number; width: number; height: number }
   /**
-   * Something happened to node `node` (an id from the app's commits) that the
-   * app listens for, such as `click`.
+   * Something happened to node `node` (an id from the app's commits): `click`
+   * (a button it listens to), `change` (a widget's new value: a checkbox's or
+   * toggle's boolean, a slider's number, a select's option, a text field's text),
+   * `submit` (Enter in a text field, with its text), `range` (a virtual list's
+   * visible rows, as `[first, last]`), `choose` (a menu's chosen option), or
+   * `cancel` (Escape in a dialog).
    */
-  | { kind: "event"; node: number; event: string }
+  | { kind: "event"; node: number; event: string; value?: unknown }
+  /** The window's content area changed size (the user resized or maximized it). */
+  | { kind: "resized"; width: number; height: number }
   /**
    * The user asked to close the window. It stays until the app cancels the
    * request (or answers it).

@@ -55,15 +55,16 @@ type Shared = Arc<Mutex<(Desktop, Bridge)>>;
 
 /// Whether some text item on screen says exactly `text`.
 fn shows(shared: &Shared, text: &str) -> bool {
-    let s = shared.lock().unwrap();
-    s.0.scene.draw_list().layers.iter().flat_map(|l| &l.texts).any(|t| t.text == text)
+    // As a backend draws: laid out first.
+    let mut s = shared.lock().unwrap();
+    s.0.draw_list().layers.iter().flat_map(|l| &l.texts).any(|t| t.text == text)
 }
 
 /// Click the middle of the button labelled `text`, as a pointer would.
 fn click(shared: &Shared, text: &str) {
     let mut s = shared.lock().unwrap();
     let (desktop, bridge) = &mut *s;
-    let list = desktop.scene.draw_list();
+    let list = desktop.draw_list();
     let t =
         list.layers.iter().flat_map(|l| &l.texts).find(|t| t.text == text).expect("the button is on screen");
     let (x, y) = (t.rect.x + t.rect.w / 2.0, t.rect.y + t.rect.h / 2.0);

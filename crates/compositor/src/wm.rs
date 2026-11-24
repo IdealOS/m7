@@ -75,8 +75,12 @@ impl WindowManager {
     }
 }
 
-fn is_window(scene: &Scene, id: NodeId) -> bool {
-    scene.node(id).and_then(|n| n.props.get("window")).and_then(Value::as_bool) == Some(true)
+/// Whether root child `id` is a window on the current workspace (others are hidden).
+pub fn is_window(scene: &Scene, id: NodeId) -> bool {
+    scene.node(id).is_some_and(|n| {
+        n.props.get("window").and_then(Value::as_bool) == Some(true)
+            && n.props.get("hidden").and_then(Value::as_bool) != Some(true)
+    })
 }
 
 #[cfg(test)]

@@ -6,7 +6,25 @@ import { test } from "node:test";
 
 import { applyWatch } from "../src/db.ts";
 import type { Doc, SceneOp } from "../src/protocol.ts";
-import { batch, db, each, effect, label, button, memo, openWindow, root, signal, vstack } from "../src/index.ts";
+import {
+  batch,
+  button,
+  checkbox,
+  clipboard,
+  db,
+  each,
+  effect,
+  label,
+  memo,
+  menu,
+  openWindow,
+  root,
+  setClipboard,
+  signal,
+  textField,
+  virtualList,
+  vstack,
+} from "../src/index.ts";
 
 type Stream = { to: string; method: string; params: unknown; part: (p: unknown) => void; end: (e?: Error) => void; cancelled: boolean };
 
@@ -189,4 +207,68 @@ test("each keeps rows in step with a list: added, kept, reordered, removed", asy
   setItems([{ id: "b", t: "B3" }, { id: "c", t: "C" }]);
   await tick();
   assert.deepEqual(ops(), [{ op: "set", id: bId, props: { text: "B3" } }]);
+});
+
+test("widgets hand their values to handlers, and the window follows resizes", async () => {
+  const host = fresh();
+  const seen: unknown[] = [];
+  const opened = openWindow({ title: "Form" }, () =>
+    vstack(
+      {},
+      checkbox({ label: "On", onChange: (v) => seen.push(["check", v]) }),
+      textField({ placeholder: "Name", bind: { doc: "d1", path: "name" }, onSubmit: (v) => seen.push(["submit", v]) }),
+      menu({ label: "File", options: ["New", "Open"], onChoose: (v) => seen.push(["choose", v]) }),
+    ),
+  );
+  host.streams[0].part({ kind: "opened", window: 2, width: 300, height: 200 });
+  const win = await opened;
+  await tick();
+  const creates = host.commits()[0].filter((op) => op.op === "create") as { id: number; type: string; props: Record<string, unknown> }[];
+  const check = creates.find((c) => c.type === "checkbox")!;
+  const field = creates.find((c) => c.type === "text_field")!;
+  const actions = creates.find((c) => c.type === "menu")!;
+  assert.deepEqual(actions.props, { label: "File", options: ["New", "Open"] }, "handlers stay in the app");
+  assert.deepEqual(field.props.bind, { doc: "d1", path: "name" }, "bind goes to the compositor as is");
+  assert.ok(!host.commits()[0].some((op) => op.op === "listen" && op.id === check.id), "only clicks need listening");
+  host.streams[0].part({ kind: "event", node: check.id, event: "change", value: true });
+  host.streams[0].part({ kind: "event", node: field.id, event: "submit", value: "Ada" });
+  host.streams[0].part({ kind: "event", node: actions.id, event: "choose", value: "Open" });
+  assert.deepEqual(seen, [["check", true], ["submit", "Ada"], ["choose", "Open"]]);
+  assert.deepEqual(win.size(), { width: 300, height: 200 });
+  host.streams[0].part({ kind: "resized", width: 640, height: 480 });
+  assert.deepEqual(win.size(), { width: 640, height: 480 });
+});
+
+test("a virtual list makes rows as they come into view and drops them as they leave", async () => {
+  const host = fresh();
+  const made: number[] = [];
+  const opened = openWindow({ title: "Long" }, () =>
+    virtualList({ count: 1000, rowHeight: 20, overscan: 1 }, (i) => {
+      made.push(i);
+      return label({ text: `Row ${i}` });
+    }),
+  );
+  host.streams[0].part({ kind: "opened", window: 3, width: 300, height: 200 });
+  await opened;
+  await tick();
+  const vlist = (host.commits()[0].find((op) => op.op === "create" && op.type === "vlist") as { id: number; props: Record<string, unknown> });
+  assert.equal(vlist.props.row_height, 20);
+  host.streams[0].part({ kind: "event", node: vlist.id, event: "range", value: [0, 4] });
+  assert.deepEqual(made, [0, 1, 2, 3, 4, 5], "visible rows plus one");
+  await tick();
+  const indexes = host.commits().flat().filter((op) => op.op === "set" && "index" in op.props);
+  assert.equal(indexes.length, 6, "each row says its index");
+  host.requests.length = 0;
+  host.streams[0].part({ kind: "event", node: vlist.id, event: "range", value: [10, 14] });
+  await tick();
+  assert.deepEqual(made.slice(6), [9, 10, 11, 12, 13, 14, 15]);
+  assert.equal(host.commits().flat().filter((op) => op.op === "destroy").length, 6, "the first rows left");
+});
+
+test("the clipboard goes through the compositor", async () => {
+  const host = fresh();
+  host.answer = (_, method) => (method === "get_clipboard" ? { text: "hi" } : null);
+  assert.deepEqual(await clipboard(), { text: "hi" });
+  await setClipboard("note", "d2");
+  assert.deepEqual(host.requests.at(-1), { to: "compositor", method: "set_clipboard", params: { text: "note", doc: "d2" } });
 });

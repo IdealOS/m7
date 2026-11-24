@@ -16,6 +16,7 @@ serde_json = "1"
 wgpu = "30"
 winit = "0.30"
 glyphon = "0.12"
+taffy = "0.16"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"

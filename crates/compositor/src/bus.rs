@@ -3,12 +3,14 @@
 //! The frame loop must never wait on I/O, so the bus lives on its own thread with
 //! a small tokio runtime. It claims `compositor`, passes each request and cancel to
 //! the frame loop as a [`Call`] (then calls the backend's `wake`, so a sleeping loop
-//! notices), and sends back the [`Out`]s the loop produces.
+//! notices), and sends back the [`Out`]s the loop produces. The compositor's own
+//! requests (loading bound fields, listing and launching apps) go out the same
+//! way, and their answers come back as [`Call::Reply`].
 //!
 //! Without a bus (hosted development with no `busd` running) the compositor still
 //! runs; it just has no app windows.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use bus_client::{Client, Incoming};
@@ -39,12 +41,16 @@ impl Bridge {
 /// Connect to the bus (the connection session handed over, or the default socket)
 /// and claim `compositor`. `wake` is called after each request is queued. Returns
 /// `None`, after logging why, if there's no bus.
-pub fn connect(wake: impl Fn() + Send + 'static) -> Option<Bridge> {
+pub fn connect(wake: impl Fn() + Send + Sync + 'static) -> Option<Bridge> {
     connect_with(None, wake)
 }
 
 /// Like [`connect`], to the broker at `socket` if given (for tests).
-pub fn connect_with(socket: Option<std::path::PathBuf>, wake: impl Fn() + Send + 'static) -> Option<Bridge> {
+pub fn connect_with(
+    socket: Option<std::path::PathBuf>,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> Option<Bridge> {
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let (calls_tx, calls) = mpsc::channel();
     let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
     let (ready_tx, ready) = mpsc::channel::<Result<(), String>>();
@@ -69,18 +75,58 @@ pub fn connect_with(socket: Option<std::path::PathBuf>, wake: impl Fn() + Send +
                 let _ = ready_tx.send(Ok(()));
                 let Some(mut requests) = bus.take_requests() else { return };
                 let sender = bus.clone();
+                let replies = calls_tx.clone();
+                let woken = wake.clone();
+                // When the frame loop drops its `Bridge`, the outgoing queue closes; that
+                // ends this thread, which closes the connection and frees the name.
+                let (gone_tx, mut gone) = tokio::sync::oneshot::channel::<()>();
                 tokio::spawn(async move {
+                    let _gone = gone_tx;
                     while let Some(out) = out_rx.recv().await {
                         let sent = match out {
                             Out::Part { id, data } => sender.stream(id, data).await,
                             Out::Respond { id, result } => sender.respond(id, result).await,
+                            Out::FetchBlob { hash } => {
+                                let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
+                                tokio::spawn(async move {
+                                    let result = fetch_blob(&bus, &hash).await;
+                                    if replies.send(Call::Blob { hash, result }).is_ok() {
+                                        woken();
+                                    }
+                                });
+                                Ok(())
+                            }
+                            Out::Request { token, to, method, params } => {
+                                // Answered in its own task, so a slow service doesn't
+                                // hold up answers to apps.
+                                let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
+                                tokio::spawn(async move {
+                                    let result =
+                                        bus.request(&to, &method, params).await.map_err(|e| match e {
+                                            bus_client::CallError::Bus(b) => b,
+                                            other => protocol::BusError {
+                                                code: other.code().into(),
+                                                message: other.to_string(),
+                                            },
+                                        });
+                                    if replies.send(Call::Reply { token, result }).is_ok() {
+                                        woken();
+                                    }
+                                });
+                                Ok(())
+                            }
                         };
                         if let Err(e) = sent {
                             log::warn!("bus: couldn't answer an app: {e}");
                         }
                     }
                 });
-                while let Some(incoming) = requests.next().await {
+                loop {
+                    let incoming = tokio::select! {
+                        incoming = requests.next() => incoming,
+                        _ = &mut gone => return,
+                    };
+                    let Some(incoming) = incoming else { break };
                     let call = match incoming {
                         Incoming::Request { id, from, method, params, stream, .. } => {
                             Call::Request { id, from, method, params, stream }
@@ -110,6 +156,28 @@ pub fn connect_with(socket: Option<std::path::PathBuf>, wake: impl Fn() + Send +
             None
         }
     }
+}
+
+/// Blob `hash`'s bytes, read from the descriptor `get_blob` answers with.
+async fn fetch_blob(bus: &Client, hash: &str) -> Result<Vec<u8>, String> {
+    let params = serde_json::json!({"hash": hash});
+    let reply =
+        bus.request_with("db", "get_blob", params, Vec::new(), None).await.map_err(|e| e.to_string())?;
+    let fd = reply.fds.into_iter().next().ok_or("get_blob sent no descriptor")?;
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd)
+            .take(crate::image::MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > crate::image::MAX_BYTES {
+            return Err("the image is too big".into());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 async fn connect_and_claim(socket: Option<std::path::PathBuf>) -> Result<Client, String> {

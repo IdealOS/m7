@@ -31,8 +31,8 @@ use protocol::db::{
     AtParams, AtResult, BacklinkInfo, BlobInfo, ChangeKind, ChangeSetInfo, ChangesParams, ChangesResult,
     CreateParams, DEFAULT_QUERY_LIMIT, DiffParams, DiffResult, DocsResult, FieldChangeInfo, HashParams,
     HistoryResult, IdParams, LinkInfo, LinksResult, MAX_BLOB_BYTES, MAX_WATCHES, Query, RestoreParams,
-    RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, UndoParams, UndoResult,
-    UpdateParams, VersionInfo, WatchEvent, code, method,
+    RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, SpliceParams, UndoParams,
+    UndoResult, UpdateParams, VersionInfo, WatchEvent, code, method,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -134,6 +134,11 @@ pub fn handle(store: &mut Store, origin: &str, method: &str, params: Value) -> R
             schemas: db::schemas::all().iter().map(|(name, s)| (name.clone(), s.json.clone())).collect(),
         })),
         method::BLOB_INFO => reply(store.blob_info(&parse::<HashParams>(params)?.hash).map(blob_info)),
+        method::SPLICE => {
+            let p: SpliceParams = parse(params)?;
+            let set = store.splice(&p.id, &p.path, p.at as usize, p.delete as usize, &p.insert, origin);
+            reply(set.map(|change_set| UndoResult { change_set }))
+        }
         other => Err(error(bus_code::BAD_REQUEST, format!("db has no method {other:?}"))),
     }
 }
