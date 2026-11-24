@@ -74,16 +74,17 @@ impl Layout {
         let roots: Vec<NodeId> = scene
             .ids()
             .filter(|&id| {
+                // Dialogs float over their parent, so each is a root even inside a
+                // container (which leaves them out of its flow).
+                let floats = scene.node(id).is_some_and(|n| n.kind == NodeKind::Dialog);
                 is_container(scene, id)
-                    && !scene.parent(id).is_some_and(|p| is_container(scene, p))
+                    && (floats || !scene.parent(id).is_some_and(|p| is_container(scene, p)))
                     && !hidden(scene, id)
             })
             .collect();
         for root in roots {
             self.lay_out_root(scene, root, &mut out);
         }
-        // Dialogs are roots of their own (they float over their parent), so they
-        // were found above even when their parent is a container.
         out
     }
 
@@ -601,6 +602,28 @@ mod tests {
 
     fn rect(scene: &Scene, id: NodeId) -> Rect {
         scene.layout_rect(id).unwrap_or_else(|| panic!("node {id} wasn't laid out"))
+    }
+
+    #[test]
+    fn a_dialog_inside_a_container_is_laid_out_on_its_own() {
+        // As the gallery has it: the dialog is the window's column's last child.
+        let s = laid_out(json!([
+            {"op": "create", "id": 1, "type": "group", "props": {"w": 500, "h": 400}},
+            {"op": "create", "id": 2, "type": "vstack", "props": {}},
+            {"op": "create", "id": 3, "type": "button", "props": {"label": "Open"}},
+            {"op": "create", "id": 4, "type": "dialog", "props": {}},
+            {"op": "create", "id": 5, "type": "label", "props": {"text": "A dialog"}},
+            {"op": "insert", "parent": 0, "child": 1, "index": 0},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0},
+            {"op": "insert", "parent": 2, "child": 3, "index": 0},
+            {"op": "insert", "parent": 2, "child": 4, "index": 1},
+            {"op": "insert", "parent": 4, "child": 5, "index": 0}
+        ]));
+        let d = rect(&s, 4);
+        assert_eq!(d.w, 340.0, "its own width, not the column's");
+        assert_eq!(d.h, 20.0 + (14.0f32 * 1.3).ceil() + 20.0, "its content and padding");
+        assert_eq!(rect(&s, 5).w, 300.0, "its contents are laid out too");
+        assert_eq!(rect(&s, 3).y, 0.0, "it takes no space in the column");
     }
 
     #[test]

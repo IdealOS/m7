@@ -83,7 +83,13 @@ pub struct Apps {
     work: (f32, f32, f32, f32),
     /// The workspace new windows open on.
     pub workspace: u32,
+    /// Text each text widget reported to its app (`change` events) that the app
+    /// hasn't sent back yet, oldest first. See [`Apps::reported`].
+    reported: HashMap<NodeId, std::collections::VecDeque<String>>,
 }
+
+/// How many unanswered reports a text widget remembers.
+const MAX_REPORTED: usize = 64;
 
 impl Apps {
     pub fn new() -> Apps {
@@ -120,6 +126,38 @@ impl Apps {
             request: w.request,
             event: WindowEvent::Event { node: app_id, event: event.into(), value },
         })
+    }
+
+    /// Text widget `node` told its app its text is now `text`.
+    ///
+    /// Apps often set a field's `value` from its `change` events. Those echoes
+    /// arrive late when someone types quickly; applied, each would put the field
+    /// back to an older text, losing what was typed since. So an app setting a
+    /// value it was told is taken as an echo and leaves the shown text alone; any
+    /// other value replaces it.
+    pub fn reported(&mut self, node: NodeId, text: &str) {
+        let q = self.reported.entry(node).or_default();
+        if q.len() == MAX_REPORTED {
+            q.pop_front();
+        }
+        q.push_back(text.to_owned());
+    }
+
+    /// Whether the app setting text widget `node` to `value` is an echo of
+    /// something it was told (forgetting that report and older ones), rather
+    /// than new text.
+    fn is_echo(&mut self, node: NodeId, value: &Value) -> bool {
+        let Some(q) = self.reported.get_mut(&node) else { return false };
+        match value.as_str().and_then(|v| q.iter().position(|r| r == v)) {
+            Some(i) => {
+                q.drain(..=i);
+                true
+            }
+            None => {
+                q.clear();
+                false
+            }
+        }
     }
 
     /// Resize window `window`'s content area to `w` by `h` (kept to sensible
@@ -299,9 +337,17 @@ impl Apps {
         let mut created = Vec::new();
         for op in commit.ops {
             match self.translate(commit.window, op) {
-                Ok(Translated::Op(op)) => {
-                    if let SceneOp::Create { id, .. } = &op {
-                        created.push(*id);
+                Ok(Translated::Op(mut op)) => {
+                    match &mut op {
+                        SceneOp::Create { id, .. } => created.push(*id),
+                        SceneOp::Set { id, props } => {
+                            if let Some(v) = props.get("_value").cloned()
+                                && self.is_echo(*id, &v)
+                            {
+                                props.remove("_value");
+                            }
+                        }
+                        _ => {}
                     }
                     ops.push(op)
                 }
@@ -391,6 +437,7 @@ impl Apps {
         w.ids.retain(|_, g| scene.node(*g).is_some());
         self.targets.retain(|g, _| scene.node(*g).is_some());
         self.owners.retain(|g, _| scene.node(*g).is_some());
+        self.reported.retain(|g, _| scene.node(*g).is_some());
     }
 
     /// The app's request `request` ended (cancelled, answered, or its connection

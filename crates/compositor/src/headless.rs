@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::render::{FrameStats, Renderer};
-use crate::scene::{DrawList, Rgba, Scene};
+use crate::scene::{DrawList, Rgba};
 
 pub struct Image {
     pub width: u32,
@@ -31,12 +31,14 @@ impl Image {
     }
 }
 
-/// Render `scene` at `width` x `height` logical pixels times `scale`.
-pub fn render(scene: &Scene, width: u32, height: u32, scale: f32) -> Result<Image, String> {
+/// Render `list` at `width` x `height` logical pixels times `scale`. Take
+/// the list from [`crate::desktop::Desktop::draw_list`], as the backends do, so
+/// it's laid out and carries images' pixels.
+pub fn render(list: &DrawList, width: u32, height: u32, scale: f32) -> Result<Image, String> {
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
     let mut target = Offscreen::new(pw, ph, wgpu::TextureFormat::Rgba8UnormSrgb)?;
     let mut pixels = Vec::with_capacity((pw * ph * 4) as usize);
-    target.render(&scene.draw_list(), scale, Rgba::BLACK, |row| pixels.extend_from_slice(row))?;
+    target.render(list, scale, Rgba::BLACK, |row| pixels.extend_from_slice(row))?;
     Ok(Image { width: pw, height: ph, pixels })
 }
 
@@ -185,6 +187,7 @@ fn backends(from_env: Option<wgpu::Backends>) -> wgpu::Backends {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::Scene;
     use protocol::{NodeKind, SceneOp};
     use serde_json::json;
 
@@ -207,16 +210,40 @@ mod tests {
             SceneOp::Create { id: 1, kind: NodeKind::Rect, props: props.as_object().unwrap().clone() },
             SceneOp::Insert { parent: 0, child: 1, index: 0 },
         ]);
-        let img = match render(&scene, 100, 60, 1.0) {
-            Ok(img) => img,
-            Err(e) if e.starts_with("no GPU adapter") => {
-                eprintln!("skipping: {e}");
-                return;
-            }
-            Err(e) => panic!("{e}"),
-        };
+        let Some(img) = render_or_skip(&scene.draw_list()) else { return };
         assert_eq!(img.pixel(50, 30), [255, 0, 0, 255], "center is the fill");
         assert_eq!(img.pixel(2, 2), [0, 0, 0, 255], "outside is the clear color");
         assert_eq!(img.pixel(10, 10)[0], 0, "the rounded corner leaves the corner pixel clear");
+    }
+
+    fn render_or_skip(list: &DrawList) -> Option<Image> {
+        match render(list, 100, 60, 1.0) {
+            Ok(img) => Some(img),
+            Err(e) if e.starts_with("no GPU adapter") => {
+                eprintln!("skipping: {e}");
+                None
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn renders_an_image() {
+        // A one-pixel green image stretched over a square.
+        let pixels =
+            std::sync::Arc::new(crate::image::Image { width: 1, height: 1, rgba: vec![0, 255, 0, 255] });
+        let mut layer = crate::scene::Layer::default();
+        layer.images.push(crate::scene::ImageItem {
+            node: 1,
+            blob: "ab".repeat(32),
+            pixels: Some(pixels),
+            rect: crate::scene::Rect { x: 20.0, y: 10.0, w: 40.0, h: 40.0 },
+            clip: crate::scene::Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 },
+            radius: 0.0,
+        });
+        let list = DrawList { layers: vec![layer] };
+        let Some(img) = render_or_skip(&list) else { return };
+        assert_eq!(img.pixel(40, 30), [0, 255, 0, 255], "the image");
+        assert_eq!(img.pixel(80, 30), [0, 0, 0, 255], "beside it, the clear color");
     }
 }

@@ -721,6 +721,7 @@ impl Desktop {
         let text = e.text().to_owned();
         if let Some(s) = splice {
             self.set(node, json!({"_value": text.clone()}));
+            self.apps.reported(node, &text);
             self.event(node, "change", json!(text));
             if let Some(Value::Object(bind)) = self.prop(node, "bind").cloned()
                 && let (Some(doc), Some(path)) =
@@ -1696,6 +1697,42 @@ mod tests {
         assert_eq!(prop(&d, field, "_caret")[0], 0.0, "the caret moved back to the start");
         let out = typed(&mut d, "x");
         assert_eq!(events(&out), [(7, "change".into(), json!("x"))], "editing starts from the app's value");
+    }
+
+    #[test]
+    fn late_echoes_of_typed_text_dont_undo_typing() {
+        // An app that sets the field's value from each change event, as the
+        // gallery does. Its answers arrive after the typing.
+        let mut d = desk();
+        let w = open(&mut d, 7, widgets());
+        let field = global(&d, w, 7);
+        let at = center(&mut d, field);
+        click(&mut d, at);
+        typed(&mut d, "Grace");
+        let set = |d: &mut Desktop, v: &str| {
+            let ops = json!({"window": w, "ops": [{"op": "set", "id": 7, "props": {"value": v}}]});
+            d.call(request(9, "commit", ops, false));
+        };
+        set(&mut d, "G");
+        assert_eq!(prop(&d, field, "_value"), "Grace", "an old echo leaves the typing alone");
+        typed(&mut d, "!");
+        for v in ["Gr", "Gra", "Grac", "Grace"] {
+            set(&mut d, v);
+        }
+        assert_eq!(prop(&d, field, "_value"), "Grace!");
+        assert_eq!(
+            events(&typed(&mut d, "?")),
+            [(7, "change".into(), json!("Grace!?"))],
+            "the caret stayed at the end"
+        );
+        // A value the field never reported is the app's own, and replaces the text.
+        set(&mut d, "Ada");
+        assert_eq!(prop(&d, field, "_value"), "Ada");
+        // So is clearing it, even after an echo.
+        typed(&mut d, "x");
+        set(&mut d, "Adax");
+        set(&mut d, "");
+        assert_eq!(prop(&d, field, "_value"), "");
     }
 
     #[test]

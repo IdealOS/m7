@@ -133,7 +133,7 @@ fn take_screenshot(
     desktop.scene.apply(demo::hud(&summary));
     desktop.relayout();
     let started = std::time::Instant::now();
-    let img = headless::render(&desktop.scene, opts.width, opts.height, scale)?;
+    let img = headless::render(&desktop.draw_list(), opts.width, opts.height, scale)?;
     log::info!("rendered {}x{} in {:?}", img.width, img.height, started.elapsed());
     img.save_png(path)?;
     println!("wrote {}", path.display());

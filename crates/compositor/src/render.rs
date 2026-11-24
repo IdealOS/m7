@@ -418,7 +418,7 @@ impl Renderer {
             }
             text_count += layer.texts.len();
             let areas = layer.texts.iter().map(|t| {
-                let clip = phys(t.rect.intersect(&t.clip), scale);
+                let clip = phys(text_bounds(t), scale);
                 TextArea {
                     buffer: &self.texts[&(t.node, t.slot)].buffer,
                     left: t.rect.x * scale,
@@ -524,6 +524,45 @@ impl Renderer {
     }
 }
 
+/// Where text item `t` may draw: its rect within its clip. A zero width means
+/// the text doesn't wrap (a single-line field), so then only the clip bounds it
+/// across.
+fn text_bounds(t: &TextItem) -> Rect {
+    let area = if t.rect.w > 0.0 { t.rect } else { Rect { x: t.clip.x, w: t.clip.w, ..t.rect } };
+    area.intersect(&t.clip)
+}
+
 fn phys(r: Rect, scale: f32) -> [f32; 4] {
     [r.x * scale, r.y * scale, r.w * scale, r.h * scale]
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    fn item(rect: Rect, clip: Rect) -> TextItem {
+        TextItem {
+            node: 1,
+            slot: 0,
+            text: "Grace".into(),
+            size: 14.0,
+            color: Rgba::TRANSPARENT,
+            bold: false,
+            center: false,
+            rect,
+            clip,
+        }
+    }
+
+    #[test]
+    fn unwrapped_text_is_bounded_by_its_clip_not_its_zero_width() {
+        // A single-line text field's text: no width (it doesn't wrap), clipped
+        // to the field. It used to clip to nothing, so fields drew no text.
+        let field = Rect { x: 84.0, y: 576.0, w: 472.0, h: 24.0 };
+        let b = text_bounds(&item(Rect { x: 84.0, y: 579.0, w: 0.0, h: 19.0 }, field));
+        assert_eq!(b, Rect { x: 84.0, y: 579.0, w: 472.0, h: 19.0 });
+        // Wrapped text keeps to its own rect.
+        let b = text_bounds(&item(Rect { x: 90.0, y: 579.0, w: 100.0, h: 19.0 }, field));
+        assert_eq!(b, Rect { x: 90.0, y: 579.0, w: 100.0, h: 19.0 });
+    }
 }

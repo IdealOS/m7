@@ -383,6 +383,11 @@ impl Scene {
         for &child in self.top_level() {
             let mut layer = Layer::default();
             self.walk(child, SCREEN, None, Rect::INFINITE, &mut |id, node, rect, clip| {
+                // A layer's text draws over all its quads, so a dialog, which must
+                // cover its window's text too, starts a layer of its own.
+                if node.kind == NodeKind::Dialog {
+                    list.layers.push(std::mem::take(&mut layer));
+                }
                 crate::draw::draw(id, node, rect, clip, &mut layer)
             });
             list.layers.push(layer);
@@ -527,6 +532,26 @@ mod tests {
         s.raise(1);
         assert_eq!(s.top_level(), &[2, 1]);
         assert_eq!(s.draw_list().layers.len(), 2);
+    }
+
+    #[test]
+    fn a_dialog_draws_over_its_windows_text() {
+        let mut s = Scene::new();
+        s.apply_all([
+            create(1, NodeKind::Group, json!({"w": 300, "h": 200})),
+            create(2, NodeKind::Text, json!({"w": 100, "h": 20, "text": "behind"})),
+            create(3, NodeKind::Dialog, json!({"w": 200, "h": 100})),
+            create(4, NodeKind::Text, json!({"w": 100, "h": 20, "text": "in front"})),
+            insert(ROOT, 1),
+            insert(1, 2),
+            insert(1, 3),
+            insert(3, 4),
+        ]);
+        let list = s.draw_list();
+        let layer_of = |text: &str| list.layers.iter().position(|l| l.texts.iter().any(|t| t.text == text));
+        let panel = list.layers.iter().position(|l| l.quads.iter().any(|q| q.rect.w == 200.0)).unwrap();
+        assert!(layer_of("behind").unwrap() < panel, "the window's text is under the panel");
+        assert_eq!(layer_of("in front"), Some(panel), "the dialog's own text is on it");
     }
 
     #[test]
