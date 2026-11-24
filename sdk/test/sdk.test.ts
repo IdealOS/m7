@@ -18,6 +18,7 @@ import {
   memo,
   menu,
   openWindow,
+  permissions,
   root,
   setClipboard,
   signal,
@@ -30,12 +31,12 @@ type Stream = { to: string; method: string; params: unknown; part: (p: unknown) 
 
 /** Stands in for app-host's `__idealos`. */
 class FakeHost {
-  requests: { to: string; method: string; params: unknown }[] = [];
+  requests: { to: string; method: string; params: unknown; options?: { timeoutMs?: number } }[] = [];
   streams: Stream[] = [];
   answer: (to: string, method: string, params: unknown) => unknown = () => null;
 
-  request(to: string, method: string, params: unknown) {
-    this.requests.push({ to, method, params });
+  request(to: string, method: string, params: unknown, options?: { timeoutMs?: number }) {
+    this.requests.push(options ? { to, method, params, options } : { to, method, params });
     return Promise.resolve(this.answer(to, method, params));
   }
   stream(to: string, method: string, params: unknown, part: (p: unknown) => void, end: (e?: Error) => void) {
@@ -271,4 +272,19 @@ test("the clipboard goes through the compositor", async () => {
   assert.deepEqual(await clipboard(), { text: "hi" });
   await setClipboard("note", "d2");
   assert.deepEqual(host.requests.at(-1), { to: "compositor", method: "set_clipboard", params: { text: "note", doc: "d2" } });
+});
+
+test("permissions.request asks perm, waiting as long as a prompt may", async () => {
+  const host = fresh();
+  host.answer = (_to, method) => (method === "request" ? { granted: true } : { grants: [{ id: 1, app: "a.b", capability: "network", granted: 0, by: "user" }] });
+  assert.equal(await permissions.request([{ type: "Note", access: ["read"] }], "to list your notes"), true);
+  assert.deepEqual(host.requests[0], {
+    to: "perm",
+    method: "request",
+    params: { rules: [{ type: "Note", access: ["read"] }], reason: "to list your notes" },
+    options: { timeoutMs: 600000 },
+  });
+  const grants = await permissions.granted();
+  assert.equal(grants.length, 1);
+  assert.deepEqual(host.requests[1], { to: "perm", method: "grants", params: {} });
 });

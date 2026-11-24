@@ -110,6 +110,25 @@ impl Store {
             .collect()
     }
 
+    /// Change set `id`.
+    pub fn change_set(&self, id: i64) -> Result<ChangeSet> {
+        let (at, origin, undoes) = self
+            .conn
+            .query_row("SELECT at, origin, undoes FROM change_sets WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("change set {id}")))?;
+        let docs = self
+            .conn
+            .prepare_cached(
+                "SELECT d.id FROM doc_versions v JOIN documents d ON d.doc = v.doc WHERE v.change_set = ?1 ORDER BY d.doc",
+            )?
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ChangeSet { id, at, origin, undoes, docs })
+    }
+
     /// Undo change set `target`, as a new change set made by `origin`. Returns the
     /// new change set's id.
     pub fn undo(&mut self, target: i64, origin: &str) -> Result<i64> {

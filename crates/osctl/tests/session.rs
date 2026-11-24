@@ -99,7 +99,15 @@ fn session_gives_services_their_bus_identity() {
     .unwrap();
     let log = std::fs::File::create(dir.join("session.log")).unwrap();
     let child =
-        Command::new(sibling("session")).arg(&conf).stderr(log).stdout(Stdio::null()).spawn().unwrap();
+        // The "apps" here are shell scripts writing logs beside them, which their
+        // sandboxes (on Linux) would rightly refuse; this test is about identity.
+        Command::new(sibling("session"))
+            .arg(&conf)
+            .env("IDEALOS_NO_SANDBOX", "1")
+            .stderr(log)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
     let session = Session { child, dir: dir.clone() };
 
     // The app is stamped with its app id, and can't act as a service.

@@ -9,6 +9,14 @@ test("the manifest comes from package.json's idealos section", () => {
   assert.equal(manifest(JSON.stringify({ idealos: { id: "a.b", name: "X" } })).autostart, false);
 });
 
+test("permissions pass through, and must be a list of rules", () => {
+  const rules = [{ type: "Note", access: ["read", "create"] }, { capability: "network" }];
+  const m = manifest(JSON.stringify({ idealos: { id: "a.b", name: "X", permissions: rules } }));
+  assert.deepEqual(m.permissions, rules);
+  assert.equal(manifest(JSON.stringify({ idealos: { id: "a.b", name: "X" } })).permissions, undefined);
+  assert.throws(() => manifest(JSON.stringify({ idealos: { id: "a.b", name: "X", permissions: ["read:Note"] } })), /list of rules/);
+});
+
 test("bad manifests are refused", () => {
   assert.throws(() => manifest("{}"), /idealos/);
   assert.throws(() => manifest(JSON.stringify({ idealos: { id: "notes", name: "N" } })), /reverse-DNS/);

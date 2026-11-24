@@ -77,10 +77,14 @@ pub enum Action {
 }
 
 /// Decides whether a message may be delivered. Every request (other than to the
-/// broker itself), publish and subscribe passes through it. Until permissions
-/// exist (M6) the broker runs with [`AllowAll`], so nothing assumes unchecked access.
+/// broker itself), publish and subscribe passes through it. busd runs with
+/// [`crate::policy::Grants`]; tests often use [`AllowAll`].
 pub trait Policy: Send {
     fn check(&self, sender: &Sender, msg: &Message) -> Result<(), BusError>;
+
+    /// Sees every publish the broker delivers, stamped, after it passed
+    /// [`Policy::check`]: how a policy follows permd's grant table.
+    fn observe(&mut self, _sender: &Sender, _msg: &Message) {}
 }
 
 pub struct AllowAll;
@@ -331,6 +335,7 @@ impl Router {
                     log::warn!("bus: dropped publish from {sender:?}: {}", e.message);
                     return;
                 }
+                self.policy.observe(&sender, &msg);
                 let Message::Publish { topic, .. } = &msg else { unreachable!() };
                 let to = self.subscribers(topic);
                 if !to.is_empty() {
@@ -520,20 +525,7 @@ fn to_value(v: impl Serialize) -> Value {
     serde_json::to_value(v).expect("broker types serialize")
 }
 
-/// App ids are reverse-DNS names such as `org.idealos.mail`: at least two
-/// dot-separated segments of letters, digits and `-`.
-fn valid_app_id(id: &str) -> bool {
-    id.split('.').count() >= 2
-        && id.split('.').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-}
-
-/// Service names: non-empty, lowercase letters, digits, `-` and `.`, and not the
-/// broker's own name.
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != BROKER
-        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
-}
+use bus::{valid_app_id, valid_name};
 
 #[cfg(test)]
 #[path = "router_fuzz.rs"]

@@ -52,12 +52,14 @@ async fn run(path: &Path) -> Result<(), String> {
         Err(e) => log::warn!("busd: cannot raise the open-descriptor limit: {e}"),
     }
     let session = session_connection()?;
-    let listener = bind(path)?;
-    log::info!("busd: listening on {}", path.display());
+    // Handlers first: once the socket exists, a SIGTERM must clean it up, not kill
+    // busd before it can.
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let listener = bind(path)?;
+    log::info!("busd: listening on {}", path.display());
     let result = tokio::select! {
-        r = busd::serve(listener, Box::new(busd::AllowAll), session) => r.map_err(|e| format!("accept: {e}")),
+        r = busd::serve(listener, Box::new(busd::policy::Grants::new()), session) => r.map_err(|e| format!("accept: {e}")),
         _ = term.recv() => { log::info!("busd: stopping on SIGTERM"); Ok(()) }
         _ = int.recv() => { log::info!("busd: stopping on SIGINT"); Ok(()) }
     };

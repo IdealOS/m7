@@ -164,6 +164,17 @@ async fn install_once(
         if done.changed { "installed" } else { "unchanged" },
         &done.hash[..12]
     );
+    match install::grant(bus, &manifest).await {
+        Ok(made) => {
+            for g in made {
+                let _ = writeln!(out, "granted {}: {}", manifest.id, g.rule.describe());
+            }
+        }
+        Err(CallError::Bus(e)) if e.code == protocol::bus::code::NO_SUCH_SERVICE => {
+            let _ = writeln!(out, "permd isn't running: {} gets no permissions", manifest.id);
+        }
+        Err(e) => return Err(format!("granting {} its permissions: {e}", manifest.id)),
+    }
     match install::launch(bus, &manifest.id).await {
         Ok(()) => {
             let _ = writeln!(out, "session launched {}", manifest.id);

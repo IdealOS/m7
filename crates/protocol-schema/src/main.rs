@@ -6,7 +6,7 @@
 //! under `x-constants`, which JSON Schema has no keyword for.
 
 use protocol::bus::{self, code};
-use protocol::{broker, db};
+use protocol::{broker, db, perm, secrets};
 use serde_json::{Value, json};
 
 fn document() -> Value {
@@ -50,6 +50,22 @@ fn document() -> Value {
     g.subschema_for::<db::RestoreResult>();
     g.subschema_for::<db::HashParams>();
     g.subschema_for::<db::BlobInfo>();
+    g.subschema_for::<protocol::scene::PromptParams>();
+    g.subschema_for::<protocol::scene::PromptResult>();
+    g.subschema_for::<perm::Grant>();
+    g.subschema_for::<perm::GrantsParams>();
+    g.subschema_for::<perm::GrantsResult>();
+    g.subschema_for::<perm::RequestParams>();
+    g.subschema_for::<perm::RequestResult>();
+    g.subschema_for::<perm::GrantParams>();
+    g.subschema_for::<perm::RevokeParams>();
+    g.subschema_for::<perm::RevokeResult>();
+    g.subschema_for::<perm::AuditParams>();
+    g.subschema_for::<perm::AuditResult>();
+    g.subschema_for::<secrets::PutParams>();
+    g.subschema_for::<secrets::NameParams>();
+    g.subschema_for::<secrets::GetResult>();
+    g.subschema_for::<secrets::ListResult>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -80,6 +96,9 @@ fn document() -> Value {
         "WINDOW_CONTENT": constant(protocol::scene::CONTENT.into(), "The node id of a window's content area in that window's commits."),
         "MAX_WINDOW_NODES": constant(protocol::scene::MAX_WINDOW_NODES.into(), "Most nodes one window may hold."),
         "SESSION_SERVICE": constant(protocol::session::SERVICE.into(), "The name session claims."),
+        "PERM_SERVICE": constant(perm::SERVICE.into(), "The name permd claims."),
+        "GRANTS_TOPIC": constant(perm::GRANTS_TOPIC.into(), "Where permd publishes every grant whenever they change."),
+        "SECRETS_SERVICE": constant(secrets::SERVICE.into(), "The name secretsd claims."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

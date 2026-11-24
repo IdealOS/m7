@@ -23,6 +23,8 @@ pub mod color {
     /// Behind a dialog, over the rest of its window.
     pub const BACKDROP: &str = "#0f172a59";
     pub const BAR: &str = "#ffffffe6";
+    /// Over the whole screen, behind a permission prompt.
+    pub const SCRIM: &str = "#0f172ab3";
 }
 
 /// Spacing steps, in logical pixels.

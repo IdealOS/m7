@@ -102,15 +102,40 @@ pub const SERVICE: &str = "compositor";
 /// | `commit`      | [`Commit`]           | null   |
 /// | `get_clipboard` | none             | [`Clipboard`] |
 /// | `set_clipboard` | [`Clipboard`]    | null   |
+/// | `prompt`      | [`PromptParams`]     | [`PromptResult`] |
 ///
 /// The clipboard belongs to the compositor: text fields copy and paste through it
-/// without asking the app, and apps can read and write it, with text and,
-/// optionally, the id of a document it refers to.
+/// without asking the app. Apps can write it, with text and, optionally, the id of
+/// a document it refers to; reading it takes the `clipboard` capability.
+///
+/// `prompt` is for `perm` alone: it asks the user whether an app may have what it
+/// asked for, in a dialog drawn above every window and the top bar, which apps
+/// can't draw over or imitate. Prompts queue; each waits for an answer.
 pub mod method {
     pub const OPEN_WINDOW: &str = "open_window";
     pub const COMMIT: &str = "commit";
     pub const GET_CLIPBOARD: &str = "get_clipboard";
     pub const SET_CLIPBOARD: &str = "set_clipboard";
+    pub const PROMPT: &str = "prompt";
+}
+
+/// Params of `prompt`: app `app` (called `name`) asks for these things, each in
+/// words (see [`crate::perm::Rule::describe`]), for `reason`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PromptParams {
+    pub app: String,
+    pub name: String,
+    pub asks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Result of `prompt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PromptResult {
+    pub allow: bool,
 }
 
 /// What's on the clipboard: text, and the document it came from, if any.

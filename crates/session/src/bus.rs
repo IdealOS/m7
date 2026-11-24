@@ -23,9 +23,11 @@ use std::time::{Duration, Instant};
 
 use protocol::broker::{AdoptParams, AdoptResult, NameParams, method};
 use protocol::bus::{BROKER, BusError, FrameError, Message, Sender, decode_frame, encode_frame};
+use protocol::perm::{self, GrantsResult, capability};
 use protocol::unix::send_with_fds;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// How busd finds session's connection.
 pub const SESSION_FD_ENV: &str = "IDEALOS_BUS_SESSION_FD";
@@ -93,6 +95,9 @@ pub struct Link {
     buf: Vec<u8>,
     /// Requests to session, waiting for the main loop.
     incoming: Vec<Request>,
+    /// The apps holding the `network` grant, from permd's newest grant table.
+    network: HashSet<String>,
+    grants_version: i64,
 }
 
 impl Link {
@@ -101,10 +106,23 @@ impl Link {
     pub fn new() -> io::Result<(Link, Inherit)> {
         let (ours, theirs) = UnixStream::pair()?;
         ours.set_nonblocking(true)?;
-        let mut link =
-            Link { stream: ours, next_id: 1, pending: HashMap::new(), buf: Vec::new(), incoming: Vec::new() };
+        let mut link = Link {
+            stream: ours,
+            next_id: 1,
+            pending: HashMap::new(),
+            buf: Vec::new(),
+            incoming: Vec::new(),
+            network: HashSet::new(),
+            grants_version: -1,
+        };
         let claim = to_value(NameParams { name: "session".into() });
         link.send(Message::request(0, BROKER, method::CLAIM, claim), None, "claim session")?;
+        // Which apps may use the network, for their sandboxes. Subscribed before
+        // permd starts, so its first table isn't missed.
+        let id = link.next_id;
+        link.next_id += 1;
+        link.write(&Message::Subscribe { id, topic: perm::GRANTS_TOPIC.into() }, &[])?;
+        link.pending.insert(id, "subscription to grants".into());
         Ok((link, Inherit { env: SESSION_FD_ENV, fd: theirs.into() }))
     }
 
@@ -122,6 +140,11 @@ impl Link {
         let msg = Message::request(0, BROKER, method::ADOPT, to_value(params)).with_fds(1);
         self.send(msg, Some(broker_end.as_fd()), &format!("connection for {name}"))?;
         Ok(Inherit { env: BUS_FD_ENV, fd: service_end.into() })
+    }
+
+    /// Whether app `app` holds the `network` grant.
+    pub fn has_network(&self, app: &str) -> bool {
+        self.network.contains(app)
     }
 
     /// Requests to session that arrived since the last call.
@@ -205,6 +228,12 @@ impl Link {
             self.incoming.push(Request { id, from, method, params });
             return;
         }
+        if let Message::Publish { topic, data, from, .. } = msg {
+            if topic == perm::GRANTS_TOPIC && from == Some(Sender::Service(perm::SERVICE.into())) {
+                self.take_grants(data);
+            }
+            return;
+        }
         let Message::Response { id, ok, error, result, .. } = msg else { return };
         let what = self.pending.remove(&id).unwrap_or_else(|| format!("request {id}"));
         if ok {
@@ -213,6 +242,23 @@ impl Link {
             }
         } else if let Some(e) = error {
             say!("busd refused the {what}: {}: {}", e.code, e.message);
+        }
+    }
+}
+
+impl Link {
+    fn take_grants(&mut self, data: Value) {
+        match GrantsResult::deserialize(&data) {
+            Ok(t) if t.version >= self.grants_version => {
+                self.grants_version = t.version;
+                self.network = perm::by_app(&t.grants)
+                    .into_iter()
+                    .filter(|(_, g)| g.has(capability::NETWORK))
+                    .map(|(app, _)| app)
+                    .collect();
+            }
+            Ok(_) => {}
+            Err(e) => say!("ignored a grant table: {e}"),
         }
     }
 }
@@ -250,7 +296,7 @@ mod tests {
         let mut fds = Vec::new();
         let mut bytes = Vec::new();
         let mut messages = Vec::new();
-        while messages.len() < 2 {
+        while messages.len() < 3 {
             let n = recv_with_fds(broker.as_fd(), &mut buf, &mut fds).unwrap();
             assert!(n > 0, "session's end closed");
             bytes.extend_from_slice(&buf[..n]);
@@ -260,9 +306,10 @@ mod tests {
             }
         }
         assert!(matches!(&messages[0], Message::Request { method, .. } if method == "claim"));
-        let Message::Request { method, params, .. } = &messages[1] else { panic!() };
+        assert!(matches!(&messages[1], Message::Subscribe { topic, .. } if topic == "perm.grants"));
+        let Message::Request { method, params, .. } = &messages[2] else { panic!() };
         assert_eq!((method.as_str(), params), ("adopt", &json!({"app": "org.example.notes"})));
-        assert_eq!(messages[1].fds(), 1);
+        assert_eq!(messages[2].fds(), 1);
         assert_eq!(fds.len(), 1);
 
         // The descriptor the broker got talks to the service's end.
@@ -275,11 +322,30 @@ mod tests {
 
         // Answers are read and logged; the link stays up until the broker closes.
         let mut broker = broker;
-        std::io::Write::write_all(&mut broker, &encode_frame(&Message::ok(2, json!({"conn": 3}))).unwrap())
+        std::io::Write::write_all(&mut broker, &encode_frame(&Message::ok(3, json!({"conn": 3}))).unwrap())
             .unwrap();
         std::thread::sleep(Duration::from_millis(20));
         assert!(link.poll());
-        assert!(!link.pending.contains_key(&2));
+        assert!(!link.pending.contains_key(&3));
+
+        // permd's grant table says who may use the network; only permd's counts.
+        let table = json!({"version": 2, "grants": [{"id": 1, "app": "org.example.web", "capability": "network", "granted": 0, "by": "t"}]});
+        let publish = |from: &str| {
+            let mut m = Message::publish("perm.grants", table.clone());
+            if let Message::Publish { from: f, .. } = &mut m {
+                *f = Some(Sender::Service(from.into()));
+            }
+            encode_frame(&m).unwrap()
+        };
+        std::io::Write::write_all(&mut broker, &publish("db")).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(link.poll());
+        assert!(!link.has_network("org.example.web"), "not from perm");
+        std::io::Write::write_all(&mut broker, &publish("perm")).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(link.poll());
+        assert!(link.has_network("org.example.web"));
+        assert!(!link.has_network("org.example.notes"));
         drop(broker);
         assert!(!link.poll());
     }

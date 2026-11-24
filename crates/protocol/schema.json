@@ -1,6 +1,26 @@
 {
   "$comment": "Generated from crates/protocol by crates/protocol-schema; do not edit. Run `make protocol`.",
   "$defs": {
+    "Access": {
+      "description": "What a data grant allows on the documents it covers.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Query, get, search and watch them, read their history and blobs.",
+          "type": "string"
+        },
+        {
+          "const": "write",
+          "description": "Update, splice and delete them (and read them). A changed document must\nstill be covered by the grant.",
+          "type": "string"
+        },
+        {
+          "const": "create",
+          "description": "Create documents of the type; each must be covered by the grant's filter.",
+          "type": "string"
+        }
+      ]
+    },
     "AdoptApp": {
       "additionalProperties": false,
       "description": "An app's connection: its messages are stamped with this reverse-DNS app id.",
@@ -110,6 +130,92 @@
       ],
       "type": "object"
     },
+    "AuditAction": {
+      "description": "What happened, in an audit entry.",
+      "oneOf": [
+        {
+          "const": "grant",
+          "description": "A grant was made.",
+          "type": "string"
+        },
+        {
+          "const": "revoke",
+          "description": "A grant was removed.",
+          "type": "string"
+        },
+        {
+          "const": "deny",
+          "description": "The user turned down a request.",
+          "type": "string"
+        }
+      ]
+    },
+    "AuditEntry": {
+      "description": "One entry in the audit log.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/AuditAction"
+        },
+        "app": {
+          "type": "string"
+        },
+        "at": {
+          "description": "When, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "by": {
+          "description": "Who did it: `user`, or a service, tool or app.",
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "rule": {
+          "$ref": "#/$defs/Rule"
+        }
+      },
+      "required": [
+        "id",
+        "at",
+        "app",
+        "action",
+        "rule",
+        "by"
+      ],
+      "type": "object"
+    },
+    "AuditParams": {
+      "description": "Params of `audit`: the most recent entries.",
+      "properties": {
+        "limit": {
+          "description": "At most this many (default 100).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AuditResult": {
+      "description": "Result of `audit`, newest first.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/AuditEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
     "BacklinkInfo": {
       "description": "A link into a document from another live document.",
       "properties": {
@@ -209,6 +315,18 @@
       "required": [
         "code",
         "message"
+      ],
+      "type": "object"
+    },
+    "CapabilityRule": {
+      "description": "A capability: `network`, `clipboard`, `permissions` or `service:NAME`.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability"
       ],
       "type": "object"
     },
@@ -353,6 +471,30 @@
       ],
       "type": "object"
     },
+    "DataRule": {
+      "description": "Access to documents of one type.",
+      "properties": {
+        "access": {
+          "items": {
+            "$ref": "#/$defs/Access"
+          },
+          "type": "array"
+        },
+        "filter": {
+          "additionalProperties": true,
+          "description": "Only documents matching this filter (the database's query language).\nEmpty covers every document of the type.",
+          "type": "object"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "access"
+      ],
+      "type": "object"
+    },
     "DiffParams": {
       "description": "Params of `diff`: document `id` from just after change set `from` (0 for\nbefore it was created) to just after change set `to`.",
       "properties": {
@@ -462,6 +604,107 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "GetResult": {
+      "description": "Result of `get`.",
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "Grant": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataRule"
+        },
+        {
+          "$ref": "#/$defs/CapabilityRule"
+        }
+      ],
+      "description": "One grant.",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "by": {
+          "description": "Who granted it: `user` (a prompt), or the service, tool or app that called\n`grant`.",
+          "type": "string"
+        },
+        "granted": {
+          "description": "When, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "app",
+        "granted",
+        "by"
+      ],
+      "type": "object"
+    },
+    "GrantParams": {
+      "description": "Params of `grant`: give app `app` these rules, without asking the user.",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "app",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "GrantsParams": {
+      "description": "Params of `grants`.",
+      "properties": {
+        "app": {
+          "description": "Only this app's grants. (An app always gets only its own.)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GrantsResult": {
+      "description": "Result of `grants` and `grant`, and the data published on `GRANTS_TOPIC`.",
+      "properties": {
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/Grant"
+          },
+          "type": "array"
+        },
+        "version": {
+          "default": 0,
+          "description": "Grows with every change (it survives restarts), so a follower that gets\ntables out of order keeps the newest.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "grants"
       ],
       "type": "object"
     },
@@ -592,6 +835,21 @@
       "required": [
         "services",
         "connections"
+      ],
+      "type": "object"
+    },
+    "ListResult2": {
+      "description": "Result of `list`: the names of the caller's secrets.",
+      "properties": {
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "names"
       ],
       "type": "object"
     },
@@ -829,6 +1087,18 @@
       ],
       "type": "object"
     },
+    "NameParams2": {
+      "description": "Params of `get` and `delete`.",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "NodeKind": {
       "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`).",
       "oneOf": [
@@ -911,6 +1181,63 @@
       ],
       "type": "array"
     },
+    "PromptParams": {
+      "description": "Params of `prompt`: app `app` (called `name`) asks for these things, each in\nwords (see `describe`), for `reason`.",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "asks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "app",
+        "name",
+        "asks"
+      ],
+      "type": "object"
+    },
+    "PromptResult": {
+      "description": "Result of `prompt`.",
+      "properties": {
+        "allow": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "allow"
+      ],
+      "type": "object"
+    },
+    "PutParams": {
+      "description": "Params of `put`: store `value` as `name`, replacing what was there.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "type": "object"
+    },
     "Query": {
       "description": "A query: documents of one type that match a filter, in order.",
       "properties": {
@@ -953,6 +1280,40 @@
       ],
       "type": "object"
     },
+    "RequestParams": {
+      "description": "Params of `request`: what the app would like, and why, in its own words.",
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "type": "object"
+    },
+    "RequestResult": {
+      "description": "Result of `request`.",
+      "properties": {
+        "granted": {
+          "description": "Whether the app now has everything it asked for (because the user allowed\nit, or it already had it).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "granted"
+      ],
+      "type": "object"
+    },
     "RestoreParams": {
       "description": "Params of `restore`: replace the database with snapshot `name`.",
       "properties": {
@@ -976,6 +1337,51 @@
         "saved"
       ],
       "type": "object"
+    },
+    "RevokeParams": {
+      "description": "Params of `revoke`: the grants with these ids, and every grant of `app`.",
+      "properties": {
+        "app": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ids": {
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RevokeResult": {
+      "description": "Result of `revoke`.",
+      "properties": {
+        "revoked": {
+          "description": "How many grants were removed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revoked"
+      ],
+      "type": "object"
+    },
+    "Rule": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataRule"
+        },
+        {
+          "$ref": "#/$defs/CapabilityRule"
+        }
+      ],
+      "description": "What a grant gives."
     },
     "SceneOp": {
       "description": "One change to a window's scene graph.",
@@ -1625,6 +2031,10 @@
       "description": "How long the broker waits for a response before answering `timeout` itself, unless the request sets `timeout_ms`.",
       "value": 30000
     },
+    "GRANTS_TOPIC": {
+      "description": "Where permd publishes every grant whenever they change.",
+      "value": "perm.grants"
+    },
     "MAX_BLOB_BYTES": {
       "description": "Largest blob `put_blob` takes.",
       "value": 4294967296
@@ -1668,6 +2078,14 @@
     "MAX_WINDOW_NODES": {
       "description": "Most nodes one window may hold.",
       "value": 20000
+    },
+    "PERM_SERVICE": {
+      "description": "The name permd claims.",
+      "value": "perm"
+    },
+    "SECRETS_SERVICE": {
+      "description": "The name secretsd claims.",
+      "value": "secrets"
     },
     "SESSION_SERVICE": {
       "description": "The name session claims.",

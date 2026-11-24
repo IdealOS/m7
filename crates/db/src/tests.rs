@@ -1253,3 +1253,57 @@ fn splicing_text_edits_a_field_as_collaborative_text() {
     assert_eq!(data(&s, &d.id)["title"], "fresh");
     assert!(s.verify(&d.id).unwrap());
 }
+
+#[test]
+fn creators_are_recorded_and_backfilled_by_the_migration() {
+    let dir = std::env::temp_dir().join(format!("db-creator-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v3.db");
+    let old = {
+        let mut s = Store::open(&path).unwrap();
+        let d = s.create("Note", &obj(json!({"a": 1})), "org.x.old").unwrap();
+        // Make it look like a version 3 database, from before creators.
+        s.connection()
+            .execute_batch("DROP INDEX documents_creator; ALTER TABLE documents DROP COLUMN creator;")
+            .unwrap();
+        s.connection().pragma_update(None, "user_version", 3).unwrap();
+        d.id
+    };
+    let mut s = Store::open(&path).unwrap();
+    assert_eq!(s.creator(&old).unwrap().as_deref(), Some("org.x.old"));
+    let new = s.create("Note", &obj(json!({"a": 2})), "org.x.new").unwrap();
+    s.update(&new.id, &obj(json!({"a": 3})), "someone.else").unwrap();
+    assert_eq!(s.creator(&new.id).unwrap().as_deref(), Some("org.x.new"), "updates don't change it");
+    let mine = s.query(&query("Note", json!({"$createdBy": "org.x.new"}))).unwrap();
+    assert_eq!(ids(&mine), std::slice::from_ref(&new.id));
+    assert!(s.query(&query("Note", json!({"$createdBy": 3}))).is_err());
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn guarded_writes_roll_back_when_the_result_is_out_of_reach() {
+    let mut s = Store::open_in_memory().unwrap();
+    let family = obj(json!({"album": "Family"}));
+    // A create outside the guard isn't made at all.
+    let refused = s.guarded(family.clone(), |s| s.create("Photo", &obj(json!({"album": "Work"})), "app"));
+    assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+    assert!(s.query(&Query::all("Photo")).unwrap().is_empty());
+    let d =
+        s.guarded(family.clone(), |s| s.create("Photo", &obj(json!({"album": "Family"})), "app")).unwrap();
+    // Nor is an update that moves it out, or a splice.
+    let moved = s.guarded(family.clone(), |s| s.update(&d.id, &obj(json!({"album": "Work"})), "app"));
+    assert!(matches!(moved, Err(Error::Denied(_))));
+    let spliced = s.guarded(family.clone(), |s| s.splice(&d.id, "album", 0, 6, "Work", "app"));
+    assert!(matches!(spliced, Err(Error::Denied(_))));
+    assert_eq!(data(&s, &d.id), json!({"album": "Family"}));
+    assert_eq!(s.history(&d.id).unwrap().len(), 1, "nothing refused was recorded");
+    assert!(s.verify(&d.id).unwrap());
+    // Inside it is fine, and without a guard anything goes.
+    s.guarded(family.clone(), |s| s.update(&d.id, &obj(json!({"year": 2024})), "app")).unwrap();
+    s.update(&d.id, &obj(json!({"album": "Work"})), "system").unwrap();
+    assert!(!s.matches(&d.id, &family).unwrap());
+    assert!(s.matches(&d.id, &obj(json!({"year": 2024}))).unwrap());
+    assert!(matches!(s.matches("nope", &family), Err(Error::NotFound(_))));
+}

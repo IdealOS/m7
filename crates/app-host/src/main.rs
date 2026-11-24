@@ -105,7 +105,16 @@ async fn wait_for(bus: &Client, names: &[&str]) {
 /// Install every app under `dir`, and launch the autostart ones. One app's failure
 /// doesn't stop the others.
 async fn install_all(bus: &Client, dir: &Path) -> Result<(), String> {
-    wait_for(bus, &[protocol::db::SERVICE, protocol::session::SERVICE, protocol::scene::SERVICE]).await;
+    wait_for(
+        bus,
+        &[
+            protocol::db::SERVICE,
+            protocol::perm::SERVICE,
+            protocol::session::SERVICE,
+            protocol::scene::SERVICE,
+        ],
+    )
+    .await;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -130,6 +139,15 @@ async fn install_all(bus: &Client, dir: &Path) -> Result<(), String> {
                 log::error!("app-host: installing {}: {e}", manifest.id);
                 continue;
             }
+        }
+        match install::grant(bus, &manifest).await {
+            Ok(made) => {
+                for g in made {
+                    log::info!("app-host: granted {} to {}", g.rule.describe(), manifest.id);
+                }
+            }
+            // It runs, with what it has; it can still ask.
+            Err(e) => log::error!("app-host: granting {} its permissions: {e}", manifest.id),
         }
         if manifest.autostart
             && let Err(e) = install::launch(bus, &manifest.id).await

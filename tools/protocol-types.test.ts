@@ -87,3 +87,13 @@ test("constants and types become exports", () => {
   assert.match(out, /\/\*\* Name\. \*\/\nexport const BROKER = "bus";/);
   assert.match(out, /export type Id = number;/);
 });
+
+test("fields beside a union (a struct flattening an enum) are joined to it", () => {
+  const schema = {
+    type: "object",
+    anyOf: [{ $ref: "#/$defs/DataRule" }, { $ref: "#/$defs/CapabilityRule" }],
+    properties: { id: { type: "integer" }, app: { type: "string" } },
+    required: ["id", "app"],
+  };
+  assert.equal(typeOf(schema, "#"), "{ id: number; app: string } & (DataRule | CapabilityRule)");
+});

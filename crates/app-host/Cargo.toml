@@ -20,5 +20,6 @@ rquickjs.workspace = true
 [dev-dependencies]
 busd = { path = "../busd" }
 dbd = { path = "../dbd" }
+permd = { path = "../permd" }
 db = { path = "../db" }
 compositor = { path = "../compositor", default-features = false }

@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "idealos": { "id": "org.idealos.gallery", "name": "Widget Gallery", "autostart": false },
+  "idealos": {
+    "id": "org.idealos.gallery",
+    "name": "Widget Gallery",
+    "autostart": false,
+    "permissions": [{ "type": "Note", "access": ["create"] }, { "type": "Image", "access": ["read"] }]
+  },
   "scripts": {
     "build": "node ../../tools/build-app.ts .",
     "typecheck": "tsc --noEmit -p ."

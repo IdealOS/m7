@@ -2,7 +2,9 @@
 //!
 //! It reads `/etc/idealos/session.conf`, starts each service, and restarts any that
 //! exit, with exponential backoff. It also makes services' bus connections (see
-//! `bus.rs`); per-app sandboxes come in M6.
+//! `bus.rs`), and starts each app in a sandbox (see `sandbox.rs`): its own network
+//! namespace unless it holds the `network` grant, Landlock and seccomp.
+//! `IDEALOS_NO_SANDBOX=1` turns sandboxes off, for debugging only.
 //!
 //! Config format, one service per line, with an optional `bus=` setting:
 //!
@@ -43,6 +45,7 @@ macro_rules! say {
 }
 
 mod bus;
+mod sandbox;
 
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
@@ -291,16 +294,54 @@ impl Service {
         };
         let mut cmd = Command::new(&self.spec.argv[0]);
         cmd.args(&self.spec.argv[1..]);
-        if let Some(inherit) = &inherit {
-            let fd = inherit.raw();
-            cmd.env(inherit.env, fd.to_string());
+        let sandbox = match &self.spec.bus {
+            bus::Role::App(app) if std::env::var_os("IDEALOS_NO_SANDBOX").is_none() => {
+                let network = link.as_ref().is_some_and(|l| l.has_network(app));
+                let dir = sandbox::runtime_dir(app);
+                let spec =
+                    sandbox::Spec::for_app(std::path::Path::new(&self.spec.argv[0]), dir.clone(), network);
+                match sandbox::Sandbox::prepare(&spec) {
+                    Ok(s) => {
+                        if !s.limits_files() && cfg!(target_os = "linux") {
+                            say!("{}: this kernel has no Landlock, so no file limits", self.spec.name);
+                        }
+                        cmd.current_dir(&dir)
+                            .env("HOME", &dir)
+                            .env("TMPDIR", &dir)
+                            .env("IDEALOS_APP_DIR", &dir);
+                        Some(s)
+                    }
+                    Err(e) => {
+                        say!("cannot make {}'s sandbox: {e}", self.spec.name);
+                        self.schedule_restart(Duration::ZERO);
+                        return;
+                    }
+                }
+            }
+            bus::Role::App(_) => {
+                say!("starting {} without a sandbox (IDEALOS_NO_SANDBOX)", self.spec.name);
+                None
+            }
+            _ => None,
+        };
+        let fd = inherit.as_ref().map(|inherit| {
+            cmd.env(inherit.env, inherit.raw().to_string());
+            inherit.raw()
+        });
+        if fd.is_some() || sandbox.is_some() {
             // SAFETY: the closure runs in the child between fork and exec and only
-            // calls fcntl, which is async-signal-safe.
+            // makes system calls (fcntl, and the sandbox's), which are
+            // async-signal-safe.
             unsafe {
                 cmd.pre_exec(move || {
                     // Descriptors are created close-on-exec; let this one through.
-                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    if let Some(fd) = fd
+                        && libc::fcntl(fd, libc::F_SETFD, 0) == -1
+                    {
                         return Err(std::io::Error::last_os_error());
+                    }
+                    if let Some(s) = &sandbox {
+                        s.enter()?;
                     }
                     Ok(())
                 });

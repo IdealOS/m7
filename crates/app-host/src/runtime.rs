@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use bus_client::Client;
+use rquickjs::function::Opt;
 use rquickjs::{CatchResultExt, Context, Function, Module, Object, Runtime, promise::PromiseState};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -252,21 +253,34 @@ fn install_host<'js>(ctx: &rquickjs::Ctx<'js>, host: &Rc<RefCell<Host>>) -> rqui
     let h = host.clone();
     obj.set(
         "request",
-        Function::new(ctx.clone(), move |id: u64, to: String, method: String, params: String| {
-            let (bus, events) = {
-                let h = h.borrow();
-                (h.bus.clone(), h.events.clone())
-            };
-            let task = tokio::task::spawn_local(async move {
-                let params: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
-                let event = match bus.request(&to, &method, params).await {
-                    Ok(v) => Dispatch { id, kind: "ok", data: v.to_string() },
-                    Err(e) => Dispatch { id, kind: "err", data: error_json(&e) },
+        // An optional timeout in milliseconds overrides the broker's default (a
+        // permission request waits for the user).
+        Function::new(
+            ctx.clone(),
+            move |id: u64, to: String, method: String, params: String, timeout: Opt<f64>| {
+                let (bus, events) = {
+                    let h = h.borrow();
+                    (h.bus.clone(), h.events.clone())
                 };
-                let _ = events.send(event);
-            });
-            h.borrow_mut().tasks.insert(id, task);
-        })?,
+                let timeout = timeout
+                    .0
+                    .filter(|ms| ms.is_finite() && *ms > 0.0)
+                    .map(|ms| Duration::from_millis(ms as u64));
+                let task = tokio::task::spawn_local(async move {
+                    let params: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
+                    let answer = match timeout {
+                        Some(t) => bus.request_timeout(&to, &method, params, t).await,
+                        None => bus.request(&to, &method, params).await,
+                    };
+                    let event = match answer {
+                        Ok(v) => Dispatch { id, kind: "ok", data: v.to_string() },
+                        Err(e) => Dispatch { id, kind: "err", data: error_json(&e) },
+                    };
+                    let _ = events.send(event);
+                });
+                h.borrow_mut().tasks.insert(id, task);
+            },
+        )?,
     )?;
 
     let h = host.clone();

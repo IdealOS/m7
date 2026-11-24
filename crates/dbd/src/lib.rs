@@ -12,21 +12,30 @@
 //! Each change is recorded with its origin: the requester's app id or service
 //! name, as the broker stamped it, so no client can write in another's name.
 //!
+//! Apps get only what they're allowed ([`db::access`]): what they created, and
+//! what their grants cover. dbd follows the grant table permd publishes; when an
+//! app's grants change, its live queries are re-run under the new ones at once.
+//! A system service acting for an app (the compositor, for a text field bound in
+//! the app's window) adds `"as": "<app id>"` to the params, and is then treated,
+//! and recorded, as that app. Apps may not use `as`.
+//!
 //! dbd also takes a snapshot every hour (none when nothing changed), keeping the
 //! newest [`db::snapshot::KEEP`]. Blobs are read from the descriptor a `put_blob`
 //! request carries off the store's thread, so a slow sender can't hold up other
 //! requests; only recording the finished blob waits its turn.
 
 use bus_client::{Client, Incoming};
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use db::access::Scope;
 use db::{Blobs, Error, Snapshots, Store, Watches};
 use protocol::BusError;
-use protocol::bus::{Sender, code as bus_code};
+use protocol::bus::{Sender, code as bus_code, valid_app_id};
 use protocol::db::{
     AtParams, AtResult, BacklinkInfo, BlobInfo, ChangeKind, ChangeSetInfo, ChangesParams, ChangesResult,
     CreateParams, DEFAULT_QUERY_LIMIT, DiffParams, DiffResult, DocsResult, FieldChangeInfo, HashParams,
@@ -34,6 +43,7 @@ use protocol::db::{
     RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, SpliceParams, UndoParams,
     UndoResult, UpdateParams, VersionInfo, WatchEvent, code, method,
 };
+use protocol::perm::{self, AppGrants, GrantsResult};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -49,8 +59,182 @@ pub fn origin(from: Option<&Sender>) -> String {
     }
 }
 
-/// Run one request against the store.
-pub fn handle(store: &mut Store, origin: &str, method: &str, params: Value) -> Result<Value, BusError> {
+/// The latest grant table, by app.
+pub type Grants = HashMap<String, AppGrants>;
+
+/// Who a request is for, as far as access goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Caller {
+    /// A system service or tool, recorded under this origin. Anything goes.
+    System(String),
+    /// An app: only what it may.
+    App(String),
+}
+
+/// Who `params` from `from` is for. A system service acting for an app sends
+/// `"as": "<app id>"`, which is taken out of the params.
+pub fn caller(from: Option<&Sender>, params: &mut Value) -> Result<Caller, BusError> {
+    let on_behalf = params.as_object_mut().and_then(|p| p.remove("as"));
+    match (from, on_behalf) {
+        (Some(Sender::App { app, .. }), None) => Ok(Caller::App(app.clone())),
+        (Some(Sender::App { .. }), Some(_)) => {
+            Err(error(bus_code::PERMISSION_DENIED, "apps can't act for other apps (`as`)"))
+        }
+        (_, Some(Value::String(app))) if valid_app_id(&app) => Ok(Caller::App(app)),
+        (_, Some(_)) => Err(error(bus_code::BAD_REQUEST, "`as` takes an app id")),
+        (from, None) => Ok(Caller::System(origin(from))),
+    }
+}
+
+/// Run one request for `caller` against the store.
+pub fn handle(
+    store: &mut Store,
+    caller: &Caller,
+    grants: &Grants,
+    method: &str,
+    params: Value,
+) -> Result<Value, BusError> {
+    match caller {
+        Caller::System(origin) => handle_system(store, origin, method, params),
+        Caller::App(app) => handle_app(store, &scope(app, grants), method, params),
+    }
+}
+
+fn scope(app: &str, grants: &Grants) -> Scope {
+    Scope::new(app, grants.get(app).cloned().unwrap_or_default())
+}
+
+fn denied(why: impl Into<String>) -> BusError {
+    error(bus_code::PERMISSION_DENIED, why)
+}
+
+/// Refuse unless the app may read (or, with `write`, change) live document `id`.
+fn check(store: &Store, scope: &Scope, id: &str, write: bool) -> Result<(), BusError> {
+    let doc_type = store.get(id).map_err(err)?.doc_type;
+    let filter = if write { scope.write(&doc_type) } else { scope.read(&doc_type) };
+    if store.matches(id, &filter).map_err(err)? {
+        Ok(())
+    } else {
+        let verb = if write { "change" } else { "read" };
+        Err(denied(format!("{} may not {verb} {doc_type} {id}", scope.app)))
+    }
+}
+
+/// Refuse unless some document the app may read refers to blob `hash`.
+fn check_blob(store: &Store, scope: &Scope, hash: &str) -> Result<(), BusError> {
+    for id in store.blob_docs(hash).map_err(err)? {
+        if check(store, scope, &id, false).is_ok() {
+            return Ok(());
+        }
+    }
+    store.blob_info(hash).map_err(err)?; // a missing blob is not_found
+    Err(denied(format!("{} may not read blob {hash}", scope.app)))
+}
+
+/// A request from an app, limited to its scope.
+fn handle_app(store: &mut Store, scope: &Scope, method: &str, params: Value) -> Result<Value, BusError> {
+    let app = scope.app.as_str();
+    match method {
+        method::CREATE => {
+            let p: CreateParams = parse(params)?;
+            let Some(filter) = scope.create(&p.doc_type) else {
+                return Err(denied(format!("{app} may not create {} documents", p.doc_type)));
+            };
+            reply(store.guarded(filter, |s| s.create(&p.doc_type, &p.data, app)))
+        }
+        method::UPDATE => {
+            let p: UpdateParams = parse(params)?;
+            check(store, scope, &p.id, true)?;
+            let filter = scope.write(&store.get(&p.id).map_err(err)?.doc_type);
+            reply(store.guarded(filter, |s| s.update(&p.id, &p.patch, app)))
+        }
+        method::SPLICE => {
+            let p: SpliceParams = parse(params)?;
+            check(store, scope, &p.id, true)?;
+            let filter = scope.write(&store.get(&p.id).map_err(err)?.doc_type);
+            let set = store.guarded(filter, |s| {
+                s.splice(&p.id, &p.path, p.at as usize, p.delete as usize, &p.insert, app)
+            });
+            reply(set.map(|change_set| UndoResult { change_set }))
+        }
+        method::DELETE => {
+            let id = parse::<IdParams>(params)?.id;
+            check(store, scope, &id, true)?;
+            reply(store.delete(&id, app))
+        }
+        method::GET | method::HISTORY | method::AT | method::DIFF => {
+            let id = params.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            check(store, scope, &id, false)?;
+            handle_system(store, app, method, params)
+        }
+        method::QUERY => {
+            let q = scope.query(&parse::<Query>(params)?);
+            reply(store.query(&q).map(|docs| DocsResult { docs }))
+        }
+        method::SEARCH => {
+            // Found, then filtered, so an app may get fewer than `limit`.
+            let p: SearchParams = parse(params)?;
+            let found = store
+                .search(&p.text, p.doc_type.as_deref(), p.limit.unwrap_or(DEFAULT_QUERY_LIMIT))
+                .map_err(err)?;
+            let docs = found.into_iter().filter(|d| check(store, scope, &d.id, false).is_ok()).collect();
+            reply(Ok(DocsResult { docs }))
+        }
+        method::LINKS => {
+            let id = parse::<IdParams>(params.clone())?.id;
+            check(store, scope, &id, false)?;
+            let mut links: LinksResult = from_value(handle_system(store, app, method, params)?);
+            links.incoming.retain(|b| check(store, scope, &b.id, false).is_ok());
+            Ok(to_value(links))
+        }
+        method::CHANGES => {
+            // Only the app's own.
+            let mut sets: ChangesResult = from_value(handle_system(store, app, method, params)?);
+            sets.change_sets.retain(|c| c.origin == app);
+            Ok(to_value(sets))
+        }
+        method::UNDO => {
+            let p: UndoParams = parse(params.clone())?;
+            let set = store.change_set(p.change_set).map_err(err)?;
+            if set.origin != app {
+                return Err(denied(format!("{app} may undo only its own changes")));
+            }
+            for id in &set.docs {
+                let own = store.creator(id).map_err(err)?.as_deref() == Some(app);
+                if !own && check(store, scope, id, true).is_err() {
+                    return Err(denied(format!("{app} may no longer change {id}")));
+                }
+            }
+            handle_system(store, app, method, params)
+        }
+        method::BLOB_INFO => {
+            let hash = parse::<HashParams>(params.clone())?.hash;
+            check_blob(store, scope, &hash)?;
+            handle_system(store, app, method, params)
+        }
+        method::SCHEMAS => handle_system(store, app, method, params),
+        method::SNAPSHOT | method::SNAPSHOTS | method::RESTORE => {
+            Err(denied(format!("only system services may use {method}")))
+        }
+        other => Err(error(bus_code::BAD_REQUEST, format!("db has no method {other:?}"))),
+    }
+}
+
+fn to_value(v: impl Serialize) -> Value {
+    serde_json::to_value(v).expect("db results serialize")
+}
+
+fn from_value<T: DeserializeOwned>(v: Value) -> T {
+    serde_json::from_value(v).expect("db results parse")
+}
+
+/// A store error as the bus error it's answered with.
+fn err(e: Error) -> BusError {
+    reply_err(e).expect_err("an error")
+}
+
+/// Run one request against the store, unrestricted, recorded as `origin`.
+fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -> Result<Value, BusError> {
     match method {
         method::CREATE => {
             let p: CreateParams = parse(params)?;
@@ -168,6 +352,7 @@ fn reply<T: Serialize>(result: db::Result<T>) -> Result<Value, BusError> {
     match result {
         Ok(v) => Ok(serde_json::to_value(v).expect("db results serialize")),
         Err(e @ Error::NotFound(_)) => Err(error(code::NOT_FOUND, e.to_string())),
+        Err(Error::Denied(why)) => Err(denied(why)),
         Err(Error::Invalid(why)) => Err(error(bus_code::BAD_REQUEST, why)),
         Err(e) => {
             log::error!("dbd: {e}");
@@ -207,9 +392,11 @@ type Reply = oneshot::Sender<Result<Value, BusError>>;
 /// Work for the store's thread.
 enum Job {
     /// An ordinary request.
-    Call { origin: String, method: String, params: Value, reply: oneshot::Sender<Result<Value, BusError>> },
+    Call { caller: Caller, method: String, params: Value, reply: oneshot::Sender<Result<Value, BusError>> },
     /// Start a live query for streamed request `id`.
-    Watch { id: u64, params: Value },
+    Watch { id: u64, caller: Caller, params: Value },
+    /// permd published a new grant table.
+    Grants(Grants),
     /// The request `id` was cancelled (or its caller went away): stop its live
     /// query, if it has one.
     Unwatch { id: u64 },
@@ -220,7 +407,7 @@ enum Job {
     /// Record a blob whose file was just written.
     AddBlob { hash: String, size: u64, reply: Reply },
     /// Look up a blob and open it, to answer `get_blob`.
-    GetBlob { hash: String, reply: oneshot::Sender<Result<(Value, OwnedFd), BusError>> },
+    GetBlob { hash: String, caller: Caller, reply: oneshot::Sender<Result<(Value, OwnedFd), BusError>> },
 }
 
 /// What the store's thread sends back for a live query.
@@ -274,6 +461,10 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
         }
     });
 
+    // It holds a connection handle, so it must end with serve (dropped or not),
+    // or the connection (and the `db` name) would outlive it.
+    let _grants = AbortOnDrop(tokio::spawn(follow_grants(bus.clone(), jobs.downgrade())));
+
     // Live query parts go out in the order the store's thread made them.
     let sender = bus.clone();
     let weak_jobs = jobs.downgrade();
@@ -295,20 +486,35 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
     });
 
     while let Some(incoming) = requests.next().await {
-        let job = match incoming {
-            Incoming::Request { id, method, params, stream: true, .. } if method == method::WATCH => {
-                Job::Watch { id, params }
+        // Who it's for, with any `as` taken out of the params.
+        let incoming = match incoming {
+            Incoming::Request { id, from, method, mut params, stream, fds } => {
+                match caller(from.as_ref(), &mut params) {
+                    Ok(who) => (Incoming::Request { id, from, method, params, stream, fds }, who),
+                    Err(e) => {
+                        let _ = bus.respond(id, Err(e)).await;
+                        continue;
+                    }
+                }
             }
-            Incoming::Request { id, method, .. } if method == method::WATCH => {
+            cancel => (cancel, Caller::System(String::new())),
+        };
+        let job = match incoming {
+            (Incoming::Request { id, method, params, stream: true, .. }, caller)
+                if method == method::WATCH =>
+            {
+                Job::Watch { id, caller, params }
+            }
+            (Incoming::Request { id, method, .. }, _) if method == method::WATCH => {
                 let e = error(bus_code::BAD_REQUEST, "watch must be sent as a streamed request");
                 let _ = bus.respond(id, Err(e)).await;
                 continue;
             }
-            Incoming::Request { id, method, fds, .. } if method == method::PUT_BLOB => {
+            (Incoming::Request { id, method, fds, .. }, _) if method == method::PUT_BLOB => {
                 tokio::spawn(put_blob(bus.clone(), jobs.clone(), blobs.clone(), id, fds));
                 continue;
             }
-            Incoming::Request { id, method, params, .. } if method == method::GET_BLOB => {
+            (Incoming::Request { id, method, params, .. }, caller) if method == method::GET_BLOB => {
                 let hash = match parse::<HashParams>(params) {
                     Ok(p) => p.hash,
                     Err(e) => {
@@ -325,14 +531,14 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
                         Err(_) => {}
                     }
                 });
-                Job::GetBlob { hash, reply }
+                Job::GetBlob { hash, caller, reply }
             }
-            Incoming::Request { id, from, method, params, .. } => {
-                Job::Call { origin: origin(from.as_ref()), method, params, reply: answer_later(&bus, id) }
+            (Incoming::Request { id, method, params, .. }, caller) => {
+                Job::Call { caller, method, params, reply: answer_later(&bus, id) }
             }
             // An ordinary request runs to the end, and the broker drops the answer
             // nobody wants; a live query stops.
-            Incoming::Cancel { id } => Job::Unwatch { id },
+            (Incoming::Cancel { id }, _) => Job::Unwatch { id },
         };
         if jobs.send(job).await.is_err() {
             break;
@@ -341,6 +547,57 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
     drop(jobs);
     let _ = tokio::task::spawn_blocking(move || worker.join()).await;
     Ok(())
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Pass permd's grant tables to the store's thread: the current one, then each
+/// published change. Older tables than one already passed are skipped.
+async fn follow_grants(bus: Client, jobs: mpsc::WeakSender<Job>) {
+    let mut sub = match bus.subscribe(perm::GRANTS_TOPIC).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("dbd: cannot follow grants ({e}); apps get only their own documents");
+            return;
+        }
+    };
+    let mut newest = -1;
+    let mut pass = async |table: GrantsResult| {
+        if table.version < newest {
+            return true;
+        }
+        newest = table.version;
+        let Some(jobs) = jobs.upgrade() else { return false };
+        jobs.send(Job::Grants(perm::by_app(&table.grants))).await.is_ok()
+    };
+    // permd may have published before the subscription started.
+    if let Ok(v) = bus.request(perm::SERVICE, perm::method::GRANTS, serde_json::json!({})).await
+        && let Ok(table) = serde_json::from_value(v)
+        && !pass(table).await
+    {
+        return;
+    }
+    while let Some(p) = sub.next().await {
+        if p.from != Some(Sender::Service(perm::SERVICE.into())) {
+            log::warn!("dbd: ignored grants published by {:?}", p.from);
+            continue;
+        }
+        match serde_json::from_value::<GrantsResult>(p.data) {
+            Ok(table) => {
+                if !pass(table).await {
+                    return;
+                }
+            }
+            Err(e) => log::warn!("dbd: ignored a grant table it couldn't read: {e}"),
+        }
+    }
 }
 
 /// A channel whose answer is sent as request `id`'s response.
@@ -428,7 +685,10 @@ impl Worker {
         }
     }
 
-    fn get_blob(&self, hash: &str) -> Result<(Value, OwnedFd), BusError> {
+    fn get_blob(&self, hash: &str, caller: &Caller, grants: &Grants) -> Result<(Value, OwnedFd), BusError> {
+        if let Caller::App(app) = caller {
+            check_blob(&self.store, &scope(app, grants), hash)?;
+        }
         let info = reply(self.store.blob_info(hash).map(blob_info))?;
         let file = self.blobs.open(hash).map_err(|e| reply_err(e).expect_err("an error"))?;
         Ok((info, OwnedFd::from(file)))
@@ -442,6 +702,9 @@ fn work(
     parts: mpsc::UnboundedSender<(u64, Part)>,
     flush: &Notify,
 ) {
+    let mut grants = Grants::new();
+    // The app behind each of its live queries, and the query it asked for.
+    let mut app_watches: HashMap<u64, (String, Query)> = HashMap::new();
     let mut watches = match Watches::new(&w.store) {
         Ok(w) => w,
         Err(e) => {
@@ -451,9 +714,11 @@ fn work(
     };
     while let Some(job) = queue.blocking_recv() {
         match job {
-            Job::Call { origin, method, params, reply } => {
+            Job::Call { caller, method, params, reply } => {
                 let answer = match method.as_str() {
-                    method::SNAPSHOT | method::SNAPSHOTS | method::RESTORE => {
+                    method::SNAPSHOT | method::SNAPSHOTS | method::RESTORE
+                        if matches!(caller, Caller::System(_)) =>
+                    {
                         let restoring = method == method::RESTORE;
                         let answer = w.snapshot_method(&method, params);
                         // The database changed under every live query.
@@ -462,7 +727,7 @@ fn work(
                         }
                         answer
                     }
-                    _ => handle(&mut w.store, &origin, &method, params),
+                    _ => handle(&mut w.store, &caller, &grants, &method, params),
                 };
                 let _ = reply.send(answer);
                 if !watches.is_empty() {
@@ -481,17 +746,40 @@ fn work(
             Job::AddBlob { hash, size, reply: r } => {
                 let _ = r.send(reply(w.store.add_blob(&hash, size).map(blob_info)));
             }
-            Job::GetBlob { hash, reply } => {
-                let _ = reply.send(w.get_blob(&hash));
+            Job::GetBlob { hash, caller, reply } => {
+                let _ = reply.send(w.get_blob(&hash, &caller, &grants));
             }
-            Job::Watch { id, params } => {
+            Job::Grants(table) => {
+                // Re-run the live queries of every app whose grants changed.
+                let changed: Vec<(u64, Query)> = app_watches
+                    .iter()
+                    .filter(|(_, (app, _))| grants.get(app) != table.get(app))
+                    .map(|(&id, (app, q))| (id, scope(app, &table).query(q)))
+                    .collect();
+                grants = table;
+                if !changed.is_empty() {
+                    send_parts(&parts, Ok(watches.requery(&w.store, changed)));
+                }
+                app_watches.retain(|id, _| watches.contains(*id));
+            }
+            Job::Watch { id, caller, params } => {
                 let part = if watches.len() >= MAX_WATCHES {
                     Part::End(error(
                         bus_code::LIMIT_EXCEEDED,
                         format!("more than {MAX_WATCHES} live queries"),
                     ))
                 } else {
-                    match parse::<Query>(params).and_then(|q| reply(watches.add(&w.store, id, q))) {
+                    let added = parse::<Query>(params).and_then(|q| match &caller {
+                        Caller::System(_) => reply(watches.add(&w.store, id, q)),
+                        Caller::App(app) => {
+                            let first = reply(watches.add(&w.store, id, scope(app, &grants).query(&q)));
+                            if first.is_ok() {
+                                app_watches.insert(id, (app.clone(), q));
+                            }
+                            first
+                        }
+                    });
+                    match added {
                         Ok(first) => Part::Frame(first),
                         Err(e) => Part::End(e),
                     }
@@ -500,6 +788,7 @@ fn work(
             }
             Job::Unwatch { id } => {
                 watches.remove(id);
+                app_watches.remove(&id);
             }
             Job::Flush => send_parts(&parts, watches.refresh(&w.store)),
         }

@@ -265,6 +265,21 @@ pub fn valid_pattern(pattern: &str) -> bool {
     valid_topic(body)
 }
 
+/// App ids are reverse-DNS names such as `org.idealos.mail`: at least two
+/// dot-separated segments of letters, digits and `-`.
+pub fn valid_app_id(id: &str) -> bool {
+    id.split('.').count() >= 2
+        && id.split('.').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+/// Service names: non-empty, lowercase letters, digits, `-` and `.`, and not the
+/// broker's own name.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != BROKER
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+}
+
 /// Whether `topic` can be published to: dot-separated non-empty segments, no `*`.
 pub fn valid_topic(topic: &str) -> bool {
     !topic.is_empty() && !topic.contains('*') && topic.split('.').all(|s| !s.is_empty())

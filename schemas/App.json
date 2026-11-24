@@ -12,7 +12,11 @@
     "entry": { "type": "string", "description": "The bundle's entry module." },
     "bundle": { "x-kind": "blob", "description": "The code bundle." },
     "icon": { "x-kind": "blob" },
-    "permissions": { "type": "array", "items": { "type": "string" } },
+    "permissions": {
+      "type": "array",
+      "description": "What the app needs, as permission rules: {\"type\", \"access\", \"filter\"} or {\"capability\"}.",
+      "items": { "type": "object" }
+    },
     "signature": { "type": "string", "description": "The developer's ed25519 signature over the manifest." }
   },
   "x-indexes": ["id"]

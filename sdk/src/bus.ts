@@ -6,9 +6,14 @@ export interface RequestError extends Error {
   code: string;
 }
 
+export interface RequestOptions {
+  /** How long the broker waits for an answer, instead of its default (30 s). */
+  timeoutMs?: number;
+}
+
 /** What app-host's prelude puts on `globalThis`. */
 export interface Host {
-  request(to: string, method: string, params: unknown): Promise<unknown>;
+  request(to: string, method: string, params: unknown, options?: RequestOptions): Promise<unknown>;
   stream(
     to: string,
     method: string,
@@ -26,8 +31,9 @@ function host(): Host {
 }
 
 /** Send a request and wait for its answer. */
-export function request<T = unknown>(to: string, method: string, params?: unknown): Promise<T> {
-  return host().request(to, method, params ?? null) as Promise<T>;
+export function request<T = unknown>(to: string, method: string, params?: unknown, options?: RequestOptions): Promise<T> {
+  const h = host();
+  return (options ? h.request(to, method, params ?? null, options) : h.request(to, method, params ?? null)) as Promise<T>;
 }
 
 /** A streamed request: `onPart` for each part, `onEnd` once. Returns a function that cancels it. */

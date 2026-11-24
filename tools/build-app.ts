@@ -18,6 +18,8 @@ export interface Manifest {
   name: string;
   version?: string;
   autostart?: boolean;
+  /** Permission rules, granted when the app is installed (see protocol::perm). */
+  permissions?: object[];
 }
 
 /** The manifest from a package.json's text, checked. */
@@ -31,7 +33,14 @@ export function manifest(packageJson: string): Manifest {
   if (segments.length < 2 || !segments.every((s) => /^[A-Za-z0-9-]+$/.test(s))) {
     throw new Error(`"${app.id}" is not a reverse-DNS app id`);
   }
-  return { id: app.id, name: app.name, version: app.version ?? pkg.version, autostart: app.autostart ?? false };
+  const m: Manifest = { id: app.id, name: app.name, version: app.version ?? pkg.version, autostart: app.autostart ?? false };
+  if (app.permissions !== undefined) {
+    if (!Array.isArray(app.permissions) || !app.permissions.every((p) => typeof p === "object" && p !== null && !Array.isArray(p))) {
+      throw new Error('"permissions" is a list of rules such as {"type": "Note", "access": ["read"]}');
+    }
+    m.permissions = app.permissions;
+  }
+  return m;
 }
 
 /** esbuild's arguments for the app in `dir`. */

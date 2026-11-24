@@ -63,12 +63,17 @@
 
   const busError = (e) => Object.assign(new Error(e?.message ?? "bus error"), { code: e?.code ?? "unknown" });
   globalThis.__idealos = {
-    /** A request; resolves with the result or rejects with an Error carrying `code`. */
-    request(to, method, params) {
+    /**
+     * A request; resolves with the result or rejects with an Error carrying `code`.
+     * `options.timeoutMs` replaces the broker's default timeout.
+     */
+    request(to, method, params, options) {
       return new Promise((resolve, reject) => {
         const id = nextId++;
         callbacks.set(id, (kind, data) => (kind === "ok" ? resolve(data) : reject(busError(data))));
-        host.request(id, to, method, JSON.stringify(params ?? null));
+        const timeout = options?.timeoutMs;
+        if (timeout === undefined) host.request(id, to, method, JSON.stringify(params ?? null));
+        else host.request(id, to, method, JSON.stringify(params ?? null), Number(timeout));
       });
     },
     /** A streamed request: `onPart(data)` for each part, `onEnd(error?)` once. Returns a cancel function. */

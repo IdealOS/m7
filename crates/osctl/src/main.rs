@@ -35,6 +35,11 @@
 //! osctl [--socket PATH] app list                      installed apps, and which are running
 //! osctl [--socket PATH] app launch ID                 (re)start an installed app through session
 //! osctl [--socket PATH] app stop ID
+//! osctl [--socket PATH] perm list [APP]              grants: every app's, or one app's
+//! osctl [--socket PATH] perm grant APP RULE...       e.g. '{"type": "Note", "access": ["read"]}' '{"capability": "network"}'
+//! osctl [--socket PATH] perm revoke ID...            remove grants by id
+//! osctl [--socket PATH] perm revoke --app APP        remove every grant of an app
+//! osctl [--socket PATH] perm audit [--limit N]       the audit log, newest first
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -60,7 +65,8 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
 | search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET \
 | watch JSON [--count N] | diff ID FROM TO | link ID FIELD TARGET | links ID | schemas | snapshot | snapshots \
 | restore NAME | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
-       osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)";
+       osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
+       osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -96,7 +102,7 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if g == "bus" || g == "db" || g == "app" => g,
+        Some(g) if g == "bus" || g == "db" || g == "app" || g == "perm" => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
@@ -171,6 +177,9 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
             other => return Err(format!("unknown app subcommand {other}")),
         };
         return Ok((socket, command));
+    }
+    if group == "perm" {
+        return Ok((socket, perm_command(&sub, &positional, &flags, arity, allowed, json)?));
     }
     if group == "db" && sub == "watch" {
         arity(1, 1)?;
@@ -264,6 +273,60 @@ fn change_set(text: &str) -> Result<i64, String> {
 }
 
 /// `osctl db ...` is shorthand for a request to the db service.
+fn perm_command(
+    sub: &str,
+    positional: &[String],
+    flags: &[(String, String)],
+    arity: impl Fn(usize, usize) -> Result<(), String>,
+    allowed: impl Fn(&[&str]) -> Result<(), String>,
+    json: impl Fn(Option<&String>) -> Result<serde_json::Value, String>,
+) -> Result<Command, String> {
+    use protocol::perm::method;
+    use serde_json::json;
+    let flag = |name: &str| flags.iter().find(|(f, _)| f == name).map(|(_, v)| v.clone());
+    let (method, params) = match sub {
+        "list" => {
+            arity(0, 1)?;
+            allowed(&[])?;
+            (method::GRANTS, positional.first().map_or(json!({}), |app| json!({"app": app})))
+        }
+        "grant" => {
+            arity(2, usize::MAX)?;
+            allowed(&[])?;
+            let rules = positional[1..].iter().map(|r| json(Some(r))).collect::<Result<Vec<_>, _>>()?;
+            if !rules.iter().all(serde_json::Value::is_object) {
+                return Err("each rule is a JSON object".into());
+            }
+            (method::GRANT, json!({"app": positional[0], "rules": rules}))
+        }
+        "revoke" => {
+            allowed(&["app"])?;
+            let ids = positional
+                .iter()
+                .map(|id| id.parse::<i64>().map_err(|_| format!("a grant id is a number, not {id}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            match (flag("app"), ids.is_empty()) {
+                (None, true) => return Err("perm revoke takes grant ids or --app APP".into()),
+                (Some(app), _) => (method::REVOKE, json!({"ids": ids, "app": app})),
+                (None, false) => (method::REVOKE, json!({"ids": ids})),
+            }
+        }
+        "audit" => {
+            arity(0, 0)?;
+            allowed(&["limit"])?;
+            let limit = match flag("limit") {
+                Some(v) => {
+                    json!({"limit": v.parse::<u32>().map_err(|_| format!("--limit must be a whole number, not {v}"))?})
+                }
+                None => json!({}),
+            };
+            (method::AUDIT, limit)
+        }
+        other => return Err(format!("unknown perm subcommand {other}")),
+    };
+    Ok(Command::Call { to: protocol::perm::SERVICE.into(), method: method.into(), params, timeout: None })
+}
+
 fn db_command(
     sub: &str,
     positional: &[String],
@@ -510,6 +573,46 @@ mod tests {
             "db watch {} --limit 1",
             "bus stream db",
             "db get a --type x",
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_perm_commands() {
+        let perm = |method: &str, params: serde_json::Value| Command::Call {
+            to: "perm".into(),
+            method: method.into(),
+            params,
+            timeout: None,
+        };
+        assert_eq!(parse_str("perm list").unwrap().1, perm("grants", json!({})));
+        assert_eq!(parse_str("perm list org.x.a").unwrap().1, perm("grants", json!({"app": "org.x.a"})));
+        assert_eq!(
+            parse_str(
+                "perm grant org.x.a {\"capability\":\"network\"} {\"type\":\"Note\",\"access\":[\"read\"]}"
+            )
+            .unwrap()
+            .1,
+            perm(
+                "grant",
+                json!({"app": "org.x.a", "rules": [{"capability": "network"}, {"type": "Note", "access": ["read"]}]})
+            )
+        );
+        assert_eq!(parse_str("perm revoke 3 4").unwrap().1, perm("revoke", json!({"ids": [3, 4]})));
+        assert_eq!(
+            parse_str("perm revoke --app org.x.a").unwrap().1,
+            perm("revoke", json!({"ids": [], "app": "org.x.a"}))
+        );
+        assert_eq!(parse_str("perm audit --limit 5").unwrap().1, perm("audit", json!({"limit": 5})));
+        for bad in [
+            "perm",
+            "perm grant org.x.a",
+            "perm grant org.x.a [1]",
+            "perm revoke",
+            "perm revoke x",
+            "perm audit --limit x",
+            "perm forget",
         ] {
             assert!(parse_str(bad).is_err(), "{bad}");
         }

@@ -67,6 +67,23 @@ impl Watches {
         (self.checked, self.reran)
     }
 
+    pub fn contains(&self, key: u64) -> bool {
+        self.watches.contains_key(&key)
+    }
+
+    /// Give running live queries new queries (an app's access changed), and
+    /// return a diff for each whose result changed as a result.
+    pub fn requery(&mut self, store: &Store, queries: Vec<(u64, Query)>) -> Vec<(u64, Result<WatchEvent>)> {
+        let mut keys = Vec::new();
+        for (key, query) in queries {
+            if let Some(w) = self.watches.get_mut(&key) {
+                w.query = query;
+                keys.push(key);
+            }
+        }
+        self.rerun(store, keys)
+    }
+
     /// Stop live query `key`. Returns whether it was running.
     pub fn remove(&mut self, key: u64) -> bool {
         self.watches.remove(&key).is_some()

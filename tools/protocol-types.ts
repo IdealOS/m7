@@ -75,7 +75,14 @@ export function typeOf(schema: Schema, path: string, indent = ""): string {
   const variants = schema.oneOf ?? schema.anyOf;
   if (variants !== undefined) {
     if (!Array.isArray(variants)) fail(path, "oneOf/anyOf must be a list");
-    return union(variants as Schema[], `${path}/oneOf`, indent);
+    const either = union(variants as Schema[], `${path}/oneOf`, indent);
+    // Fields of its own beside the variants (a Rust struct that flattens an
+    // enum): both.
+    if ("properties" in schema) {
+      const own = objectType({ ...schema, oneOf: undefined, anyOf: undefined, type: "object" }, path, indent);
+      return `${own} & (${either})`;
+    }
+    return either;
   }
 
   const type = schema.type;

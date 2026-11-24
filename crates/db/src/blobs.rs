@@ -135,6 +135,15 @@ impl Store {
         self.blob_info(hash)
     }
 
+    /// The live documents that refer to blob `hash`.
+    pub fn blob_docs(&self, hash: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT d.id FROM blob_refs b JOIN documents d ON d.doc = b.doc
+             WHERE b.hash = ?1 AND d.deleted IS NULL ORDER BY d.doc",
+        )?;
+        Ok(stmt.query_map([hash], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Blob `hash`'s size, age and how many live document fields refer to it.
     pub fn blob_info(&self, hash: &str) -> Result<BlobInfo> {
         self.conn

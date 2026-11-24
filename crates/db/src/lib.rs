@@ -13,6 +13,7 @@
 //!
 //! Spike C measured this write path at about 0.1 ms per write on a Mac.
 
+pub mod access;
 pub mod blobs;
 mod history;
 pub mod live;
@@ -119,6 +120,13 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (doc, path)
     ) STRICT;
     CREATE INDEX blob_refs_hash ON blob_refs (hash);",
+    // 4: who created each document (the origin of its create), so an app can be
+    // given the documents it made (`$createdBy`).
+    "ALTER TABLE documents ADD COLUMN creator TEXT;
+    UPDATE documents SET creator = (
+        SELECT cs.origin FROM doc_versions v JOIN change_sets cs ON cs.id = v.change_set
+        WHERE v.doc = documents.doc AND v.kind = 'create');
+    CREATE INDEX documents_creator ON documents (creator, doc);",
 ];
 
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
@@ -134,6 +142,8 @@ pub enum Error {
     Loro(String),
     /// A file outside the database (a snapshot or blob) couldn't be read or written.
     Io(String),
+    /// The caller may not do this (see [`access`]).
+    Denied(String),
 }
 
 impl std::fmt::Display for Error {
@@ -146,6 +156,7 @@ impl std::fmt::Display for Error {
             Error::Sqlite(e) => write!(f, "database: {e}"),
             Error::Loro(e) => write!(f, "document state: {e}"),
             Error::Io(e) => write!(f, "file: {e}"),
+            Error::Denied(why) => f.write_str(why),
         }
     }
 }
@@ -180,6 +191,8 @@ pub struct Store {
     conn: Connection,
     /// This device's Loro peer id, chosen when the database was created.
     peer: u64,
+    /// While [`Store::guarded`] runs: what written documents must match.
+    guard: Option<Map<String, Value>>,
 }
 
 impl Store {
@@ -201,7 +214,7 @@ impl Store {
         migrate(&conn)?;
         schemas::sync_indexes(&conn)?;
         let peer = read_peer(&conn)?;
-        let store = Store { conn, peer };
+        let store = Store { conn, peer, guard: None };
         store.optimize()?;
         Ok(store)
     }
@@ -220,8 +233,8 @@ impl Store {
         let now = now_ms();
         let id = uuid::Uuid::now_v7().to_string();
         tx.execute(
-            "INSERT INTO documents (id, type, created, updated) VALUES (?1, ?2, ?3, ?3)",
-            params![id, doc_type, now],
+            "INSERT INTO documents (id, type, created, updated, creator) VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![id, doc_type, now, origin],
         )?;
         let row = tx.last_insert_rowid();
         tx.execute(
@@ -231,6 +244,7 @@ impl Store {
         let set = change_set(&tx, now, origin, None)?;
         record_version(&tx, row, set, Kind::Create, &Frontiers::default(), &doc.oplog_frontiers())?;
         write_views(&tx, row, doc_type, &json, false)?;
+        check_guard(&tx, row, doc_type, self.guard.as_ref())?;
         tx.commit()?;
         Ok(Doc { id, doc_type: doc_type.into(), created: now, updated: now, data: loro_json::read(&doc) })
     }
@@ -253,6 +267,7 @@ impl Store {
             updated = now_ms();
             let set = change_set(&tx, updated, origin, None)?;
             log_change(&tx, row, &doc_type, &doc, &before, set, updated)?;
+            check_guard(&tx, row, &doc_type, self.guard.as_ref())?;
         }
         tx.commit()?;
         Ok(Doc { id: id.into(), doc_type, created, updated, data: loro_json::read(&doc) })
@@ -289,6 +304,7 @@ impl Store {
         let now = now_ms();
         let set = change_set(&tx, now, origin, None)?;
         log_change(&tx, row, &doc_type, &doc, &before, set, now)?;
+        check_guard(&tx, row, &doc_type, self.guard.as_ref())?;
         tx.commit()?;
         Ok(set)
     }
@@ -370,6 +386,42 @@ impl Store {
     pub fn verify(&self, id: &str) -> Result<bool> {
         let stored = self.get(id)?.data;
         Ok(loro_json::read(&self.loro(id)?) == stored)
+    }
+
+    /// Run `write` with a guard: every document it creates or changes must match
+    /// `filter` once changed, or the change is rolled back and refused with
+    /// [`Error::Denied`]. The check runs inside the write's transaction, against
+    /// exactly what would be committed.
+    pub fn guarded<T>(
+        &mut self,
+        filter: Map<String, Value>,
+        write: impl FnOnce(&mut Store) -> Result<T>,
+    ) -> Result<T> {
+        let outer = self.guard.replace(filter);
+        let result = write(self);
+        self.guard = outer;
+        result
+    }
+
+    /// Whether live document `id` matches `filter`. `NotFound` if there's none.
+    pub fn matches(&self, id: &str, filter: &Map<String, Value>) -> Result<bool> {
+        let (row, doc_type): (i64, String) = self
+            .conn
+            .query_row("SELECT doc, type FROM documents WHERE id = ?1 AND deleted IS NULL", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?
+            .ok_or_else(|| Error::NotFound(id.into()))?;
+        let q = Query { filter: filter.clone(), ..Query::all(doc_type) };
+        self.any_match(&q, &[row])
+    }
+
+    /// Who created document `id` (live or deleted), if the store knows.
+    pub fn creator(&self, id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT creator FROM documents WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| Error::NotFound(id.into()))
     }
 
     /// Run `sql` and return its rows' first column, for tests and `--explain`.
@@ -455,6 +507,19 @@ fn migrate(conn: &Connection) -> Result<()> {
 fn read_peer(conn: &Connection) -> Result<u64> {
     let peer: i64 = conn.query_row("SELECT value FROM meta WHERE key = 'peer'", [], |r| r.get(0))?;
     Ok(peer as u64)
+}
+
+/// Refuse the write in `tx` if document `row` no longer matches `guard`.
+fn check_guard(tx: &Transaction, row: i64, doc_type: &str, guard: Option<&Map<String, Value>>) -> Result<()> {
+    let Some(filter) = guard else { return Ok(()) };
+    let q = Query { filter: filter.clone(), ..Query::all(doc_type) };
+    let probe = query::compile_probe(&q, &[row])?;
+    let ok = tx.prepare_cached(&probe.sql)?.exists(rusqlite::params_from_iter(&probe.params))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Denied(format!("the {doc_type} would be outside what this app may write")))
+    }
 }
 
 fn change_set(tx: &Transaction, at: i64, origin: &str, undoes: Option<i64>) -> Result<i64> {

@@ -1,0 +1,23 @@
+[package]
+name = "secretsd"
+description = "The secrets service: an encrypted store, keyed by the service or app that owns each secret."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+bus-client.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio.workspace = true
+# RustCrypto's audited AEAD; the one cryptography dependency.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+busd = { path = "../busd" }

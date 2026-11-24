@@ -10,6 +10,7 @@ use std::path::Path;
 
 use bus_client::{CallError, Client};
 use protocol::db::{self, Doc, DocsResult};
+use protocol::perm::{self, Grant, GrantsResult, Rule};
 use protocol::session;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -26,6 +27,9 @@ pub struct Manifest {
     /// Started by `app-host --install` at boot.
     #[serde(default)]
     pub autostart: bool,
+    /// What the app needs, granted when it's installed (see [`grant`]).
+    #[serde(default)]
+    pub permissions: Vec<Rule>,
 }
 
 impl Manifest {
@@ -78,6 +82,7 @@ pub async fn install(bus: &Client, manifest: &Manifest, bundle: &Path) -> Result
         "entry": "app.js",
         "bundle": {"$blob": hash},
         "autostart": manifest.autostart,
+        "permissions": manifest.permissions,
     });
     match find(bus, &manifest.id).await? {
         Some(doc) => {
@@ -95,6 +100,19 @@ pub async fn install(bus: &Client, manifest: &Manifest, bundle: &Path) -> Result
             Ok(Installed { doc, hash, changed: true })
         }
     }
+}
+
+/// Grant app `manifest` the permissions it lists, through permd, returning what
+/// was newly granted. Installing from the system image or with `osctl` (both
+/// trusted) grants them without a prompt.
+pub async fn grant(bus: &Client, manifest: &Manifest) -> Result<Vec<Grant>, CallError> {
+    if manifest.permissions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let params = json!({"app": manifest.id, "rules": manifest.permissions});
+    let made = bus.request(perm::SERVICE, perm::method::GRANT, params).await?;
+    let made: GrantsResult = serde_json::from_value(made).map_err(|e| local(e.to_string()))?;
+    Ok(made.grants)
 }
 
 /// The installed `App` document for app `id`, if there is one.

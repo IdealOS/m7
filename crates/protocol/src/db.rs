@@ -16,6 +16,7 @@
 //! `$nin`, `$exists` and `$contains` (array membership). Comparisons are typed: a
 //! number never equals a string or a boolean. `{"field": null}` matches documents
 //! where the field is null or missing, and `$ne` matches documents without the field.
+//! Top-level `{"$createdBy": "<app id or service>"}` matches the documents that one created.
 //!
 //! A field whose value is `{"$link": "<id>"}` links to another document, and one
 //! whose value is `{"$blob": "<sha-256>"}` refers to a stored blob. Filters follow
@@ -26,6 +27,14 @@
 //!
 //! Documents of a system type (`Email`, `Contact`, ...; see `schemas/`) must match
 //! that type's schema; other types are free-form.
+//!
+//! Apps get only what they may (see [`crate::perm`]): the documents they created,
+//! their own `App` document, and what their grants cover. Their queries, searches
+//! and live queries see nothing else, and anything else they ask for is answered
+//! `permission_denied`, as are writes that would leave a document outside their
+//! reach. A system service acting for an app (the compositor, for a field bound
+//! in the app's window) adds `"as": "<app id>"` to the params, and is then
+//! treated, and recorded, as that app.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

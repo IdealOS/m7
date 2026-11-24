@@ -6,7 +6,8 @@
   "idealos": {
     "id": "org.idealos.notes",
     "name": "Notes",
-    "autostart": true
+    "autostart": true,
+    "permissions": [{ "type": "Note", "access": ["read", "create"] }]
   },
   "scripts": {
     "build": "node ../../tools/build-app.ts .",

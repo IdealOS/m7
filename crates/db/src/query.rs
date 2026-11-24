@@ -189,6 +189,15 @@ impl Compiler {
                          WHERE src.id = {id} AND src.deleted IS NULL AND links.dst = d.id)"
                     )
                 }
+                // Documents created by the given app or service.
+                "$createdBy" => {
+                    self.term()?;
+                    let Value::String(who) = v else {
+                        return bad("$createdBy takes an app id or service name");
+                    };
+                    let who = self.bind(Sql::Text(who.clone()));
+                    format!("(d.creator = {who})")
+                }
                 k if k.starts_with('$') => return bad(format!("unknown filter operator {k}")),
                 field => self.field(field, v)?,
             });

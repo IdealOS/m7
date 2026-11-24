@@ -74,6 +74,7 @@ pub fn connect_with(
                 };
                 let _ = ready_tx.send(Ok(()));
                 let Some(mut requests) = bus.take_requests() else { return };
+                tokio::spawn(follow_grants(bus.clone(), calls_tx.clone(), wake.clone()));
                 let sender = bus.clone();
                 let replies = calls_tx.clone();
                 let woken = wake.clone();
@@ -86,11 +87,11 @@ pub fn connect_with(
                         let sent = match out {
                             Out::Part { id, data } => sender.stream(id, data).await,
                             Out::Respond { id, result } => sender.respond(id, result).await,
-                            Out::FetchBlob { hash } => {
+                            Out::FetchBlob { hash, app } => {
                                 let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
                                 tokio::spawn(async move {
-                                    let result = fetch_blob(&bus, &hash).await;
-                                    if replies.send(Call::Blob { hash, result }).is_ok() {
+                                    let result = fetch_blob(&bus, &hash, app.as_deref()).await;
+                                    if replies.send(Call::Blob { hash, app, result }).is_ok() {
                                         woken();
                                     }
                                 });
@@ -158,9 +159,49 @@ pub fn connect_with(
     }
 }
 
-/// Blob `hash`'s bytes, read from the descriptor `get_blob` answers with.
-async fn fetch_blob(bus: &Client, hash: &str) -> Result<Vec<u8>, String> {
-    let params = serde_json::json!({"hash": hash});
+/// Pass permd's grant tables to the frame loop: the current one, then each change.
+/// (The desktop keeps the newest, by version.)
+async fn follow_grants(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn() + Send + Sync>) {
+    use protocol::perm::{self, GrantsResult};
+    let mut sub = match bus.subscribe(perm::GRANTS_TOPIC).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("bus: cannot follow grants: {e}; apps get no capabilities");
+            return;
+        }
+    };
+    let pass = |table: GrantsResult| {
+        let sent = calls.send(Call::Grants(table)).is_ok();
+        if sent {
+            wake();
+        }
+        sent
+    };
+    if let Ok(v) = bus.request(perm::SERVICE, perm::method::GRANTS, serde_json::json!({})).await
+        && let Ok(table) = serde_json::from_value(v)
+        && !pass(table)
+    {
+        return;
+    }
+    while let Some(p) = sub.next().await {
+        if p.from != Some(protocol::Sender::Service(perm::SERVICE.into())) {
+            continue;
+        }
+        if let Ok(table) = serde_json::from_value(p.data)
+            && !pass(table)
+        {
+            return;
+        }
+    }
+}
+
+/// Blob `hash`'s bytes, read from the descriptor `get_blob` answers with. For
+/// an app's image, `db` checks the app may read it.
+async fn fetch_blob(bus: &Client, hash: &str, app: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut params = serde_json::json!({"hash": hash});
+    if let Some(app) = app {
+        params["as"] = app.into();
+    }
     let reply =
         bus.request_with("db", "get_blob", params, Vec::new(), None).await.map_err(|e| e.to_string())?;
     let fd = reply.fds.into_iter().next().ok_or("get_blob sent no descriptor")?;

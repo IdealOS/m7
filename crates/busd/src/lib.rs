@@ -4,10 +4,13 @@
 //! socket, in the length-prefixed JSON frames `protocol::bus` defines. The broker
 //! stamps every message with its sender, routes requests to the connection that
 //! claimed the name they're addressed to, and passes everything through a
-//! permission hook ([`router::Policy`]) that allows everything until M6.
+//! permission hook ([`router::Policy`]); busd's is [`policy::Grants`], which
+//! follows the grants permd publishes.
 
+pub mod policy;
 pub mod router;
 pub mod server;
+pub mod testing;
 
 pub use router::{AllowAll, Policy};
 pub use server::serve;

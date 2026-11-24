@@ -15,7 +15,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use glyphon::FontSystem;
 use protocol::bus::code;
-use protocol::scene::method;
+use protocol::perm::{AppGrants, GrantsResult, capability};
+use protocol::scene::{PromptParams, method};
 use protocol::{BusError, Clipboard, Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, Sender};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -25,6 +26,7 @@ use crate::demo::TOP_BAR;
 use crate::draw::FIELD_PAD;
 use crate::input::{Effect, Input, Key, Mods, Seat, Shortcut};
 use crate::layout::{DIVIDER, Layout};
+use crate::prompt;
 use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
 use crate::textedit::{Edit, Move, Splice};
@@ -50,11 +52,14 @@ pub enum Call {
         token: u64,
         result: Result<Value, BusError>,
     },
-    /// The bytes of blob `hash`, asked for with [`Out::FetchBlob`].
+    /// The bytes of blob `hash`, asked for with [`Out::FetchBlob`] for `app`.
     Blob {
         hash: String,
+        app: Option<String>,
         result: Result<Vec<u8>, String>,
     },
+    /// permd published a new grant table.
+    Grants(GrantsResult),
 }
 
 /// What to send over the bus.
@@ -68,8 +73,19 @@ pub enum Out {
     /// launching one). Its answer comes back as [`Call::Reply`] with `token`; 0
     /// means the answer isn't needed.
     Request { token: u64, to: String, method: String, params: Value },
-    /// Read blob `hash` (an image) from `db`; it comes back as [`Call::Blob`].
-    FetchBlob { hash: String },
+    /// Read blob `hash` (an image) from `db`, as app `app` if given; it comes
+    /// back as [`Call::Blob`].
+    FetchBlob { hash: String, app: Option<String> },
+}
+
+/// Most bytes of decoded images kept that no image node shows. Shown ones are
+/// always kept (each is at most 4096 by 4096).
+pub const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
+/// A decoded image, and when it was last wanted, for evicting.
+struct Cached {
+    image: Option<std::sync::Arc<crate::image::Image>>,
+    used: u64,
 }
 
 /// What an answer to one of the compositor's requests is for.
@@ -151,7 +167,20 @@ pub struct Desktop {
     next_token: u64,
     outbox: Vec<Out>,
     /// Decoded images by blob hash; `None` while one is loading or if it failed.
-    images: HashMap<String, Option<std::sync::Arc<crate::image::Image>>>,
+    images: HashMap<String, Cached>,
+    /// Which apps were allowed which blobs (`None` is a system window). An image
+    /// node shows its blob only once its app was.
+    blob_ok: std::collections::HashSet<(Option<String>, String)>,
+    /// Blob fetches in flight, by who they're for.
+    fetching: std::collections::HashSet<(Option<String>, String)>,
+    uses: u64,
+    /// Every app's grants, as permd last published them.
+    pub grants: HashMap<String, AppGrants>,
+    grants_version: i64,
+    /// Permission prompts waiting, by request id; the first is shown.
+    prompts: std::collections::VecDeque<(u64, PromptParams)>,
+    shown_prompt: Option<prompt::Shown>,
+    allow_focused: bool,
 }
 
 impl Desktop {
@@ -184,6 +213,14 @@ impl Desktop {
             next_token: 1,
             outbox: Vec::new(),
             images: HashMap::new(),
+            blob_ok: Default::default(),
+            fetching: Default::default(),
+            uses: 0,
+            grants: HashMap::new(),
+            grants_version: -1,
+            prompts: Default::default(),
+            shown_prompt: None,
+            allow_focused: false,
         }
     }
 
@@ -194,6 +231,7 @@ impl Desktop {
         self.apps.set_work_area(0.0, BAR_HEIGHT, w, h - BAR_HEIGHT);
         shell::install(&mut self.scene, w, self.workspace);
         shell::set_clock(&mut self.scene, &shell::clock_text(SystemTime::now()));
+        self.show_prompt();
     }
 
     fn drain(&mut self) -> Vec<Out> {
@@ -278,7 +316,7 @@ impl Desktop {
         self.relayout();
         let mut list = self.scene.draw_list();
         for item in list.layers.iter_mut().flat_map(|l| l.images.iter_mut()) {
-            item.pixels = self.images.get(&item.blob).cloned().flatten();
+            item.pixels = self.images.get(&item.blob).and_then(|c| c.image.clone());
         }
         list
     }
@@ -288,6 +326,9 @@ impl Desktop {
     /// Apply one input. Returns what the backend should act on, and what to send.
     pub fn input(&mut self, input: Input) -> (Effect, Vec<Out>) {
         self.relayout();
+        if !self.prompts.is_empty() {
+            return (self.prompt_input(input), self.drain());
+        }
         let effect = match input {
             Input::Key { key, mods } => self.key(key, mods),
             Input::Scroll { dy, .. } => {
@@ -597,7 +638,7 @@ impl Desktop {
 
     /// Keep the top bar and overlays above every window.
     fn restack(&mut self) {
-        for id in [TOP_BAR, MENU, SWITCHER] {
+        for id in [TOP_BAR, MENU, SWITCHER, prompt::PROMPT] {
             if self.scene.node(id).is_some() {
                 self.scene.raise(id);
             }
@@ -727,8 +768,9 @@ impl Desktop {
                 && let (Some(doc), Some(path)) =
                     (bind.get("doc").and_then(Value::as_str), bind.get("path").and_then(Value::as_str))
             {
-                let params =
+                let mut params =
                     json!({"id": doc, "path": path, "at": s.at, "delete": s.delete, "insert": s.insert});
+                self.act_for(node, &mut params);
                 self.request(None, "db", "splice", params);
             }
         }
@@ -1245,6 +1287,15 @@ impl Desktop {
     pub fn call(&mut self, call: Call) -> Vec<Out> {
         self.relayout();
         match call {
+            Call::Cancel { id } if self.prompts.iter().any(|(p, _)| *p == id) => {
+                // permd gave up waiting (it timed out).
+                let first = self.prompts.front().is_some_and(|(p, _)| *p == id);
+                self.prompts.retain(|(p, _)| *p != id);
+                if first {
+                    self.show_prompt();
+                }
+            }
+            Call::Grants(table) => self.take_grants(table),
             Call::Cancel { id } => {
                 if self.apps.close_request(&mut self.scene, id) {
                     log::info!("apps: closed a window (request {id} ended)");
@@ -1252,7 +1303,7 @@ impl Desktop {
                 }
             }
             Call::Reply { token, result } => self.reply(token, result),
-            Call::Blob { hash, result } => self.blob_loaded(hash, result),
+            Call::Blob { hash, app, result } => self.blob_loaded(hash, app, result),
             Call::Request { id, from, method, params, stream } => {
                 self.request_in(id, from, &method, params, stream)
             }
@@ -1309,8 +1360,31 @@ impl Desktop {
                 }
             }
             method::GET_CLIPBOARD => {
+                if let Sender::App { app, .. } = &from
+                    && !self.grants.get(app).is_some_and(|g| g.has(capability::CLIPBOARD))
+                {
+                    let message = format!("{app} may not read the clipboard");
+                    let e = BusError { code: protocol::bus::code::PERMISSION_DENIED.into(), message };
+                    return self.outbox.push(Out::Respond { id, result: Err(e) });
+                }
                 let value = serde_json::to_value(&self.clipboard).expect("serializes");
                 self.outbox.push(Out::Respond { id, result: Ok(value) });
+            }
+            method::PROMPT => {
+                if from != Sender::Service(protocol::perm::SERVICE.into()) {
+                    let message = "only perm may prompt".to_owned();
+                    let e = BusError { code: protocol::bus::code::PERMISSION_DENIED.into(), message };
+                    return self.outbox.push(Out::Respond { id, result: Err(e) });
+                }
+                match parse::<PromptParams>(params) {
+                    Ok(p) => {
+                        self.prompts.push_back((id, p));
+                        if self.prompts.len() == 1 {
+                            self.show_prompt();
+                        }
+                    }
+                    Err(e) => self.outbox.push(fail(e)),
+                }
             }
             method::SET_CLIPBOARD => match parse::<Clipboard>(params) {
                 Ok(c) => {
@@ -1351,16 +1425,22 @@ impl Desktop {
                     );
                     continue;
                 }
-                match self.images.get(&hash) {
-                    Some(Some(img)) => {
-                        let (w, h) = (img.width, img.height);
-                        self.set(node, json!({"_iw": w, "_ih": h}));
+                let who = self.apps.app_of(node).map(str::to_owned);
+                let key = (who.clone(), hash.clone());
+                self.uses += 1;
+                let cached = self.images.get_mut(&hash).and_then(|c| {
+                    c.used = self.uses;
+                    c.image.clone()
+                });
+                match cached {
+                    Some(img) if self.blob_ok.contains(&key) => {
+                        self.set(node, json!({"_iw": img.width, "_ih": img.height}));
                     }
-                    Some(None) => {}
-                    None => {
-                        self.images.insert(hash.clone(), None);
-                        self.outbox.push(Out::FetchBlob { hash });
+                    // Not yet checked for this app, or not loaded yet: fetch as the app.
+                    _ if self.fetching.insert(key) => {
+                        self.outbox.push(Out::FetchBlob { hash, app: who });
                     }
+                    _ => {}
                 }
                 continue;
             }
@@ -1370,14 +1450,119 @@ impl Desktop {
             let Some(doc) = self.prop(node, "bind").and_then(|b| b.get("doc")).and_then(Value::as_str) else {
                 continue;
             };
-            let params = json!({"id": doc});
+            let mut params = json!({"id": doc});
+            self.act_for(node, &mut params);
             self.request(Some(Pending::Bind(node)), "db", "get", params);
         }
     }
 
-    /// Blob `hash` arrived: decode it and size every image showing it.
-    fn blob_loaded(&mut self, hash: String, result: Result<Vec<u8>, String>) {
-        let img = match result.and_then(|bytes| crate::image::decode_png(&bytes)) {
+    /// If an app owns `node`, ask `db` to treat the request as that app's: the
+    /// compositor reads and writes documents for an app only as the app may.
+    fn act_for(&self, node: NodeId, params: &mut Value) {
+        if let (Some(app), Some(p)) = (self.apps.app_of(node), params.as_object_mut()) {
+            p.insert("as".into(), json!(app));
+        }
+    }
+
+    /// A new grant table: keep it if it's newer, and forget which blobs the apps
+    /// whose grants changed were allowed (their images check again).
+    fn take_grants(&mut self, table: GrantsResult) {
+        if table.version < self.grants_version {
+            return;
+        }
+        self.grants_version = table.version;
+        let new = protocol::perm::by_app(&table.grants);
+        let old = std::mem::replace(&mut self.grants, new);
+        let changed = |app: &String| old.get(app) != self.grants.get(app);
+        self.blob_ok.retain(|(app, _)| !app.as_ref().is_some_and(changed));
+        // Images of those apps go blank until checked again.
+        let recheck: Vec<NodeId> = self
+            .scene
+            .ids()
+            .filter(|&id| {
+                self.kind(id) == Some(NodeKind::Image)
+                    && self.apps.app_of(id).is_some_and(|a| old.get(a) != self.grants.get(a))
+            })
+            .collect();
+        for &id in &recheck {
+            self.set(id, json!({"_iw": 0, "_ih": 0}));
+        }
+        self.load_bound(&recheck);
+    }
+
+    // --- Permission prompts ------------------------------------------------------
+
+    /// Show the first waiting prompt, or take the layer down if none is.
+    fn show_prompt(&mut self) {
+        self.scene.apply(SceneOp::Destroy { id: prompt::PROMPT });
+        self.shown_prompt = None;
+        let Some((_, p)) = self.prompts.front() else { return };
+        let (w, h) = self.seat.bounds();
+        let (ops, shown) = prompt::ops(p, w, h, self.allow_focused);
+        self.close_menu();
+        self.drag = None;
+        self.wm.pointer_up();
+        self.scene.apply_all(ops);
+        self.shown_prompt = Some(shown);
+        self.restack();
+    }
+
+    /// Answer the shown prompt and move on to the next.
+    fn answer_prompt(&mut self, choice: prompt::Choice) {
+        let Some((id, p)) = self.prompts.pop_front() else { return };
+        let allow = choice == prompt::Choice::Allow;
+        log::info!("prompt: the user {} {}", if allow { "allowed" } else { "turned down" }, p.app);
+        self.outbox.push(Out::Respond { id, result: Ok(json!({"allow": allow})) });
+        self.allow_focused = false;
+        self.show_prompt();
+    }
+
+    /// Input while a prompt is up: it goes to the prompt alone.
+    fn prompt_input(&mut self, input: Input) -> Effect {
+        match input {
+            // The pointer moves (no window drag is going on), but nothing under the
+            // prompt hears it.
+            Input::Motion { .. } | Input::MotionTo { .. } => {
+                self.seat.handle(input, &mut self.scene, &mut self.wm)
+            }
+            Input::Button { pressed: true } => {
+                let (x, y) = self.seat.cursor();
+                if let Some(choice) = self.shown_prompt.and_then(|s| s.hit(x, y)) {
+                    self.answer_prompt(choice);
+                }
+                Effect::default()
+            }
+            Input::Key { key, .. } => {
+                match key {
+                    Key::Escape => self.answer_prompt(prompt::Choice::Deny),
+                    Key::Tab | Key::Left | Key::Right => {
+                        self.allow_focused = !self.allow_focused;
+                        self.show_prompt();
+                    }
+                    Key::Enter | Key::Char(' ') => {
+                        let choice =
+                            if self.allow_focused { prompt::Choice::Allow } else { prompt::Choice::Deny };
+                        self.answer_prompt(choice);
+                    }
+                    _ => {}
+                }
+                Effect::default()
+            }
+            Input::Button { pressed: false } | Input::Scroll { .. } | Input::Shortcut(_) => Effect::default(),
+        }
+    }
+
+    /// Blob `hash` arrived for `app`: decode it (unless it's cached already)
+    /// and size every image of that app showing it.
+    fn blob_loaded(&mut self, hash: String, app: Option<String>, result: Result<Vec<u8>, String>) {
+        self.fetching.remove(&(app.clone(), hash.clone()));
+        // A failed fetch (db refused this app) never falls back to pixels cached
+        // for someone else; a good one reuses them rather than decoding again.
+        let img = result.and_then(|bytes| match self.images.get(&hash).and_then(|c| c.image.clone()) {
+            Some(img) => Ok(img),
+            None => crate::image::decode_png(&bytes),
+        });
+        let img = match img {
             Ok(img) => img,
             Err(e) => {
                 log::warn!("image {}: {e}", hash.get(..12).unwrap_or(&hash));
@@ -1385,17 +1570,49 @@ impl Desktop {
             }
         };
         let (w, h) = (img.width, img.height);
-        self.images.insert(hash.clone(), Some(img));
+        self.uses += 1;
+        self.images.insert(hash.clone(), Cached { image: Some(img), used: self.uses });
+        self.blob_ok.insert((app.clone(), hash.clone()));
         let nodes: Vec<NodeId> = self
             .scene
             .ids()
             .filter(|&id| {
                 self.kind(id) == Some(NodeKind::Image)
                     && self.prop(id, "blob").and_then(Value::as_str) == Some(hash.as_str())
+                    && self.apps.app_of(id) == app.as_deref()
             })
             .collect();
         for id in nodes {
             self.set(id, json!({"_iw": w, "_ih": h}));
+        }
+        self.evict_images();
+    }
+
+    /// Drop the least recently wanted images no node shows, while those take
+    /// more than [`IMAGE_CACHE_BYTES`].
+    fn evict_images(&mut self) {
+        let shown: std::collections::HashSet<String> = self
+            .scene
+            .ids()
+            .filter(|&id| self.kind(id) == Some(NodeKind::Image))
+            .filter_map(|id| self.prop(id, "blob").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let size = |c: &Cached| c.image.as_ref().map_or(0, |i| i.rgba.len());
+        let mut idle: Vec<(u64, String, usize)> = self
+            .images
+            .iter()
+            .filter(|(h, _)| !shown.contains(*h))
+            .map(|(h, c)| (c.used, h.clone(), size(c)))
+            .collect();
+        let mut total: usize = idle.iter().map(|i| i.2).sum();
+        idle.sort();
+        for (_, hash, bytes) in idle {
+            if total <= IMAGE_CACHE_BYTES {
+                break;
+            }
+            self.images.remove(&hash);
+            self.blob_ok.retain(|(_, h)| *h != hash);
+            total -= bytes;
         }
     }
 
@@ -1962,6 +2179,7 @@ mod tests {
             .iter()
             .find_map(|o| match o {
                 Out::Request { token, method, params, .. } if method == "get" && params["id"] == "d1" => {
+                    assert_eq!(params["as"], "org.example.test", "read as the app");
                     Some(*token)
                 }
                 _ => None,
@@ -1982,9 +2200,9 @@ mod tests {
                 token: 0,
                 to: "db".into(),
                 method: "splice".into(),
-                params: json!({"id": "d1", "path": "body.text", "at": 5, "delete": 0, "insert": "!"})
+                params: json!({"id": "d1", "path": "body.text", "at": 5, "delete": 0, "insert": "!", "as": "org.example.test"})
             },
-            "positions in characters"
+            "positions in characters, written as the app"
         );
         let out = key(&mut d, Key::Enter);
         assert!(
@@ -2019,9 +2237,14 @@ mod tests {
         ]);
         let out = d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
         let fetches: Vec<_> = out.iter().filter(|o| matches!(o, Out::FetchBlob { .. })).collect();
-        assert_eq!(fetches, [&Out::FetchBlob { hash: hash.clone() }], "once for both");
+        let me = Some("org.example.test".to_owned());
+        assert_eq!(
+            fetches,
+            [&Out::FetchBlob { hash: hash.clone(), app: me.clone() }],
+            "once for both, as the app"
+        );
         assert!(d.draw_list().layers.iter().all(|l| l.images.is_empty()), "a placeholder until it loads");
-        d.call(Call::Blob { hash: hash.clone(), result: Ok(png) });
+        d.call(Call::Blob { hash: hash.clone(), app: me.clone(), result: Ok(png) });
         let img = global(&d, window, 3);
         assert_eq!((prop(&d, img, "_iw"), prop(&d, img, "_ih")), (json!(3), json!(2)));
         let list = d.draw_list();
@@ -2029,8 +2252,8 @@ mod tests {
         assert_eq!(drawn.len(), 2);
         assert!(drawn.iter().all(|i| i.pixels.as_ref().is_some_and(|p| p.width == 3)));
         // A bad blob is logged and leaves the placeholder.
-        d.call(Call::Blob { hash: "cd".repeat(32), result: Ok(b"junk".to_vec()) });
-        d.call(Call::Blob { hash: "é".repeat(40), result: Err("gone".into()) });
+        d.call(Call::Blob { hash: "cd".repeat(32), app: me.clone(), result: Ok(b"junk".to_vec()) });
+        d.call(Call::Blob { hash: "é".repeat(40), app: me.clone(), result: Err("gone".into()) });
         // A name that isn't a hash (here, one a byte-slicing log line would have
         // cut mid-character) is never fetched.
         let ops = json!([
@@ -2043,9 +2266,159 @@ mod tests {
         assert!(!out.iter().any(|o| matches!(o, Out::FetchBlob { .. })), "{out:?}");
     }
 
+    fn grant(d: &mut Desktop, version: i64, grants: Value) {
+        d.call(Call::Grants(serde_json::from_value(json!({"version": version, "grants": grants})).unwrap()));
+    }
+
+    #[test]
+    fn an_apps_images_show_only_once_it_may_read_them() {
+        let mut d = desk();
+        let mut png = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png, 1, 1);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&[9u8; 3]).unwrap();
+        }
+        let hash = "ef".repeat(32);
+        let image = json!([{"op": "create", "id": 2, "type": "image", "props": {"blob": hash}}, {"op": "insert", "parent": 1, "child": 2, "index": 0}]);
+        let a = open(&mut d, 10, image.clone());
+        d.call(Call::Blob {
+            hash: hash.clone(),
+            app: Some("org.example.test".into()),
+            result: Ok(png.clone()),
+        });
+        assert_eq!(prop(&d, global(&d, a, 2), "_iw"), json!(1));
+        // Another app showing the same blob is checked on its own: the cached
+        // pixels aren't shown until db says it may read it.
+        let other = Some(Sender::App { app: "org.example.other".into(), conn: 4 });
+        let out = d.call(Call::Request {
+            id: 20,
+            from: other.clone(),
+            method: "open_window".into(),
+            params: json!({"title": "B"}),
+            stream: true,
+        });
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let b = data["window"].as_u64().unwrap();
+        let out = d.call(Call::Request {
+            id: 21,
+            from: other,
+            method: "commit".into(),
+            params: json!({"window": b, "ops": image}),
+            stream: false,
+        });
+        assert!(
+            out.contains(&Out::FetchBlob { hash: hash.clone(), app: Some("org.example.other".into()) }),
+            "{out:?}"
+        );
+        assert!(d.prop(global(&d, b, 2), "_iw").is_none(), "nothing shown yet");
+        d.call(Call::Blob {
+            hash: hash.clone(),
+            app: Some("org.example.other".into()),
+            result: Err("permission_denied".into()),
+        });
+        assert!(d.prop(global(&d, b, 2), "_iw").is_none(), "denied: still nothing");
+        assert_eq!(prop(&d, global(&d, a, 2), "_iw"), json!(1), "the first app's stays");
+        // When the first app's grants change, its image is checked again.
+        grant(
+            &mut d,
+            3,
+            json!([{"id": 1, "app": "org.example.test", "capability": "network", "granted": 0, "by": "t"}]),
+        );
+        assert_eq!(prop(&d, global(&d, a, 2), "_iw"), json!(0));
+    }
+
+    #[test]
+    fn reading_the_clipboard_takes_a_grant() {
+        let mut d = desk();
+        d.call(request(1, "set_clipboard", json!({"text": "secret"}), false));
+        let out = d.call(request(2, "get_clipboard", Value::Null, false));
+        assert!(
+            matches!(&out[..], [Out::Respond { result: Err(e), .. }] if e.code == "permission_denied"),
+            "{out:?}"
+        );
+        grant(
+            &mut d,
+            1,
+            json!([{"id": 1, "app": "org.example.test", "capability": "clipboard", "granted": 0, "by": "t"}]),
+        );
+        let out = d.call(request(3, "get_clipboard", Value::Null, false));
+        assert_eq!(out, [Out::Respond { id: 3, result: Ok(json!({"text": "secret"})) }]);
+        // An older table doesn't undo a newer one.
+        grant(&mut d, 0, json!([]));
+        assert!(matches!(
+            &d.call(request(4, "get_clipboard", Value::Null, false))[..],
+            [Out::Respond { result: Ok(_), .. }]
+        ));
+    }
+
+    fn prompt_call(id: u64, from: Option<Sender>) -> Call {
+        let params =
+            json!({"app": "org.example.photos", "name": "Photos", "asks": ["read your Image documents"]});
+        Call::Request { id, from, method: "prompt".into(), params, stream: false }
+    }
+
+    fn perm() -> Option<Sender> {
+        Some(Sender::Service("perm".into()))
+    }
+
+    #[test]
+    fn prompts_come_only_from_perm_and_take_all_input_until_answered() {
+        let mut d = desk();
+        let w = open(&mut d, 7, widgets());
+        let out = d.call(prompt_call(1, app()));
+        assert!(matches!(&out[..], [Out::Respond { result: Err(e), .. }] if e.code == "permission_denied"));
+        assert!(d.scene.node(prompt::PROMPT).is_none());
+
+        assert!(d.call(prompt_call(2, perm())).is_empty(), "waits for the user");
+        assert!(d.call(prompt_call(3, perm())).is_empty(), "queued behind the first");
+        // It's drawn over everything, the top bar included.
+        let list = d.draw_list();
+        let last = list.layers.last().unwrap();
+        assert!(last.texts.iter().any(|t| t.text == "“Photos” would like to"), "the top layer");
+        // Clicking a window under it does nothing.
+        let button = global(&d, w, 3);
+        let at = center(&mut d, button);
+        let out = click(&mut d, at);
+        assert!(out.is_empty(), "{out:?}");
+        // Enter refuses (Don't allow has the focus); then Tab and Enter allow the next.
+        let (_, out) = d.input(Input::Key { key: Key::Enter, mods: Mods::default() });
+        assert_eq!(out, [Out::Respond { id: 2, result: Ok(json!({"allow": false})) }]);
+        assert!(d.scene.node(prompt::PROMPT).is_some(), "the next one");
+        d.input(Input::Key { key: Key::Tab, mods: Mods::default() });
+        let (_, out) = d.input(Input::Key { key: Key::Enter, mods: Mods::default() });
+        assert_eq!(out, [Out::Respond { id: 3, result: Ok(json!({"allow": true})) }]);
+        assert!(d.scene.node(prompt::PROMPT).is_none());
+        assert!(!click(&mut d, at).is_empty(), "windows hear presses again");
+    }
+
+    #[test]
+    fn prompts_answer_to_presses_and_go_when_perm_gives_up() {
+        let mut d = desk();
+        d.call(prompt_call(5, perm()));
+        let shown = d.shown_prompt.unwrap();
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (x, y) = mid(shown.allow);
+        d.input(Input::MotionTo { x, y });
+        let (_, out) = d.input(Input::Button { pressed: true });
+        assert_eq!(out, [Out::Respond { id: 5, result: Ok(json!({"allow": true})) }]);
+        d.call(prompt_call(6, perm()));
+        d.call(Call::Cancel { id: 6 });
+        assert!(d.scene.node(prompt::PROMPT).is_none(), "taken down");
+        d.call(prompt_call(7, perm()));
+        let (_, out) = d.input(Input::Key { key: Key::Escape, mods: Mods::default() });
+        assert_eq!(out, [Out::Respond { id: 7, result: Ok(json!({"allow": false})) }]);
+    }
+
     #[test]
     fn the_clipboard_is_shared_with_apps_and_bad_requests_get_errors() {
         let mut d = desk();
+        grant(
+            &mut d,
+            1,
+            json!([{"id": 1, "app": "org.example.test", "capability": "clipboard", "granted": 0, "by": "t"}]),
+        );
         d.call(request(1, "set_clipboard", json!({"text": "copied", "doc": "d9"}), false));
         let out = d.call(request(2, "get_clipboard", Value::Null, false));
         assert_eq!(out, [Out::Respond { id: 2, result: Ok(json!({"text": "copied", "doc": "d9"})) }]);

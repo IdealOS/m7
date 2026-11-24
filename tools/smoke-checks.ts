@@ -58,6 +58,11 @@ export const GUEST_SCRIPT = [
   `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl app list 2>/dev/null | grep -c running); [ "$n" -ge 2 ] && break; sleep 1; done; echo SMOKE apps-running $n`,
   // The widget gallery ships too, but waits to be launched from the Apps menu.
   "echo SMOKE app-gallery $(osctl app list 2>/dev/null | grep org.idealos.gallery | awk '{print $NF}')",
+  // M6: permd and secretsd run; installing notes granted what its manifest asks for;
+  // and the notes app runs sandboxed: its own network namespace and a seccomp filter.
+  "echo SMOKE perm-services $(osctl bus list 2>&1 | grep -cE '^(perm|secrets) ')",
+  `echo SMOKE notes-grant $(osctl perm list org.idealos.notes 2>&1 | grep -c '"type":"Note"')`,
+  `P=$(ps | grep "[a]pp-host --app org.idealos.notes" | awk '{print $1}' | head -1); echo SMOKE app-sandbox $([ -n "$P" ] && [ "$(readlink /proc/$P/ns/net)" != "$(readlink /proc/1/ns/net)" ] && echo netns) $(grep -o 'Seccomp:[[:space:]]*[0-9]' /proc/$P/status 2>/dev/null | tr -d '[:space:]')`,
   "echo SMOKE end",
 ];
 
@@ -151,6 +156,9 @@ export function evaluate(log: string): Check[] {
     fact("db-schema", "1", "the Contact schema refused a contact without a name"),
     fact("apps-running", "2", "session runs the two bundled apps"),
     fact("app-gallery", "installed", "the widget gallery is installed but not started"),
+    fact("perm-services", "2", "permd and secretsd are on the bus"),
+    fact("notes-grant", "1", "installing notes granted the permissions its manifest lists"),
+    fact("app-sandbox", "netns Seccomp:2", "the notes app runs in its own network namespace under seccomp"),
     {
       name: "the apps opened their windows under their own ids",
       ok: ["org.idealos.counter", "org.idealos.notes"].every((id) =>

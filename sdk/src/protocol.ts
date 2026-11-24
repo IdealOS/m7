@@ -27,6 +27,9 @@ export const DEFAULT_QUERY_LIMIT = 100;
  */
 export const DEFAULT_TIMEOUT_MS = 30000;
 
+/** Where permd publishes every grant whenever they change. */
+export const GRANTS_TOPIC = "perm.grants";
+
 /** Largest blob `put_blob` takes. */
 export const MAX_BLOB_BYTES = 4294967296;
 
@@ -66,6 +69,12 @@ export const MAX_WATCHES = 4096;
 /** Most nodes one window may hold. */
 export const MAX_WINDOW_NODES = 20000;
 
+/** The name permd claims. */
+export const PERM_SERVICE = "perm";
+
+/** The name secretsd claims. */
+export const SECRETS_SERVICE = "secrets";
+
 /** The name session claims. */
 export const SESSION_SERVICE = "session";
 
@@ -74,6 +83,18 @@ export const TAP_TOPIC = "bus.tap";
 
 /** The node id of a window's content area in that window's commits. */
 export const WINDOW_CONTENT = 1;
+
+/** What a data grant allows on the documents it covers. */
+export type Access =
+  /** Query, get, search and watch them, read their history and blobs. */
+  | "read"
+  /**
+   * Update, splice and delete them (and read them). A changed document must
+   * still be covered by the grant.
+   */
+  | "write"
+  /** Create documents of the type; each must be covered by the grant's filter. */
+  | "create";
 
 /** An app's connection: its messages are stamped with this reverse-DNS app id. */
 export type AdoptApp = { app: string };
@@ -104,6 +125,36 @@ export type AtParams = { id: string; change_set: number };
 
 /** Result of `at`. */
 export type AtResult = { data: Record<string, unknown> };
+
+/** What happened, in an audit entry. */
+export type AuditAction =
+  /** A grant was made. */
+  | "grant"
+  /** A grant was removed. */
+  | "revoke"
+  /** The user turned down a request. */
+  | "deny";
+
+/** One entry in the audit log. */
+export type AuditEntry = {
+  id: number;
+  /** When, in milliseconds since the Unix epoch. */
+  at: number;
+  app: string;
+  action: AuditAction;
+  rule: Rule;
+  /** Who did it: `user`, or a service, tool or app. */
+  by: string;
+};
+
+/** Params of `audit`: the most recent entries. */
+export type AuditParams = {
+  /** At most this many (default 100). */
+  limit?: number | null;
+};
+
+/** Result of `audit`, newest first. */
+export type AuditResult = { entries: AuditEntry[] };
 
 /** A link into a document from another live document. */
 export type BacklinkInfo = {
@@ -147,6 +198,9 @@ export type BrokerErrorCode =
 /** Why a request failed. `code` is one of the broker's codes or a service's own. */
 export type BusError = { code: string; message: string };
 
+/** A capability: `network`, `clipboard`, `permissions` or `service:NAME`. */
+export type CapabilityRule = { capability: string };
+
 /** What a change set did to a document. */
 export type ChangeKind =
   | "create" | "update" | "delete"
@@ -180,6 +234,17 @@ export type Commit = { window: number; ops: SceneOp[] };
 
 /** Params of `create`. */
 export type CreateParams = { type: string; data?: Record<string, unknown> };
+
+/** Access to documents of one type. */
+export type DataRule = {
+  type: string;
+  access: Access[];
+  /**
+   * Only documents matching this filter (the database's query language).
+   * Empty covers every document of the type.
+   */
+  filter?: Record<string, unknown>;
+};
 
 /**
  * Params of `diff`: document `id` from just after change set `from` (0 for
@@ -218,6 +283,41 @@ export type FieldChangeInfo = {
   after?: unknown;
   /** Absent when the field didn't exist before. */
   before?: unknown;
+};
+
+/** Result of `get`. */
+export type GetResult = { value: string };
+
+/** One grant. */
+export type Grant = {
+  id: number;
+  app: string;
+  /** When, in milliseconds since the Unix epoch. */
+  granted: number;
+  /**
+   * Who granted it: `user` (a prompt), or the service, tool or app that called
+   * `grant`.
+   */
+  by: string;
+} & (DataRule | CapabilityRule);
+
+/** Params of `grant`: give app `app` these rules, without asking the user. */
+export type GrantParams = { app: string; rules: Rule[] };
+
+/** Params of `grants`. */
+export type GrantsParams = {
+  /** Only this app's grants. (An app always gets only its own.) */
+  app?: string | null;
+};
+
+/** Result of `grants` and `grant`, and the data published on `GRANTS_TOPIC`. */
+export type GrantsResult = {
+  grants: Grant[];
+  /**
+   * Grows with every change (it survives restarts), so a follower that gets
+   * tables out of order keeps the newest.
+   */
+  version?: number;
 };
 
 /** Params of `get_blob` and `blob_info`. */
@@ -260,6 +360,9 @@ export type ListResult = {
   /** How many connections the broker has. */
   connections: number;
 };
+
+/** Result of `list`: the names of the caller's secrets. */
+export type ListResult2 = { names: string[] };
 
 /** One bus frame's JSON. */
 export type Message =
@@ -314,6 +417,9 @@ export type NameParams = {
   name: string;
 };
 
+/** Params of `get` and `delete`. */
+export type NameParams2 = { name: string };
+
 /**
  * Node types understood by the compositor: primitives (`group`, `rect`, `text`,
  * `image`), containers that lay out their children (`vstack`, `hstack`,
@@ -345,6 +451,18 @@ export type OpenWindowParams = {
 /** A sort key: a field path and a direction, written `["date", "desc"]`. */
 export type OrderBy = [string, Direction];
 
+/**
+ * Params of `prompt`: app `app` (called `name`) asks for these things, each in
+ * words (see `describe`), for `reason`.
+ */
+export type PromptParams = { app: string; name: string; asks: string[]; reason?: string | null };
+
+/** Result of `prompt`. */
+export type PromptResult = { allow: boolean };
+
+/** Params of `put`: store `value` as `name`, replacing what was there. */
+export type PutParams = { name: string; value: string };
+
 /** A query: documents of one type that match a filter, in order. */
 export type Query = {
   type: string;
@@ -362,6 +480,18 @@ export type Query = {
   where?: Record<string, unknown>;
 };
 
+/** Params of `request`: what the app would like, and why, in its own words. */
+export type RequestParams = { rules: Rule[]; reason?: string | null };
+
+/** Result of `request`. */
+export type RequestResult = {
+  /**
+   * Whether the app now has everything it asked for (because the user allowed
+   * it, or it already had it).
+   */
+  granted: boolean;
+};
+
 /** Params of `restore`: replace the database with snapshot `name`. */
 export type RestoreParams = { name: string };
 
@@ -370,6 +500,18 @@ export type RestoreParams = { name: string };
  * one undoes the restore.
  */
 export type RestoreResult = { saved: SnapshotInfo };
+
+/** Params of `revoke`: the grants with these ids, and every grant of `app`. */
+export type RevokeParams = { app?: string | null; ids?: number[] };
+
+/** Result of `revoke`. */
+export type RevokeResult = {
+  /** How many grants were removed. */
+  revoked: number;
+};
+
+/** What a grant gives. */
+export type Rule = DataRule | CapabilityRule;
 
 /** One change to a window's scene graph. */
 export type SceneOp =

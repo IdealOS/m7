@@ -118,6 +118,16 @@ impl Apps {
         self.windows.get(&window).map(|w| w.frame)
     }
 
+    /// The app that owns scene node `node` (by its window), if an app does: who the
+    /// compositor acts for when it reads or writes documents for that node.
+    pub fn app_of(&self, node: NodeId) -> Option<&str> {
+        let &(window, _) = self.owners.get(&node)?;
+        match &self.windows.get(&window)?.owner {
+            Sender::App { app, .. } => Some(app),
+            _ => None,
+        }
+    }
+
     /// An event for the app that owns scene node `node`, if an app does.
     pub fn event(&self, node: NodeId, event: &str, value: Option<Value>) -> Option<Reply> {
         let &(window, app_id) = self.owners.get(&node)?;
