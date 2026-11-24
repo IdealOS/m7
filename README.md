@@ -14,7 +14,9 @@ Targets: Raspberry Pi 4 (8 GB) and an aarch64 QEMU VM on Apple Silicon.
 ![Phase 0 compositor demo](docs/screenshots/phase0.png)
 
 The same compositor on the QEMU image, through its KMS backend:
-[docs/screenshots/m1-kms-qemu.png](docs/screenshots/m1-kms-qemu.png).
+[docs/screenshots/m1-kms-qemu.png](docs/screenshots/m1-kms-qemu.png). Apps in
+windows, with the widget set and the shell (M5):
+[docs/screenshots/m5-desktop.png](docs/screenshots/m5-desktop.png).
 
 ## Quick start (macOS)
 
@@ -171,6 +173,16 @@ docs/               feature list, implementation plan, screenshots
 | Gallery app | `apps/gallery` shows every widget, with a text area bound to a "Gallery scratchpad" note. It's installed in the image but doesn't start on its own: launch it from the Apps menu. Visual check: `compositor --screenshot out.png --serve-for N` now also takes `--type TEXT`, `--key NAME` and `--scroll PX` steps beside `--click LABEL`. |
 | SDK | Builders for every widget above, `onChange`/`onSubmit`/`onChoose`/`onCancel`/`onRange` handlers, `virtualList({count, rowHeight, overscan}, render)`, and a window `size()` that follows resizes. |
 | Not done | Bound fields load once: changes another writer makes to the same field don't show until the field is made again (live bound fields need `watch` on the field). Only PNG images (at most 4096 px on a side). The clipboard lives in memory and any app may read it until permissions arrive (M6). The KMS backend's new keyboard, wheel and wake handling is checked by clippy and the QEMU smoke test, not by hand on a Pi. |
+
+Screenshots, rendered offscreen by `compositor --screenshot` while it served real
+apps (busd, dbd and app-host running) and played clicks, typing and scrolling:
+
+| | |
+| --- | --- |
+| ![Counter, Notes and the gallery on one workspace, with the Apps menu open](docs/screenshots/m5-desktop.png) | ![The widget gallery after some use](docs/screenshots/m5-gallery.png) |
+| Three apps on one workspace; the Apps menu lists the installed `App` documents. | The gallery after clicks, a select, a menu action and typing. |
+| ![Further down the gallery](docs/screenshots/m5-gallery-scrolled.png) | ![The gallery's dialog](docs/screenshots/m5-gallery-dialog.png) |
+| Scrolled: the bound text area (typed into by the compositor), grid, split view and an image blob. | A dialog over its window. |
 
 ### Spikes
 
