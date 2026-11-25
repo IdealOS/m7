@@ -8,7 +8,9 @@
 pub mod broker;
 pub mod bus;
 pub mod db;
+pub mod net;
 pub mod perm;
+pub mod pty;
 pub mod scene;
 pub mod secrets;
 pub mod session;

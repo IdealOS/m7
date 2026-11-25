@@ -63,6 +63,12 @@ export const GUEST_SCRIPT = [
   "echo SMOKE perm-services $(osctl bus list 2>&1 | grep -cE '^(perm|secrets) ')",
   `echo SMOKE notes-grant $(osctl perm list org.idealos.notes 2>&1 | grep -c '"type":"Note"')`,
   `P=$(ps | grep "[a]pp-host --app org.idealos.notes" | awk '{print $1}' | head -1); echo SMOKE app-sandbox $([ -n "$P" ] && [ "$(readlink /proc/$P/ns/net)" != "$(readlink /proc/1/ns/net)" ] && echo netns) $(grep -o 'Seccomp:[[:space:]]*[0-9]' /proc/$P/status 2>/dev/null | tr -d '[:space:]')`,
+  // M7: ptyd and netd run; netd sees QEMU's wired network through NetworkManager
+  // (give DHCP a moment); a shell session opens; the new apps are installed.
+  "echo SMOKE m7-services $(osctl bus list 2>&1 | grep -cE '^(pty|net) ')",
+  `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl bus call net status 2>/dev/null | grep -c '"kind":"ethernet"'); [ "$n" -ge 1 ] && break; sleep 1; done; echo SMOKE net-wired $n`,
+  `echo SMOKE pty-open $(timeout 5 osctl bus stream pty open '{"cols":20,"rows":5}' --count 1 2>&1 | grep -c '"event":"opened"')`,
+  "echo SMOKE m7-apps $(osctl app list 2>/dev/null | grep -cE 'org.idealos.(settings|browser|terminal)')",
   "echo SMOKE end",
 ];
 
@@ -159,6 +165,10 @@ export function evaluate(log: string): Check[] {
     fact("perm-services", "2", "permd and secretsd are on the bus"),
     fact("notes-grant", "1", "installing notes granted the permissions its manifest lists"),
     fact("app-sandbox", "netns Seccomp:2", "the notes app runs in its own network namespace under seccomp"),
+    fact("m7-services", "2", "ptyd and netd are on the bus"),
+    fact("net-wired", "1", "netd reports the wired connection NetworkManager made"),
+    fact("pty-open", "1", "ptyd opened a shell session"),
+    fact("m7-apps", "3", "Settings, Documents and Terminal are installed"),
     {
       name: "the apps opened their windows under their own ids",
       ok: ["org.idealos.counter", "org.idealos.notes"].every((id) =>

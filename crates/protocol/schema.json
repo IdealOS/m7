@@ -454,6 +454,54 @@
       ],
       "type": "object"
     },
+    "ConnectParams": {
+      "description": "Params of `connect`: join `ssid`, with `password` if it's secure and not\nknown yet.",
+      "properties": {
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ssid"
+      ],
+      "type": "object"
+    },
+    "Connection": {
+      "description": "One active connection.",
+      "properties": {
+        "device": {
+          "description": "The network interface, such as `wlan0`.",
+          "type": "string"
+        },
+        "ip4": {
+          "description": "Its IPv4 address, with prefix length, if it has one yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`wifi` or `ethernet` (or another NetworkManager type).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Its name: the Wi-Fi network's, or the wired profile's.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "device"
+      ],
+      "type": "object"
+    },
     "CreateParams": {
       "description": "Params of `create`.",
       "properties": {
@@ -765,6 +813,60 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "IdParams2": {
+      "description": "Params of `attach`.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "InfoResult": {
+      "description": "Result of `info`: about this device and system.",
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "kernel": {
+          "description": "The kernel's name and release, such as `Linux 6.12.58`.",
+          "type": "string"
+        },
+        "machine": {
+          "description": "The CPU architecture, such as `aarch64`.",
+          "type": "string"
+        },
+        "services": {
+          "description": "Services session is running, by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "uptime_secs": {
+          "description": "Seconds since the system started.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "description": "idealos's version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "hostname",
+        "kernel",
+        "machine",
+        "uptime_secs",
+        "services"
       ],
       "type": "object"
     },
@@ -1099,8 +1201,94 @@
       ],
       "type": "object"
     },
+    "NetState": {
+      "description": "How connected the device is.",
+      "oneOf": [
+        {
+          "enum": [
+            "disconnected"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "connected",
+          "description": "Online.",
+          "type": "string"
+        },
+        {
+          "const": "connecting",
+          "description": "Joining a network.",
+          "type": "string"
+        },
+        {
+          "const": "limited",
+          "description": "Connected to a network with no route to the internet.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "No network manager to ask.",
+          "type": "string"
+        }
+      ]
+    },
+    "NetStatus": {
+      "description": "Result of `status`, and each part of `watch`.",
+      "properties": {
+        "connections": {
+          "items": {
+            "$ref": "#/$defs/Connection"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/NetState"
+        },
+        "wifi_enabled": {
+          "description": "Whether Wi-Fi is switched on.",
+          "type": "boolean"
+        },
+        "wifi_present": {
+          "description": "Whether there's a Wi-Fi device at all.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "connections",
+        "wifi_enabled",
+        "wifi_present"
+      ],
+      "type": "object"
+    },
+    "NetworksParams": {
+      "description": "Params of `networks`.",
+      "properties": {
+        "rescan": {
+          "default": false,
+          "description": "Scan first (takes a few seconds), rather than list what was last seen.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "NetworksResult": {
+      "description": "Result of `networks`: strongest first, one entry per name.",
+      "properties": {
+        "networks": {
+          "items": {
+            "$ref": "#/$defs/WifiNetwork"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "networks"
+      ],
+      "type": "object"
+    },
     "NodeKind": {
-      "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`).",
+      "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).",
       "oneOf": [
         {
           "enum": [
@@ -1135,8 +1323,35 @@
           "const": "vlist",
           "description": "A virtual list: `count` rows of `row_height`, of which the app creates only\nthe visible ones (it hears which, as `range` events), each with an `index`.",
           "type": "string"
+        },
+        {
+          "const": "terminal",
+          "description": "A terminal showing pty session `pty` (see `pty`), which the app\nopened. The compositor attaches to the session as the app, draws its\nscreen, and sends it what's typed and the size that fits; the app sees\nnone of it.",
+          "type": "string"
         }
       ]
+    },
+    "OpenParams": {
+      "description": "Params of `open`: the screen's starting size.",
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cols",
+        "rows"
+      ],
+      "type": "object"
     },
     "OpenWindowParams": {
       "description": "Params of `open_window`.",
@@ -1314,6 +1529,32 @@
       ],
       "type": "object"
     },
+    "ResizeParams": {
+      "description": "Params of `resize`.",
+      "properties": {
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "cols",
+        "rows"
+      ],
+      "type": "object"
+    },
     "RestoreParams": {
       "description": "Params of `restore`: replace the database with snapshot `name`.",
       "properties": {
@@ -1382,6 +1623,38 @@
         }
       ],
       "description": "What a grant gives."
+    },
+    "Run": {
+      "description": "A run of cells on one row that look alike.",
+      "properties": {
+        "bg": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bold": {
+          "type": "boolean"
+        },
+        "fg": {
+          "description": "`#rrggbb`; absent for the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "One character per cell.",
+          "type": "string"
+        },
+        "underline": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
     },
     "SceneOp": {
       "description": "One change to a window's scene graph.",
@@ -1549,6 +1822,116 @@
       ],
       "type": "object"
     },
+    "ScreenFrame": {
+      "description": "One part of `attach`'s streamed answer: the screen, or what changed on it.",
+      "properties": {
+        "app_cursor": {
+          "description": "The arrow keys should send application-mode sequences (`ESC O A`).",
+          "type": "boolean"
+        },
+        "bracketed_paste": {
+          "description": "Pasted text should be wrapped in `ESC [200~` ... `ESC [201~`.",
+          "type": "boolean"
+        },
+        "cols": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Where the cursor is (row, column), or absent while it's hidden.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "lines": {
+          "description": "Changed rows: each row's index and its runs, left to right. A row's runs\ncover it from the first column; the rest of the row is blank.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "items": {
+                  "$ref": "#/$defs/Run"
+                },
+                "type": "array"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "rows": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cols",
+        "rows",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "ScreenInfo": {
+      "description": "Result of `screen`: the display, in logical pixels.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace": {
+          "description": "The workspace showing now, from 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspaces": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "workspaces",
+        "workspace"
+      ],
+      "type": "object"
+    },
     "SearchParams": {
       "description": "Params of `search`: documents containing every word of `text`, best first.",
       "properties": {
@@ -1637,6 +2020,63 @@
         }
       ]
     },
+    "SessionEvent": {
+      "description": "A part of `open`'s streamed answer.",
+      "oneOf": [
+        {
+          "description": "The first part: the session's id, for `attach` and the `terminal` node.",
+          "properties": {
+            "event": {
+              "const": "opened",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The shell set the window title.",
+          "properties": {
+            "event": {
+              "const": "title",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "title"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The shell exited, with this status (or the signal that ended it, negated).\nThe stream ends after this.",
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "event": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SnapshotInfo": {
       "description": "A snapshot of the database.",
       "properties": {
@@ -1715,6 +2155,70 @@
       ],
       "type": "object"
     },
+    "SsidParams": {
+      "description": "Params of `forget`.",
+      "properties": {
+        "ssid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ssid"
+      ],
+      "type": "object"
+    },
+    "StatsResult": {
+      "description": "Result of `stats`: how much the database holds. Needs the `storage`\ncapability (or a system caller).",
+      "properties": {
+        "blob_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blobs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "change_sets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "db_bytes": {
+          "description": "The database file, with its write-ahead log.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "docs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot_bytes": {
+          "description": "The snapshots directory.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "types": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "db_bytes",
+        "docs",
+        "types",
+        "change_sets",
+        "blobs",
+        "blob_bytes",
+        "snapshot_bytes"
+      ],
+      "type": "object"
+    },
     "SystemTrust": {
       "description": "The one trust level `adopt` names explicitly.",
       "enum": [
@@ -1753,6 +2257,23 @@
         "conn",
         "sender",
         "msg"
+      ],
+      "type": "object"
+    },
+    "TypesResult": {
+      "description": "Result of `types`: every document type with live documents the caller may\nread, and how many, by name.",
+      "properties": {
+        "types": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "types"
       ],
       "type": "object"
     },
@@ -1907,6 +2428,53 @@
         }
       ]
     },
+    "WifiNetwork": {
+      "description": "A Wi-Fi network in range.",
+      "properties": {
+        "active": {
+          "description": "The device is on it now.",
+          "type": "boolean"
+        },
+        "known": {
+          "description": "Joined before: its password is saved.",
+          "type": "boolean"
+        },
+        "secure": {
+          "description": "Needs a password.",
+          "type": "boolean"
+        },
+        "ssid": {
+          "type": "string"
+        },
+        "strength": {
+          "description": "Signal strength, 0 to 100.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ssid",
+        "strength",
+        "secure",
+        "active",
+        "known"
+      ],
+      "type": "object"
+    },
+    "WifiParams": {
+      "description": "Params of `set_wifi`.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    },
     "WindowEvent": {
       "description": "A part of `open_window`'s streamed answer.",
       "oneOf": [
@@ -2004,6 +2572,22 @@
           "type": "object"
         }
       ]
+    },
+    "WriteParams": {
+      "description": "Params of `write`: bytes for the shell, as text (keys are text, or escape\nsequences, which are too).",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "data"
+      ],
+      "type": "object"
     }
   },
   "$id": "idealos:protocol",
@@ -2079,9 +2663,17 @@
       "description": "Most nodes one window may hold.",
       "value": 20000
     },
+    "NET_SERVICE": {
+      "description": "The name netd claims.",
+      "value": "net"
+    },
     "PERM_SERVICE": {
       "description": "The name permd claims.",
       "value": "perm"
+    },
+    "PTY_SERVICE": {
+      "description": "The name ptyd claims.",
+      "value": "pty"
     },
     "SECRETS_SERVICE": {
       "description": "The name secretsd claims.",

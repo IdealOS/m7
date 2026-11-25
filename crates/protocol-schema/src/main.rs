@@ -6,7 +6,7 @@
 //! under `x-constants`, which JSON Schema has no keyword for.
 
 use protocol::bus::{self, code};
-use protocol::{broker, db, perm, secrets};
+use protocol::{broker, db, net, perm, pty, secrets};
 use serde_json::{Value, json};
 
 fn document() -> Value {
@@ -66,6 +66,22 @@ fn document() -> Value {
     g.subschema_for::<secrets::NameParams>();
     g.subschema_for::<secrets::GetResult>();
     g.subschema_for::<secrets::ListResult>();
+    g.subschema_for::<pty::OpenParams>();
+    g.subschema_for::<pty::SessionEvent>();
+    g.subschema_for::<pty::IdParams>();
+    g.subschema_for::<pty::WriteParams>();
+    g.subschema_for::<pty::ResizeParams>();
+    g.subschema_for::<pty::ScreenFrame>();
+    g.subschema_for::<net::NetStatus>();
+    g.subschema_for::<net::NetworksParams>();
+    g.subschema_for::<net::NetworksResult>();
+    g.subschema_for::<net::ConnectParams>();
+    g.subschema_for::<net::SsidParams>();
+    g.subschema_for::<net::WifiParams>();
+    g.subschema_for::<protocol::session::InfoResult>();
+    g.subschema_for::<protocol::scene::ScreenInfo>();
+    g.subschema_for::<db::TypesResult>();
+    g.subschema_for::<db::StatsResult>();
     let mut defs = g.take_definitions(true);
 
     // Broker error codes are string constants (services may send their own), so
@@ -99,6 +115,8 @@ fn document() -> Value {
         "PERM_SERVICE": constant(perm::SERVICE.into(), "The name permd claims."),
         "GRANTS_TOPIC": constant(perm::GRANTS_TOPIC.into(), "Where permd publishes every grant whenever they change."),
         "SECRETS_SERVICE": constant(secrets::SERVICE.into(), "The name secretsd claims."),
+        "PTY_SERVICE": constant(pty::SERVICE.into(), "The name ptyd claims."),
+        "NET_SERVICE": constant(net::SERVICE.into(), "The name netd claims."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

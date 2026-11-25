@@ -82,12 +82,14 @@ crates/db           the document store: Loro, SQLite, queries, live queries, lin
 crates/dbd          the db service on the bus
 crates/permd        the perm service: grants, the audit log, permission prompts
 crates/secretsd     the secrets service: an encrypted store, per owner
+crates/ptyd         the pty service: shells on pseudo-terminals, parsed into screens
+crates/netd         the net service: Wi-Fi and connections, over NetworkManager
 crates/app-host     one app's process: its JavaScript in QuickJS, with the bus
 crates/compositor   scene graph, wgpu renderer, window manager, hosted + KMS backends
 crates/session      first process after init: starts and supervises services, sandboxes apps
 spikes/             db-bench (C), js-bench (D), kms-probe (A/B): benchmarks to rerun on the Pi
 sdk/                @idealos/sdk: bus, database and live queries, signals, windows and widgets
-apps/               the apps that ship with the system (counter, notes, gallery)
+apps/               the apps that ship with the system (counter, notes, gallery, terminal, settings, browser)
 schemas/            JSON Schemas for the system document types
 image/              Buildroot external tree: defconfigs, kernel fragments, rootfs overlay
 tools/              build VM, image build, QEMU, SD card, deploy scripts
@@ -198,6 +200,25 @@ apps (busd, dbd and app-host running) and played clicks, typing and scrolling:
 | Sandboxes | session starts each app inside three layers, set up between fork and exec: a **network namespace** with only loopback unless the app holds `network` (read at start, so a new network grant takes effect when the app restarts); **Landlock**, allowing reads and execution only of the system's program and library directories and writing only in the app's runtime directory (`/run/idealos/apps/<id>`), and no TCP without `network`; and **seccomp**, refusing new sockets (only IPv4 and IPv6 with `network`; never Unix sockets, which could reach the broker's socket) and calls such as `ptrace`, `mount`, `unshare`, `bpf` and `keyctl`. Each layer stands alone. Tests in the Linux VM run a sandboxed process that can't read `/etc`, make sockets, ptrace or make namespaces, but can write its own directory; as root, one sees only `lo`. |
 | `secretsd` | Secrets (`put`, `get`, `delete`, `list`) belong to the service or app that stored them, by the identity the broker stamped. Each is sealed with XChaCha20-Poly1305 (the `chacha20poly1305` crate) under a device key, with the owner and name as associated data, in an SQLite file outside the database. |
 | Not done | The key for secrets is a file on the device: with no login yet, there's no passphrase to derive it from. The QEMU smoke test checks permd, secretsd, notes' grant and the notes app's namespace and seccomp filter, but nothing has run on a Pi. A search from an app is filtered after it runs, so it may return fewer than `limit`. Filters can follow links (`$linksTo`, `$linkedFrom`), which can reveal that a document an app can't read links to one it can. Apps still run as the same Unix user as the services; the sandbox is what keeps them apart. |
+
+### First apps (M7)
+
+| Item | State |
+| --- | --- |
+| Terminal | `ptyd` runs shells on pseudo-terminals (as the user, outside any app sandbox, so apps reach it only with `service:pty`: "run commands with full access to this device"). It parses their output in Rust, with the `vte` crate's escape-sequence parser and its own grid (`crates/ptyd/src/term.rs`): cursor movement, erasing, inserting and deleting, scrolling regions, the alternate screen, the 16, 256 and 24-bit colors, bold, underline and inverse, application cursor keys, bracketed paste, titles and the cursor reports. The **terminal app** opens a session and shows a `terminal` node; the compositor attaches to the session *as the app*, draws the cell grid in the monospace family (DejaVu Sans Mono on the device), sends what's typed as xterm sends it (Ctrl+letter, Alt as Escape, arrows, Tab and Escape included) and pastes with Ctrl+Shift+V or Command+V, and tells ptyd the size that fits. ptyd streams the rows that changed, at most every 16 ms. So a terminal's output never passes through QuickJS. Only the session's owner may attach, type or resize. |
+| `netd` | Wraps NetworkManager's D-Bus API (with `zbus`): the overall state, active connections and their addresses, the Wi-Fi switch, scanning, joining (a new network makes a profile, which is deleted again if joining fails), disconnecting and forgetting; `watch` streams the status as it changes. `--fake` serves a pretend network for development; with no NetworkManager it reports the network unavailable. The image now has NetworkManager, wpa_supplicant and D-Bus (and the Pi's Wi-Fi firmware), with saved networks on `/data`; NetworkManager runs DHCP in place of BusyBox's. |
+| Settings | **Network** (status, the Wi-Fi switch, scanning, joining with a password in a `secret` text field, forgetting), **Permissions** (every app's grants by name, revoking, the recent audit log), **Display** (the screen and workspaces, from the compositor's new `screen` method), **Storage** (database size, documents, blobs, history, snapshots, and taking one now: dbd's new `stats`, for apps with the new `storage` capability) and **About** (version, kernel, uptime, services: session's new `info`). It holds `permissions`, `storage`, `service:net`, `service:session` and reads `App` documents. |
+| Documents | The document browser: types with counts (dbd's new `types`, counting only what the caller may read), full-text search, a filter builder (field, operator, value, ANDed), results, and an inspector with each field, links out and in (followable) and the version history (any version shown as it was). It reads every type with the new `{"type": "*"}` grant, and changes nothing. |
+| Widgets and SDK | `terminal` node; `text_field` with `secret` (bullets, kept off the clipboard); a dialog takes the keyboard focus when it opens; `w: "fill"` across a column (or `h` across a row) now stretches rather than grows. SDK: `terminal()`, `pty.open()`, request `timeoutMs`. |
+| Boot | session starts busd, permd, dbd, secretsd, ptyd, netd and the compositor; the boot installer installs the bundled apps (Settings, Documents and Terminal start from the Apps menu). The QEMU smoke test checks ptyd and netd are up, netd reports NetworkManager's wired connection, a shell session opens, and the new apps are installed. |
+| Not done | Joining Wi-Fi from Settings on a Pi (no Pi yet: QEMU has only a wired network, so Wi-Fi joining is tested only against the pretend network). The terminal has no scrollback, selection or copy yet, and draws wide characters in one cell. Display settings show the screen but can't change it. Settings' grant descriptions repeat permd's in TypeScript. |
+
+| | |
+| --- | --- |
+| ![A shell in the terminal app](docs/screenshots/m7-terminal.png) | ![Settings joining a Wi-Fi network](docs/screenshots/m7-settings-network.png) |
+| The terminal app: a shell from ptyd, drawn by the compositor. | Settings joining a secured network (the pretend one); the password shows as bullets. |
+| ![Settings listing what each app may do](docs/screenshots/m7-settings-permissions.png) | ![The document browser](docs/screenshots/m7-documents.png) |
+| Every installed app's grants, revocable, and the audit log. | Documents: Notes, with one opened. |
 
 ### Spikes
 

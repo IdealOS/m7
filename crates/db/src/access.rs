@@ -28,6 +28,11 @@ impl Scope {
         Scope { app: app.into(), grants }
     }
 
+    /// Whether the app holds capability `name`.
+    pub fn has(&self, name: &str) -> bool {
+        self.grants.has(name)
+    }
+
     /// The documents of `doc_type` the app may read: its own, and those a read
     /// or write grant covers.
     pub fn read(&self, doc_type: &str) -> Map<String, Value> {
@@ -67,7 +72,10 @@ impl Scope {
         doc_type: &'a str,
         want: impl Fn(&DataRule) -> bool + 'a,
     ) -> impl Iterator<Item = &'a DataRule> + 'a {
-        self.grants.data.iter().filter(move |r| r.doc_type == doc_type && want(r))
+        self.grants
+            .data
+            .iter()
+            .filter(move |r| (r.doc_type == doc_type || r.doc_type == protocol::perm::ALL_TYPES) && want(r))
     }
 
     fn own_or(&self, doc_type: &str, want: impl Fn(&DataRule) -> bool) -> Map<String, Value> {
@@ -145,6 +153,9 @@ mod tests {
         assert_eq!(Value::Object(s.read("Note")), json!({}), "write covers reading, and {{}} is everything");
         assert_eq!(s.create("Note"), Some(Map::new()));
         assert_eq!(s.create("Image"), None);
+        let all = scope(vec![rule("*", &[Access::Read], json!({}))]);
+        assert_eq!(Value::Object(all.read("Anything")), json!({}), "* covers every type");
+        assert_eq!(Value::Object(all.write("Anything")), json!({"$createdBy": "org.x.app"}));
         let q =
             s.query(&Query { filter: json!({"x": 1}).as_object().unwrap().clone(), ..Query::all("Image") });
         assert_eq!(

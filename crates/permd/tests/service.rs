@@ -99,11 +99,18 @@ async fn managers_grant_and_revoke_and_every_change_is_published() {
         code_of(call(&tool, "grant", json!({"app": "nodots", "rules": [{"capability": "network"}]})).await),
         code::BAD_REQUEST
     );
+    // Every type, as the document browser asks for.
+    let all =
+        call(&tool, "grant", json!({"app": "org.x.browser", "rules": [{"type": "*", "access": ["read"]}]}))
+            .await
+            .unwrap();
+    assert_eq!(all["grants"][0]["type"], "*");
+    call(&tool, "revoke", json!({"app": "org.x.browser"})).await.unwrap();
 
     let audit = call(&tool, "audit", Value::Null).await.unwrap();
     let actions: Vec<&str> =
         audit["entries"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["revoke", "grant", "grant"]);
+    assert_eq!(actions, ["revoke", "grant", "revoke", "grant", "grant"]);
 }
 
 #[tokio::test]

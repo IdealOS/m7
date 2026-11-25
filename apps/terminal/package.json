@@ -1,0 +1,19 @@
+{
+  "name": "@idealos/app-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.terminal",
+    "name": "Terminal",
+    "autostart": false,
+    "permissions": [{ "capability": "service:pty" }]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

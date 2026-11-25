@@ -69,6 +69,19 @@ pub fn compile(q: &Query) -> Result<Compiled> {
     Ok(Compiled { sql, params: c.params })
 }
 
+/// SQL counting the documents matching `q`'s type and filter.
+pub fn compile_count(q: &Query) -> Result<Compiled> {
+    if !valid_type(&q.doc_type) {
+        return bad(format!("not a document type: {:?}", q.doc_type));
+    }
+    let mut c = Compiler { params: vec![Sql::Text(q.doc_type.clone())], terms: 0 };
+    let filter = c.filter(&q.filter, 0)?;
+    let sql = format!(
+        "SELECT count(*) FROM doc_json JOIN documents d ON d.doc = doc_json.doc WHERE doc_json.type = ?1 AND {filter}"
+    );
+    Ok(Compiled { sql, params: c.params })
+}
+
 /// SQL that returns a row if any of the documents `rows` (by row number) matches
 /// `q`'s type and filter, ignoring its order and limit. Live queries use it to
 /// skip re-running when no changed document matches.

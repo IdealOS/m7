@@ -1,0 +1,19 @@
+{
+  "name": "@idealos/app-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.browser",
+    "name": "Documents",
+    "autostart": false,
+    "permissions": [{ "type": "*", "access": ["read"] }]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

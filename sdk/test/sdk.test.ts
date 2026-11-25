@@ -19,6 +19,7 @@ import {
   menu,
   openWindow,
   permissions,
+  pty,
   root,
   setClipboard,
   signal,
@@ -287,4 +288,21 @@ test("permissions.request asks perm, waiting as long as a prompt may", async () 
   const grants = await permissions.granted();
   assert.equal(grants.length, 1);
   assert.deepEqual(host.requests[1], { to: "perm", method: "grants", params: {} });
+});
+
+test("pty.open streams a session: its id, titles, and how it exited", async () => {
+  const host = fresh();
+  const titles: string[] = [];
+  const opening = pty.open(100, 30, (t) => titles.push(t));
+  const s = host.streams[0];
+  assert.deepEqual([s.to, s.method, s.params], ["pty", "open", { cols: 100, rows: 30 }]);
+  s.part({ event: "opened", id: "4" });
+  const session = await opening;
+  assert.equal(session.id, "4");
+  s.part({ event: "title", title: "vi" });
+  assert.deepEqual(titles, ["vi"]);
+  s.part({ event: "exited", code: 3 });
+  assert.equal(await session.exited, 3);
+  session.close();
+  assert.equal(s.cancelled, true, "closing hangs up");
 });

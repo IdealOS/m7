@@ -8,6 +8,9 @@ start)
 	mount -t ext4 -o rw,noatime "$dev" /data
 	# SSH host keys (/etc/dropbear links here; dropbear makes them on first boot).
 	mkdir -p -m 0700 /data/etc/dropbear
+	# NetworkManager's saved networks (passwords included) and state.
+	mkdir -p -m 0700 /data/etc/NetworkManager/system-connections
+	mkdir -p /data/var/lib/NetworkManager
 	if [ -e /etc/idealos/dev-image ]; then
 		mkdir -p /data/dev-overlay/upper /data/dev-overlay/work
 		mount -t overlay overlay \

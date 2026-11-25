@@ -62,7 +62,7 @@ impl Out<'_> {
     #[allow(clippy::too_many_arguments)]
     fn text(
         &mut self,
-        slot: u8,
+        slot: u32,
         text: String,
         size: f32,
         fill: Rgba,
@@ -79,7 +79,34 @@ impl Out<'_> {
             color: fill,
             bold,
             center,
+            mono: false,
             rect,
+            clip,
+        });
+    }
+
+    /// Unwrapped monospace text at `rect`'s top left (a terminal's cells).
+    #[allow(clippy::too_many_arguments)]
+    fn mono_text(
+        &mut self,
+        slot: u32,
+        text: String,
+        size: f32,
+        fill: Rgba,
+        bold: bool,
+        rect: Rect,
+        clip: Rect,
+    ) {
+        self.layer.texts.push(TextItem {
+            node: self.id,
+            slot,
+            text,
+            size,
+            color: fill,
+            bold,
+            center: false,
+            mono: true,
+            rect: Rect { w: 0.0, ..rect },
             clip,
         });
     }
@@ -216,6 +243,8 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, layer: &mut Layer) 
             let inner_clip = clip.intersect(&inner);
             let value =
                 p.get("_value").or(p.get("value")).and_then(Value::as_str).unwrap_or_default().to_owned();
+            // A password: one bullet per character (the desktop measures the same).
+            let value = if flag(p, "secret") { "•".repeat(value.chars().count()) } else { value };
             let multiline = node.kind == NodeKind::TextArea;
             let (sx, sy) = (num(p, "_scroll_x", 0.0), num(p, "_scroll", 0.0));
             let line = (size * 1.3).ceil();
@@ -245,6 +274,65 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, layer: &mut Layer) 
                 let n = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
                 let caret = Rect { x: origin.0 + n(0), y: origin.1 + n(1), w: 1.5, h: n(2).max(line) };
                 o.quad_clipped(caret, rgba(theme::color::TEXT), Rgba::TRANSPARENT, 0.0, 0.0, inner_clip);
+            }
+        }
+        NodeKind::Terminal => {
+            use crate::terminal::{BG, CURSOR, FG, PAD, SIZE};
+            let size = num(p, "size", SIZE);
+            o.quad(rect, rgba(BG), if focused { accent } else { rgba(BG) }, 1.0, theme::radius::S);
+            let cell = p.get("_cell").and_then(Value::as_array);
+            let n = |i: usize, d: f32| {
+                cell.and_then(|c| c.get(i)).and_then(Value::as_f64).map_or(d, |v| v as f32)
+            };
+            let (cw, ch) = (n(0, 8.0), n(1, 18.0));
+            let inner = clip.intersect(&rect);
+            let at = |row: f32, col: f32, cols: f32| Rect {
+                x: rect.x + PAD + col * cw,
+                y: rect.y + PAD + row * ch,
+                w: cols * cw,
+                h: ch,
+            };
+            if let Some(Value::Array(c)) = p.get("_cursor") {
+                let (r, col) = (
+                    c.first().and_then(Value::as_f64).unwrap_or(0.0),
+                    c.get(1).and_then(Value::as_f64).unwrap_or(0.0),
+                );
+                let block = at(r as f32, col as f32, 1.0);
+                if focused {
+                    o.quad_clipped(block, rgba(CURSOR), Rgba::TRANSPARENT, 0.0, 0.0, inner);
+                } else {
+                    o.quad_clipped(block, Rgba::TRANSPARENT, rgba(CURSOR), 1.0, 0.0, inner);
+                }
+            }
+            if let Some(Value::Array(rows)) = p.get("_lines") {
+                for (r, runs) in rows.iter().enumerate() {
+                    let mut col = 0.0;
+                    for (i, run) in runs.as_array().into_iter().flatten().enumerate() {
+                        let text = run.get("text").and_then(Value::as_str).unwrap_or_default().to_owned();
+                        let cols = text.chars().count() as f32;
+                        let rect = at(r as f32, col, cols);
+                        if let Some(bg) = run.get("bg").and_then(Value::as_str).and_then(Rgba::parse) {
+                            o.quad_clipped(rect, bg, Rgba::TRANSPARENT, 0.0, 0.0, inner);
+                        }
+                        let fg =
+                            run.get("fg").and_then(Value::as_str).and_then(Rgba::parse).unwrap_or(rgba(FG));
+                        if run.get("underline").and_then(Value::as_bool) == Some(true) {
+                            o.quad_clipped(
+                                Rect { y: rect.y + ch - 2.0, h: 1.0, ..rect },
+                                fg,
+                                Rgba::TRANSPARENT,
+                                0.0,
+                                0.0,
+                                inner,
+                            );
+                        }
+                        if !text.trim().is_empty() {
+                            let bold = run.get("bold").and_then(Value::as_bool) == Some(true);
+                            o.mono_text((r as u32) << 12 | i as u32, text, size, fg, bold, rect, inner);
+                        }
+                        col += cols;
+                    }
+                }
             }
         }
         NodeKind::Image => {
@@ -307,7 +395,12 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, layer: &mut Layer) 
     }
     // A focus ring around whatever has keyboard focus (text fields show theirs in
     // their border).
-    if focused && !matches!(node.kind, NodeKind::TextField | NodeKind::TextArea | NodeKind::Slider) {
+    if focused
+        && !matches!(
+            node.kind,
+            NodeKind::TextField | NodeKind::TextArea | NodeKind::Slider | NodeKind::Terminal
+        )
+    {
         let ring = Rect { x: rect.x - 3.0, y: rect.y - 3.0, w: rect.w + 6.0, h: rect.h + 6.0 };
         o.quad(ring, Rgba::TRANSPARENT, rgba(theme::color::FOCUS), 2.0, theme::radius::M + 3.0);
     }

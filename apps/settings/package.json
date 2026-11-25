@@ -1,0 +1,25 @@
+{
+  "name": "@idealos/app-settings",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.settings",
+    "name": "Settings",
+    "autostart": false,
+    "permissions": [
+      { "capability": "service:net" },
+      { "capability": "service:session" },
+      { "capability": "permissions" },
+      { "capability": "storage" },
+      { "type": "App", "access": ["read"] }
+    ]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

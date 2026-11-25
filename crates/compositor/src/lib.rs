@@ -26,6 +26,7 @@ pub mod render;
 pub mod scene;
 pub mod shell;
 pub mod stats;
+pub mod terminal;
 pub mod textedit;
 pub mod theme;
 pub mod wm;

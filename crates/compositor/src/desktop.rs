@@ -29,6 +29,7 @@ use crate::layout::{DIVIDER, Layout};
 use crate::prompt;
 use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
+use crate::terminal;
 use crate::textedit::{Edit, Move, Splice};
 use crate::theme;
 use crate::wm::{self, WindowManager};
@@ -60,6 +61,15 @@ pub enum Call {
     },
     /// permd published a new grant table.
     Grants(GrantsResult),
+    /// A screen frame for terminal node `node`, asked for with [`Out::Attach`].
+    Screen {
+        node: NodeId,
+        frame: Value,
+    },
+    /// Terminal node `node`'s session ended (or couldn't be attached).
+    ScreenEnd {
+        node: NodeId,
+    },
 }
 
 /// What to send over the bus.
@@ -76,6 +86,11 @@ pub enum Out {
     /// Read blob `hash` (an image) from `db`, as app `app` if given; it comes
     /// back as [`Call::Blob`].
     FetchBlob { hash: String, app: Option<String> },
+    /// Attach terminal node `node` to its pty session (`params` for `attach`);
+    /// frames come back as [`Call::Screen`].
+    Attach { node: NodeId, params: Value },
+    /// Stop the attachment for terminal node `node`.
+    Detach { node: NodeId },
 }
 
 /// Most bytes of decoded images kept that no image node shows. Shown ones are
@@ -181,6 +196,8 @@ pub struct Desktop {
     prompts: std::collections::VecDeque<(u64, PromptParams)>,
     shown_prompt: Option<prompt::Shown>,
     allow_focused: bool,
+    /// Terminal nodes' screens and sessions.
+    terms: HashMap<NodeId, terminal::View>,
 }
 
 impl Desktop {
@@ -221,6 +238,7 @@ impl Desktop {
             prompts: Default::default(),
             shown_prompt: None,
             allow_focused: false,
+            terms: HashMap::new(),
         }
     }
 
@@ -281,6 +299,7 @@ impl Desktop {
             return;
         }
         self.layout.run(&mut self.scene);
+        self.size_terminals();
         let ids: Vec<(NodeId, NodeKind)> = self
             .scene
             .ids()
@@ -421,6 +440,7 @@ impl Desktop {
                     self.set_focus(Some(node));
                     self.open_actions(node, rect);
                 }
+                NodeKind::Terminal => self.set_focus(Some(node)),
                 NodeKind::TextField | NodeKind::TextArea => {
                     self.set_focus(Some(node));
                     let at = self.index_at(node, rect, x, y);
@@ -607,7 +627,8 @@ impl Desktop {
                 | NodeKind::Select
                 | NodeKind::Menu
                 | NodeKind::TextField
-                | NodeKind::TextArea => return Some((id, kind, rect)),
+                | NodeKind::TextArea
+                | NodeKind::Terminal => return Some((id, kind, rect)),
                 NodeKind::Split => {
                     let p = &self.scene.node(id).expect("exists").props;
                     let at = num(p, "_divider", -1.0);
@@ -624,6 +645,20 @@ impl Desktop {
             }
         }
         None
+    }
+
+    /// If app window `window` shows a dialog and the focus isn't in it, focus the
+    /// dialog's first focusable widget: a dialog takes the window's input.
+    fn focus_dialog(&mut self, window: u64) {
+        let Some(frame) = self.apps.frame_of(window) else { return };
+        let Some(d) = self.dialog_in(frame) else { return };
+        let inside = |s: &Self, n: NodeId| s.scene.paint_order(d).iter().any(|(id, ..)| *id == n);
+        if self.focus.is_some_and(|f| inside(self, f)) {
+            return;
+        }
+        if let Some(&first) = self.focusable(d).first() {
+            self.set_focus(Some(first));
+        }
     }
 
     /// The open dialog in window `window`, if any.
@@ -709,6 +744,7 @@ impl Desktop {
                                 | NodeKind::Menu
                                 | NodeKind::TextField
                                 | NodeKind::TextArea
+                                | NodeKind::Terminal
                         )
                     )
             })
@@ -786,10 +822,11 @@ impl Desktop {
         let size = num(&self.scene.node(node).expect("exists").props, "size", theme::size::BODY);
         let inner_w = (rect.w - 2.0 * FIELD_PAD).max(1.0);
         let width = multiline.then_some(inner_w);
-        let (cx, cy, ch) = self.layout.caret_at(e.text(), size, width, e.caret());
+        let shown = self.shown_text(node, e.text());
+        let (cx, cy, ch) = self.layout.caret_at(&shown, size, width, e.caret());
         let sel: Vec<Value> = e
             .selection()
-            .map(|(a, b)| self.layout.selection_rects(e.text(), size, width, a, b))
+            .map(|(a, b)| self.layout.selection_rects(&shown, size, width, a, b))
             .unwrap_or_default()
             .into_iter()
             .map(|r| json!([r.x, r.y, r.w, r.h]))
@@ -820,9 +857,19 @@ impl Desktop {
         self.set(node, changes);
     }
 
+    /// A text widget's text as it's drawn and measured: one bullet per character
+    /// in a `secret` field, so carets and clicks line up with what's shown.
+    fn shown_text(&self, node: NodeId, text: &str) -> String {
+        if self.prop(node, "secret").and_then(Value::as_bool) == Some(true) {
+            "•".repeat(text.chars().count())
+        } else {
+            text.to_owned()
+        }
+    }
+
     /// The character under (`x`, `y`) in text widget `node`, which is at `rect`.
     fn index_at(&mut self, node: NodeId, rect: Rect, x: f32, y: f32) -> usize {
-        let text = self.text_value(node);
+        let text = self.shown_text(node, &self.text_value(node));
         let p = &self.scene.node(node).expect("exists").props;
         let size = num(p, "size", theme::size::BODY);
         let multiline = self.kind(node) == Some(NodeKind::TextArea);
@@ -847,6 +894,8 @@ impl Desktop {
                     e.select_all();
                     None
                 }),
+                // A secret field's text never goes on the clipboard.
+                'c' | 'x' if self.prop(node, "secret").and_then(Value::as_bool) == Some(true) => {}
                 'c' => {
                     let text = self.edits.get(&node).map(Edit::selected_text).unwrap_or_default();
                     if !text.is_empty() {
@@ -960,6 +1009,11 @@ impl Desktop {
         }
         if self.menu.is_some() {
             self.menu_key(key);
+            return Effect::default();
+        }
+        // A focused terminal gets every other key, Tab and Escape included.
+        if let Some(node) = self.focus.filter(|&n| self.kind(n) == Some(NodeKind::Terminal)) {
+            self.terminal_key(node, key, mods);
             return Effect::default();
         }
         if key == Key::Escape {
@@ -1296,6 +1350,12 @@ impl Desktop {
                 }
             }
             Call::Grants(table) => self.take_grants(table),
+            Call::Screen { node, frame } => self.screen_frame(node, frame),
+            Call::ScreenEnd { node } => {
+                if self.terms.remove(&node).is_some() && self.scene.node(node).is_some() {
+                    self.set(node, json!({"_cursor": Value::Null}));
+                }
+            }
             Call::Cancel { id } => {
                 if self.apps.close_request(&mut self.scene, id) {
                     log::info!("apps: closed a window (request {id} ended)");
@@ -1313,6 +1373,12 @@ impl Desktop {
 
     /// Drop state for nodes that no longer exist.
     fn forget_gone(&mut self) {
+        let gone: Vec<NodeId> =
+            self.terms.keys().copied().filter(|n| self.scene.node(*n).is_none()).collect();
+        for node in gone {
+            self.terms.remove(&node);
+            self.outbox.push(Out::Detach { node });
+        }
         let scene = &self.scene;
         self.edits.retain(|n, _| scene.node(*n).is_some());
         if self.focus.is_some_and(|f| scene.node(f).is_none()) {
@@ -1347,12 +1413,16 @@ impl Desktop {
                 Err(e) => self.outbox.push(fail(e)),
             },
             method::COMMIT => {
+                let window = params.get("window").and_then(Value::as_u64);
                 let result =
                     parse::<Commit>(params).and_then(|c| self.apps.commit(&mut self.scene, &from, c));
                 match result {
                     Ok(created) => {
                         self.forget_gone();
                         self.load_bound(&created);
+                        if let Some(w) = window {
+                            self.focus_dialog(w);
+                        }
                         self.catch_up_focus();
                         self.outbox.push(Out::Respond { id, result: Ok(Value::Null) });
                     }
@@ -1369,6 +1439,17 @@ impl Desktop {
                 }
                 let value = serde_json::to_value(&self.clipboard).expect("serializes");
                 self.outbox.push(Out::Respond { id, result: Ok(value) });
+            }
+            method::SCREEN => {
+                let (w, h) = self.seat.bounds();
+                let info = protocol::scene::ScreenInfo {
+                    width: w as u32,
+                    height: h as u32,
+                    workspaces: WORKSPACES,
+                    workspace: self.workspace,
+                };
+                self.outbox
+                    .push(Out::Respond { id, result: Ok(serde_json::to_value(info).expect("serializes")) });
             }
             method::PROMPT => {
                 if from != Sender::Service(protocol::perm::SERVICE.into()) {
@@ -1444,6 +1525,10 @@ impl Desktop {
                 }
                 continue;
             }
+            if self.kind(node) == Some(NodeKind::Terminal) {
+                self.attach_terminal(node);
+                continue;
+            }
             if !matches!(self.kind(node), Some(NodeKind::TextField | NodeKind::TextArea)) {
                 continue;
             }
@@ -1454,6 +1539,72 @@ impl Desktop {
             self.act_for(node, &mut params);
             self.request(Some(Pending::Bind(node)), "db", "get", params);
         }
+    }
+
+    // --- Terminals ---------------------------------------------------------------
+
+    /// Attach new terminal node `node` to the pty session it names, as its app.
+    fn attach_terminal(&mut self, node: NodeId) {
+        let Some(session) = self.prop(node, "pty").and_then(Value::as_str).map(str::to_owned) else { return };
+        let size = self.prop(node, "size").and_then(Value::as_f64).map_or(terminal::SIZE, |s| s as f32);
+        let cell = self.layout.cell(size);
+        self.set(node, json!({"_cell": [cell.0, cell.1]}));
+        let view = terminal::View::new(session, self.apps.app_of(node).map(str::to_owned));
+        let params = view.params(json!({}));
+        self.terms.insert(node, view);
+        self.outbox.push(Out::Attach { node, params });
+    }
+
+    fn screen_frame(&mut self, node: NodeId, frame: Value) {
+        let Ok(frame) = serde_json::from_value::<protocol::pty::ScreenFrame>(frame) else { return };
+        let Some(view) = self.terms.get_mut(&node) else { return };
+        view.apply(frame);
+        let props = view.props();
+        if self.scene.node(node).is_some() {
+            self.set(node, props);
+        }
+    }
+
+    /// Tell each terminal's session how many cells now fit, if that changed.
+    fn size_terminals(&mut self) {
+        let nodes: Vec<NodeId> = self.terms.keys().copied().collect();
+        let rects = self.scene.screen_rects();
+        for node in nodes {
+            let Some(&(rect, _)) = rects.get(&node) else { continue };
+            let cell = self.prop(node, "_cell").and_then(Value::as_array).map(|c| {
+                let n = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(8.0) as f32;
+                (n(0), n(1))
+            });
+            let fits = terminal::fit(rect.w, rect.h, cell.unwrap_or((8.0, 18.0)));
+            let view = self.terms.get_mut(&node).expect("listed");
+            if view.asked != Some(fits) {
+                view.asked = Some(fits);
+                let params = view.params(json!({"cols": fits.0, "rows": fits.1}));
+                self.request(None, "pty", "resize", params);
+            }
+        }
+    }
+
+    /// Key `key` typed into terminal node `node`: bytes for its shell, or a paste
+    /// (Command+V, or Ctrl+Shift+V, since Ctrl+V is the shell's).
+    fn terminal_key(&mut self, node: NodeId, key: Key, mods: Mods) {
+        let Some(view) = self.terms.get(&node) else { return };
+        let paste = key == Key::Char('v') || key == Key::Char('V');
+        let data = if paste && (mods.logo || (mods.ctrl && mods.shift)) {
+            view.paste(&self.clipboard.text)
+        } else if mods.logo {
+            return; // Command shortcuts aren't the shell's
+        } else {
+            match terminal::key_bytes(key, mods, view.app_cursor) {
+                Some(d) => d,
+                None => return,
+            }
+        };
+        if data.is_empty() {
+            return;
+        }
+        let params = view.params(json!({"data": data}));
+        self.request(None, "pty", "write", params);
     }
 
     /// If an app owns `node`, ask `db` to treat the request as that app's: the
@@ -2330,6 +2481,83 @@ mod tests {
     }
 
     #[test]
+    fn secret_fields_show_bullets_and_keep_off_the_clipboard() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"padding": 10}},
+                {"op": "create", "id": 3, "type": "text_field", "props": {"secret": true}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0}
+            ]),
+        );
+        let field = global(&d, w, 3);
+        let at = center(&mut d, field);
+        click(&mut d, at);
+        let out = typed(&mut d, "hunter2");
+        assert!(
+            out.iter().any(|o| matches!(o, Out::Part { data, .. } if data["value"] == "hunter2")),
+            "the app hears the text"
+        );
+        let list = d.draw_list();
+        let shown: Vec<_> = list
+            .layers
+            .iter()
+            .flat_map(|l| &l.texts)
+            .filter(|t| t.node == field)
+            .map(|t| t.text.clone())
+            .collect();
+        assert_eq!(shown, ["•••••••"]);
+        d.clipboard.text = "before".into();
+        let cmd = Mods { logo: true, ..Mods::default() };
+        d.input(Input::Key { key: Key::Char('a'), mods: cmd });
+        d.input(Input::Key { key: Key::Char('c'), mods: cmd });
+        d.input(Input::Key { key: Key::Char('x'), mods: cmd });
+        assert_eq!(d.clipboard.text, "before");
+        assert_eq!(prop(&d, field, "_value"), "hunter2", "cut did nothing");
+    }
+
+    #[test]
+    fn a_dialog_takes_the_focus_when_it_opens() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"padding": 10}},
+                {"op": "create", "id": 3, "type": "button", "props": {"label": "Join"}},
+                {"op": "create", "id": 4, "type": "dialog", "props": {"hidden": true}},
+                {"op": "create", "id": 5, "type": "text_field", "props": {"secret": true}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0},
+                {"op": "insert", "parent": 2, "child": 4, "index": 1},
+                {"op": "insert", "parent": 4, "child": 5, "index": 0}
+            ]),
+        );
+        assert_eq!(d.focus, None);
+        let show = json!({"window": w, "ops": [{"op": "set", "id": 4, "props": {"hidden": false}}]});
+        d.call(request(9, "commit", show, false));
+        assert_eq!(d.focus, Some(global(&d, w, 5)), "typing goes to the password field");
+        let out = typed(&mut d, "pw");
+        assert!(out.iter().any(|o| matches!(o, Out::Part { data, .. } if data["value"] == "pw")));
+    }
+
+    #[test]
+    fn apps_can_ask_about_the_screen() {
+        let mut d = desk();
+        let out = d.call(request(1, "screen", Value::Null, false));
+        assert_eq!(
+            out,
+            [Out::Respond {
+                id: 1,
+                result: Ok(json!({"width": 1280, "height": 800, "workspaces": 4, "workspace": 1}))
+            }]
+        );
+    }
+
+    #[test]
     fn reading_the_clipboard_takes_a_grant() {
         let mut d = desk();
         d.call(request(1, "set_clipboard", json!({"text": "secret"}), false));
@@ -2441,5 +2669,113 @@ mod tests {
             }))
             .contains("sender")
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::demo;
+    use crate::input::{Input, Key, Mods};
+    use serde_json::json;
+
+    fn desk() -> Desktop {
+        let mut d = Desktop::with_fonts(1280.0, 800.0, crate::fonts::ui_only());
+        d.scene.apply_all(demo::build(1280.0, 800.0, 0));
+        d.set_screen(1280.0, 800.0);
+        d
+    }
+
+    fn app() -> Option<Sender> {
+        Some(Sender::App { app: "org.example.terminal".into(), conn: 3 })
+    }
+
+    fn call(d: &mut Desktop, id: u64, method: &str, params: Value, stream: bool) -> Vec<Out> {
+        d.call(Call::Request { id, from: app(), method: method.into(), params, stream })
+    }
+
+    fn writes(out: &[Out]) -> Vec<Value> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Request { to, method, params, .. } if to == "pty" && method == "write" => {
+                    Some(params.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_terminal_attaches_as_its_app_draws_frames_and_types() {
+        let mut d = desk();
+        let out =
+            call(&mut d, 1, "open_window", json!({"title": "Terminal", "width": 500, "height": 320}), true);
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let window = data["window"].as_u64().unwrap();
+        let ops = json!([
+            {"op": "create", "id": 3, "type": "vstack", "props": {"grow": 1}},
+            {"op": "create", "id": 2, "type": "terminal", "props": {"pty": "7", "grow": 1}},
+            {"op": "insert", "parent": 1, "child": 3, "index": 0},
+            {"op": "insert", "parent": 3, "child": 2, "index": 0}
+        ]);
+        let out = call(&mut d, 2, "commit", json!({"window": window, "ops": ops}), false);
+        let node = out
+            .iter()
+            .find_map(|o| match o {
+                Out::Attach { node, params } => {
+                    assert_eq!(params, &json!({"id": "7", "as": "org.example.terminal"}));
+                    Some(*node)
+                }
+                _ => None,
+            })
+            .expect("attaches");
+        // Laying out tells ptyd the size that fits, as the app.
+        let out = d.call(Call::Cancel { id: 999 });
+        let resize = out.iter().find_map(|o| match o {
+            Out::Request { method, params, .. } if method == "resize" => Some(params.clone()),
+            _ => None,
+        });
+        let resize = resize.expect("a resize");
+        assert_eq!(resize["as"], "org.example.terminal");
+        assert!(resize["cols"].as_u64().unwrap() > 20 && resize["rows"].as_u64().unwrap() > 5, "{resize}");
+
+        // A frame becomes the node's lines; the cursor shows.
+        let frame = json!({"cols": 40, "rows": 3, "lines": [[0, [{"text": "$ ls"}]], [1, [{"text": "a", "fg": "#cd3131"}]]], "cursor": [0, 4]});
+        d.call(Call::Screen { node, frame });
+        let p = &d.scene.node(node).unwrap().props;
+        assert_eq!(p["_lines"][0][0]["text"], "$ ls");
+        assert_eq!(p["_cursor"], json!([0, 4]));
+        let list = d.draw_list();
+        let texts: Vec<_> = list.layers.iter().flat_map(|l| &l.texts).filter(|t| t.node == node).collect();
+        assert!(texts.iter().all(|t| t.mono), "drawn in the monospace family");
+        assert!(texts.iter().any(|t| t.text == "$ ls") && texts.iter().any(|t| t.text == "a"));
+
+        // Clicking focuses it; keys go to the shell (Tab and Escape too), as bytes.
+        let (r, _) = d.scene.screen_rects()[&node];
+        d.input(Input::MotionTo { x: r.x + 20.0, y: r.y + 20.0 });
+        d.input(Input::Button { pressed: true });
+        d.input(Input::Button { pressed: false });
+        let key = |d: &mut Desktop, key, mods| d.input(Input::Key { key, mods }).1;
+        let mut sent = Vec::new();
+        for (k, m) in [
+            (Key::Char('l'), Mods::default()),
+            (Key::Tab, Mods::default()),
+            (Key::Char('c'), Mods { ctrl: true, ..Mods::default() }),
+            (Key::Escape, Mods::default()),
+        ] {
+            sent.extend(writes(&key(&mut d, k, m)));
+        }
+        let data: Vec<&str> = sent.iter().map(|w| w["data"].as_str().unwrap()).collect();
+        assert_eq!(data, ["l", "\t", "\x03", "\x1b"]);
+        assert!(sent.iter().all(|w| w["as"] == "org.example.terminal" && w["id"] == "7"));
+        // Pasting sends the clipboard.
+        d.clipboard.text = "echo hi\n".into();
+        let out = key(&mut d, Key::Char('V'), Mods { ctrl: true, shift: true, ..Mods::default() });
+        assert_eq!(writes(&out)[0]["data"], "echo hi\r");
+
+        // When the node goes, so does the attachment.
+        let ops = json!([{"op": "destroy", "id": 2}]);
+        let out = call(&mut d, 3, "commit", json!({"window": window, "ops": ops}), false);
+        assert!(out.contains(&Out::Detach { node }), "{out:?}");
     }
 }

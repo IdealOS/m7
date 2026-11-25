@@ -1,0 +1,23 @@
+[package]
+name = "ptyd"
+description = "The pty service: shells on pseudo-terminals, and their screens."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+bus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio = { workspace = true, features = ["process"] }
+libc = "0.2"
+# The escape-sequence parser (just the parser: the grid is ours, in term.rs).
+vte = "0.15"
+
+[dev-dependencies]
+busd = { path = "../busd" }

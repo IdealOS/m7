@@ -69,8 +69,14 @@ export const MAX_WATCHES = 4096;
 /** Most nodes one window may hold. */
 export const MAX_WINDOW_NODES = 20000;
 
+/** The name netd claims. */
+export const NET_SERVICE = "net";
+
 /** The name permd claims. */
 export const PERM_SERVICE = "perm";
+
+/** The name ptyd claims. */
+export const PTY_SERVICE = "pty";
 
 /** The name secretsd claims. */
 export const SECRETS_SERVICE = "secrets";
@@ -232,6 +238,24 @@ export type Clipboard = { text: string; doc?: string | null };
 /** Params of a `compositor.commit` request. */
 export type Commit = { window: number; ops: SceneOp[] };
 
+/**
+ * Params of `connect`: join `ssid`, with `password` if it's secure and not
+ * known yet.
+ */
+export type ConnectParams = { ssid: string; password?: string | null };
+
+/** One active connection. */
+export type Connection = {
+  /** Its name: the Wi-Fi network's, or the wired profile's. */
+  name: string;
+  /** `wifi` or `ethernet` (or another NetworkManager type). */
+  kind: string;
+  /** The network interface, such as `wlan0`. */
+  device: string;
+  /** Its IPv4 address, with prefix length, if it has one yet. */
+  ip4?: string | null;
+};
+
 /** Params of `create`. */
 export type CreateParams = { type: string; data?: Record<string, unknown> };
 
@@ -340,6 +364,24 @@ export type HistoryResult = { versions: VersionInfo[] };
 /** Params of `get` and `delete`. */
 export type IdParams = { id: string };
 
+/** Params of `attach`. */
+export type IdParams2 = { id: string };
+
+/** Result of `info`: about this device and system. */
+export type InfoResult = {
+  /** idealos's version. */
+  version: string;
+  hostname: string;
+  /** The kernel's name and release, such as `Linux 6.12.58`. */
+  kernel: string;
+  /** The CPU architecture, such as `aarch64`. */
+  machine: string;
+  /** Seconds since the system started. */
+  uptime_secs: number;
+  /** Services session is running, by name. */
+  services: string[];
+};
+
 /** A link out of a document. */
 export type LinkInfo = {
   /** The field holding the link, such as `from.contact` or `tracks.3`. */
@@ -420,12 +462,43 @@ export type NameParams = {
 /** Params of `get` and `delete`. */
 export type NameParams2 = { name: string };
 
+/** How connected the device is. */
+export type NetState =
+  | "disconnected"
+  /** Online. */
+  | "connected"
+  /** Joining a network. */
+  | "connecting"
+  /** Connected to a network with no route to the internet. */
+  | "limited"
+  /** No network manager to ask. */
+  | "unavailable";
+
+/** Result of `status`, and each part of `watch`. */
+export type NetStatus = {
+  state: NetState;
+  connections: Connection[];
+  /** Whether Wi-Fi is switched on. */
+  wifi_enabled: boolean;
+  /** Whether there's a Wi-Fi device at all. */
+  wifi_present: boolean;
+};
+
+/** Params of `networks`. */
+export type NetworksParams = {
+  /** Scan first (takes a few seconds), rather than list what was last seen. */
+  rescan?: boolean;
+};
+
+/** Result of `networks`: strongest first, one entry per name. */
+export type NetworksResult = { networks: WifiNetwork[] };
+
 /**
  * Node types understood by the compositor: primitives (`group`, `rect`, `text`,
  * `image`), containers that lay out their children (`vstack`, `hstack`,
  * `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
  * draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
- * `select`, `menu`, `text_field`, `text_area`, `vlist`).
+ * `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).
  */
 export type NodeKind =
   | "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "toolbar" | "grid" | "split" | "scroll" | "dialog" | "label" | "button" | "checkbox" | "toggle" | "slider" | "select" | "text_field" | "text_area"
@@ -438,7 +511,17 @@ export type NodeKind =
    * A virtual list: `count` rows of `row_height`, of which the app creates only
    * the visible ones (it hears which, as `range` events), each with an `index`.
    */
-  | "vlist";
+  | "vlist"
+  /**
+   * A terminal showing pty session `pty` (see `pty`), which the app
+   * opened. The compositor attaches to the session as the app, draws its
+   * screen, and sends it what's typed and the size that fits; the app sees
+   * none of it.
+   */
+  | "terminal";
+
+/** Params of `open`: the screen's starting size. */
+export type OpenParams = { cols: number; rows: number };
 
 /** Params of `open_window`. */
 export type OpenWindowParams = {
@@ -492,6 +575,9 @@ export type RequestResult = {
   granted: boolean;
 };
 
+/** Params of `resize`. */
+export type ResizeParams = { id: string; cols: number; rows: number };
+
 /** Params of `restore`: replace the database with snapshot `name`. */
 export type RestoreParams = { name: string };
 
@@ -513,6 +599,17 @@ export type RevokeResult = {
 /** What a grant gives. */
 export type Rule = DataRule | CapabilityRule;
 
+/** A run of cells on one row that look alike. */
+export type Run = {
+  /** One character per cell. */
+  text: string;
+  bg?: string | null;
+  bold?: boolean;
+  /** `#rrggbb`; absent for the default. */
+  fg?: string | null;
+  underline?: boolean;
+};
+
 /** One change to a window's scene graph. */
 export type SceneOp =
   | { op: "create"; id: number; type: NodeKind; props?: Record<string, unknown> }
@@ -525,6 +622,32 @@ export type SceneOp =
 
 /** Result of `schemas`: each system type's JSON Schema. */
 export type SchemasResult = { schemas: Record<string, unknown> };
+
+/** One part of `attach`'s streamed answer: the screen, or what changed on it. */
+export type ScreenFrame = {
+  cols: number;
+  rows: number;
+  /**
+   * Changed rows: each row's index and its runs, left to right. A row's runs
+   * cover it from the first column; the rest of the row is blank.
+   */
+  lines: Array<[number, Run[]]>;
+  /** The arrow keys should send application-mode sequences (`ESC O A`). */
+  app_cursor?: boolean;
+  /** Pasted text should be wrapped in `ESC [200~` ... `ESC [201~`. */
+  bracketed_paste?: boolean;
+  /** Where the cursor is (row, column), or absent while it's hidden. */
+  cursor?: [number, number] | null;
+};
+
+/** Result of `screen`: the display, in logical pixels. */
+export type ScreenInfo = {
+  width: number;
+  height: number;
+  workspaces: number;
+  /** The workspace showing now, from 1. */
+  workspace: number;
+};
 
 /** Params of `search`: documents containing every word of `text`, best first. */
 export type SearchParams = {
@@ -546,6 +669,18 @@ export type Sender =
    * claims a name), identified by its bus connection number.
    */
   | { conn: number };
+
+/** A part of `open`'s streamed answer. */
+export type SessionEvent =
+  /** The first part: the session's id, for `attach` and the `terminal` node. */
+  | { event: "opened"; id: string }
+  /** The shell set the window title. */
+  | { event: "title"; title: string }
+  /**
+   * The shell exited, with this status (or the signal that ended it, negated).
+   * The stream ends after this.
+   */
+  | { event: "exited"; code: number };
 
 /** A snapshot of the database. */
 export type SnapshotInfo = {
@@ -570,6 +705,25 @@ export type SnapshotsResult = { snapshots: SnapshotInfo[] };
  */
 export type SpliceParams = { id: string; path: string; at: number; delete?: number; insert?: string };
 
+/** Params of `forget`. */
+export type SsidParams = { ssid: string };
+
+/**
+ * Result of `stats`: how much the database holds. Needs the `storage`
+ * capability (or a system caller).
+ */
+export type StatsResult = {
+  /** The database file, with its write-ahead log. */
+  db_bytes: number;
+  docs: number;
+  types: number;
+  change_sets: number;
+  blobs: number;
+  blob_bytes: number;
+  /** The snapshots directory. */
+  snapshot_bytes: number;
+};
+
 /** The one trust level `adopt` names explicitly. */
 export type SystemTrust = "system";
 
@@ -587,6 +741,12 @@ export type TapEvent = {
    */
   bus_id?: number | null;
 };
+
+/**
+ * Result of `types`: every document type with live documents the caller may
+ * read, and how many, by name.
+ */
+export type TypesResult = { types: Record<string, number> };
 
 /**
  * Params of `undo`: revert change set `change_set` with a new change set. Undoing
@@ -646,6 +806,22 @@ export type WatchEvent =
     order?: string[] | null;
   };
 
+/** A Wi-Fi network in range. */
+export type WifiNetwork = {
+  ssid: string;
+  /** Signal strength, 0 to 100. */
+  strength: number;
+  /** Needs a password. */
+  secure: boolean;
+  /** The device is on it now. */
+  active: boolean;
+  /** Joined before: its password is saved. */
+  known: boolean;
+};
+
+/** Params of `set_wifi`. */
+export type WifiParams = { enabled: boolean };
+
 /** A part of `open_window`'s streamed answer. */
 export type WindowEvent =
   /** The first part: the window's id, for commits, and its content size. */
@@ -666,3 +842,9 @@ export type WindowEvent =
    * request (or answers it).
    */
   | { kind: "close" };
+
+/**
+ * Params of `write`: bytes for the shell, as text (keys are text, or escape
+ * sequences, which are too).
+ */
+export type WriteParams = { id: string; data: string };

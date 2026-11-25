@@ -78,6 +78,9 @@ pub fn connect_with(
                 let sender = bus.clone();
                 let replies = calls_tx.clone();
                 let woken = wake.clone();
+                // Terminal attachments in flight, by node.
+                let mut attached: std::collections::HashMap<protocol::NodeId, tokio::task::JoinHandle<()>> =
+                    std::collections::HashMap::new();
                 // When the frame loop drops its `Bridge`, the outgoing queue closes; that
                 // ends this thread, which closes the connection and frees the name.
                 let (gone_tx, mut gone) = tokio::sync::oneshot::channel::<()>();
@@ -95,6 +98,44 @@ pub fn connect_with(
                                         woken();
                                     }
                                 });
+                                Ok(())
+                            }
+                            Out::Attach { node, params } => {
+                                let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
+                                let task = tokio::spawn(async move {
+                                    match bus
+                                        .request_stream(
+                                            protocol::pty::SERVICE,
+                                            protocol::pty::method::ATTACH,
+                                            params,
+                                        )
+                                        .await
+                                    {
+                                        Ok(mut frames) => {
+                                            while let Some(Ok(frame)) = frames.next().await {
+                                                if replies.send(Call::Screen { node, frame }).is_err() {
+                                                    return;
+                                                }
+                                                woken();
+                                            }
+                                        }
+                                        Err(e) => log::warn!("bus: couldn't attach a terminal: {e}"),
+                                    }
+                                    if replies.send(Call::ScreenEnd { node }).is_ok() {
+                                        woken();
+                                    }
+                                });
+                                if let Some(old) = attached.insert(node, task) {
+                                    old.abort();
+                                }
+                                attached.retain(|_, t| !t.is_finished());
+                                Ok(())
+                            }
+                            Out::Detach { node } => {
+                                // Dropping the stream (aborting its task) tells ptyd.
+                                if let Some(task) = attached.remove(&node) {
+                                    task.abort();
+                                }
                                 Ok(())
                             }
                             Out::Request { token, to, method, params } => {

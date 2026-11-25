@@ -231,3 +231,38 @@ async fn blobs_are_readable_through_a_readable_document() {
     s.grant(&[("org.example.viewer", Rule::data("Image", &[Access::Read]))]).await;
     assert!(get(app.clone()).await.is_ok());
 }
+
+#[tokio::test]
+async fn types_counts_only_what_an_app_may_read_and_stats_need_storage() {
+    let s = Setup::start("types").await;
+    let tool = s.bus.system().await;
+    for t in ["Note", "Note", "Photo"] {
+        create(&tool, t, json!({})).await.unwrap();
+    }
+    let all = tool.request(SERVICE, "types", Value::Null).await.unwrap();
+    assert_eq!(all["types"], json!({"Note": 2, "Photo": 1}));
+
+    let browser = s.bus.app("org.example.browser").await;
+    assert_eq!(browser.request(SERVICE, "types", Value::Null).await.unwrap()["types"], json!({}));
+    s.grant(&[("org.example.browser", Rule::data("*", &[Access::Read]))]).await;
+    assert_eq!(
+        browser.request(SERVICE, "types", Value::Null).await.unwrap()["types"],
+        json!({"Note": 2, "Photo": 1})
+    );
+    assert_eq!(query(&browser, json!({"type": "Photo"})).await.len(), 1, "* reads every type");
+    assert!(denied(create(&browser, "Note", json!({})).await.map(|_| Value::Null)), "but writes none");
+
+    assert!(denied(browser.request(SERVICE, "stats", Value::Null).await));
+    assert!(denied(browser.request(SERVICE, "snapshots", Value::Null).await));
+    s.grant(&[("org.example.browser", Rule::capability("storage"))]).await;
+    let stats = browser.request(SERVICE, "stats", Value::Null).await.unwrap();
+    assert_eq!((stats["docs"].as_u64(), stats["types"].as_u64()), (Some(3), Some(2)));
+    assert!(stats["db_bytes"].as_u64().unwrap() > 0);
+    browser.request(SERVICE, "snapshot", Value::Null).await.unwrap();
+    let snapshots = browser.request(SERVICE, "snapshots", Value::Null).await.unwrap();
+    assert!(
+        !snapshots["snapshots"].as_array().unwrap().is_empty(),
+        "the one it took (dbd takes one at startup too)"
+    );
+    assert!(denied(browser.request(SERVICE, "restore", json!({"name": "x"})).await), "never restore");
+}

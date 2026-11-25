@@ -358,6 +358,45 @@ impl Store {
         rows.map(|r| r?).collect()
     }
 
+    /// How many documents match `q` (its order, limit and offset aside).
+    pub fn count(&self, q: &Query) -> Result<u64> {
+        let compiled = query::compile_count(q)?;
+        let mut stmt = self.conn.prepare_cached(&compiled.sql)?;
+        Ok(stmt.query_row(rusqlite::params_from_iter(&compiled.params), |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    /// The database file's size, with its write-ahead log (0 in memory).
+    pub fn file_bytes(&self) -> Result<u64> {
+        let path: String =
+            self.conn
+                .query_row("SELECT file FROM pragma_database_list WHERE name = 'main'", [], |r| r.get(0))?;
+        if path.is_empty() {
+            return Ok(0);
+        }
+        let size = |p: String| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        Ok(size(path.clone()) + size(format!("{path}-wal")))
+    }
+
+    /// Every type with live documents, and how many.
+    pub fn types(&self) -> Result<std::collections::BTreeMap<String, u64>> {
+        let mut stmt = self.conn.prepare_cached("SELECT type, count(*) FROM doc_json GROUP BY type")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Counts for `stats`: (documents, types, change sets, blobs, blob bytes).
+    pub fn counts(&self) -> Result<(u64, u64, u64, u64, u64)> {
+        let one =
+            |sql: &str| -> Result<u64> { Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
+        Ok((
+            one("SELECT count(*) FROM doc_json")?,
+            one("SELECT count(DISTINCT type) FROM doc_json")?,
+            one("SELECT count(*) FROM change_sets")?,
+            one("SELECT count(*) FROM blobs")?,
+            one("SELECT IFNULL(sum(size), 0) FROM blobs")?,
+        ))
+    }
+
     /// The Loro document behind `id`, rebuilt from its snapshot and logged updates.
     /// For tests and the history API.
     pub fn loro(&self, id: &str) -> Result<LoroDoc> {

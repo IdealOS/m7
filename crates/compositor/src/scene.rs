@@ -57,6 +57,9 @@ const VISUAL: &[&str] = &[
     "_content",
     "_divider",
     "_range",
+    "_lines",
+    "_cursor",
+    "_cell",
 ];
 
 /// sRGB color with alpha, as written in props (`"#rrggbb"` or `"#rrggbbaa"`).
@@ -125,14 +128,17 @@ pub struct QuadItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextItem {
     pub node: NodeId,
-    /// Which of the node's texts this is (a checkbox draws its label and its check).
-    pub slot: u8,
+    /// Which of the node's texts this is (a checkbox draws its label and its check;
+    /// a terminal, one per run of cells).
+    pub slot: u32,
     pub text: String,
     pub size: f32,
     pub color: Rgba,
     pub bold: bool,
     /// Centered in `rect` horizontally (button labels), rather than left-aligned.
     pub center: bool,
+    /// In the monospace family (a terminal's cells), rather than the UI font.
+    pub mono: bool,
     pub rect: Rect,
     pub clip: Rect,
 }

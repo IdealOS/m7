@@ -62,11 +62,17 @@ pub mod capability {
     pub const CLIPBOARD: &str = "clipboard";
     /// Managing other apps' grants: Settings.
     pub const PERMISSIONS: &str = "permissions";
+    /// Seeing how much the database holds, and listing and taking snapshots:
+    /// Settings.
+    pub const STORAGE: &str = "storage";
     /// `service:NAME`: sending requests to the system service `NAME`. Apps may
     /// always use `db`, `compositor`, `perm` and `secrets`, which check requests
     /// themselves.
     pub const SERVICE_PREFIX: &str = "service:";
 }
+
+/// The `type` of a data rule covering documents of every type (a document browser).
+pub const ALL_TYPES: &str = "*";
 
 /// Services every app may send requests to; each checks what it's asked.
 pub const OPEN_SERVICES: &[&str] = &["db", "compositor", "perm", "secrets"];
@@ -127,13 +133,18 @@ impl Rule {
     /// checked by whoever compiles it.)
     pub fn problem(&self) -> Option<String> {
         match self {
-            Rule::Data(d) if !crate::db::valid_type(&d.doc_type) => {
+            Rule::Data(d) if d.doc_type != ALL_TYPES && !crate::db::valid_type(&d.doc_type) => {
                 Some(format!("not a document type: {:?}", d.doc_type))
             }
             Rule::Data(d) if d.access.is_empty() => Some("a data rule needs at least one access".into()),
             Rule::Data(_) => None,
             Rule::Capability(c) => {
-                let known = [capability::NETWORK, capability::CLIPBOARD, capability::PERMISSIONS];
+                let known = [
+                    capability::NETWORK,
+                    capability::CLIPBOARD,
+                    capability::PERMISSIONS,
+                    capability::STORAGE,
+                ];
                 let service = c
                     .capability
                     .strip_prefix(capability::SERVICE_PREFIX)
@@ -152,7 +163,11 @@ impl Rule {
                 capability::NETWORK => "use the network".into(),
                 capability::CLIPBOARD => "read what you copy".into(),
                 capability::PERMISSIONS => "change what other apps may do".into(),
+                capability::STORAGE => "see how much is stored, and make backups".into(),
                 other => match other.strip_prefix(capability::SERVICE_PREFIX) {
+                    // A shell is outside every sandbox: say what that means.
+                    Some("pty") => "run commands with full access to this device".into(),
+                    Some("net") => "change your network connections".into(),
                     Some(s) => format!("use the {s} service"),
                     None => format!("have {other:?}"),
                 },
@@ -178,7 +193,11 @@ impl Rule {
                 } else {
                     format!(" matching {}", serde_json::to_string(&d.filter).unwrap_or_default())
                 };
-                format!("{verbs} your {} documents{which}", d.doc_type)
+                if d.doc_type == ALL_TYPES {
+                    format!("{verbs} all your documents{which}")
+                } else {
+                    format!("{verbs} your {} documents{which}", d.doc_type)
+                }
             }
         }
     }
@@ -371,5 +390,11 @@ mod tests {
         );
         assert_eq!(Rule::data("Image", &[Access::Read]).describe(), "read your Image documents");
         assert_eq!(Rule::capability("network").describe(), "use the network");
+        assert_eq!(Rule::data("*", &[Access::Read]).problem(), None);
+        assert_eq!(Rule::data("*", &[Access::Read]).describe(), "read all your documents");
+        assert_eq!(
+            Rule::capability("service:pty").describe(),
+            "run commands with full access to this device"
+        );
     }
 }

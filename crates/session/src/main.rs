@@ -51,7 +51,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 
 use protocol::bus::{BusError, Sender, code};
-use protocol::session::{AppParams, AppsResult, method};
+use protocol::session::{AppParams, AppsResult, InfoResult, method};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -152,6 +152,10 @@ fn apply_request(
     now: Instant,
 ) -> (Result<Value, BusError>, Action) {
     let refuse = |code: &str, message: String| (Err(BusError { code: code.into(), message }), Action::None);
+    if method == method::INFO {
+        let services = services.iter().filter(|s| s.child.is_some()).map(|s| s.spec.name.clone()).collect();
+        return (Ok(serde_json::to_value(info(services)).expect("serializes")), Action::None);
+    }
     // Apps may not start or stop each other; system services and tools may.
     if !matches!(from, Some(Sender::Service(_) | Sender::Conn(_))) {
         return refuse(code::PERMISSION_DENIED, "only system services and tools may manage apps".into());
@@ -209,6 +213,32 @@ fn apply_request(
             }
         }
         other => refuse(code::BAD_REQUEST, format!("session has no method {other:?}")),
+    }
+}
+
+/// About this device, for `info`.
+fn info(services: Vec<String>) -> InfoResult {
+    // SAFETY: uname fills in a zeroed struct of NUL-terminated strings.
+    let (hostname, kernel, machine) = unsafe {
+        let mut u: libc::utsname = std::mem::zeroed();
+        if libc::uname(&mut u) == 0 {
+            let s = |f: &[libc::c_char]| std::ffi::CStr::from_ptr(f.as_ptr()).to_string_lossy().into_owned();
+            (s(&u.nodename), format!("{} {}", s(&u.sysname), s(&u.release)), s(&u.machine))
+        } else {
+            Default::default()
+        }
+    };
+    // CLOCK_MONOTONIC counts from boot on Linux (not across suspend).
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime into a timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
+    InfoResult {
+        version: env!("CARGO_PKG_VERSION").into(),
+        hostname,
+        kernel,
+        machine,
+        uptime_secs: t.tv_sec as u64,
+        services,
     }
 }
 
@@ -601,6 +631,12 @@ mod tests {
         let (r, _) = apply_request(&mut services, tool().as_ref(), "reboot", Value::Null, &host, now);
         assert_eq!(r.unwrap_err().code, code::BAD_REQUEST);
         assert!(services.is_empty());
+        // Anyone that reaches session may ask what it's running.
+        let (r, _) = apply_request(&mut services, app.as_ref(), "info", Value::Null, &host, now);
+        let info: InfoResult = serde_json::from_value(r.unwrap()).unwrap();
+        assert!(
+            !info.kernel.is_empty() && !info.machine.is_empty() && info.version == env!("CARGO_PKG_VERSION")
+        );
     }
 
     #[test]

@@ -239,7 +239,9 @@ fn check_rules(rules: &[Rule]) -> Result<(), BusError> {
             return Err(error(code::BAD_REQUEST, why));
         }
         if let Rule::Data(d) = rule {
-            let q = Query { filter: d.filter.clone(), ..Query::all(d.doc_type.clone()) };
+            // A rule for every type (`*`) is checked against a stand-in type name.
+            let doc_type = if d.doc_type == perm::ALL_TYPES { "Any".to_owned() } else { d.doc_type.clone() };
+            let q = Query { filter: d.filter.clone(), ..Query::all(doc_type) };
             db::query::compile(&q).map_err(|e| error(code::BAD_REQUEST, format!("bad filter: {e}")))?;
         }
     }

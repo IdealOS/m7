@@ -20,9 +20,9 @@ IDEALOS_USERSPACE_CARGO_ENV = PKG_CONFIG_ALLOW_CROSS=1
 # backend. `session`, `busd` and `osctl` have no features. kms-probe, db-bench and
 # js-bench (Spikes A/B, C and D) and store-bench (the db crate's benchmark) are dev
 # tools that hw-report runs to measure new hardware.
-IDEALOS_USERSPACE_BINS = session busd dbd permd secretsd osctl app-host compositor kms-probe db-bench js-bench store-bench
+IDEALOS_USERSPACE_BINS = session busd dbd permd secretsd ptyd netd osctl app-host compositor kms-probe db-bench js-bench store-bench
 IDEALOS_USERSPACE_CARGO_BUILD_OPTS = \
-	-p session -p busd -p dbd -p permd -p secretsd -p osctl -p db -p app-host \
+	-p session -p busd -p dbd -p permd -p secretsd -p ptyd -p netd -p osctl -p db -p app-host \
 	-p compositor --no-default-features --features kms \
 	-p kms-probe -p db-bench -p js-bench
 

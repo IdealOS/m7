@@ -60,6 +60,8 @@ pub const SERVICE: &str = "db";
 /// | `links`  | [`IdParams`]     | [`LinksResult`] |
 /// | `diff`   | [`DiffParams`]   | [`DiffResult`] |
 /// | `schemas` | none            | [`SchemasResult`] |
+/// | `types`   | none            | [`TypesResult`] |
+/// | `stats`   | none            | [`StatsResult`] |
 /// | `snapshot` | none           | [`SnapshotInfo`] |
 /// | `snapshots` | none          | [`SnapshotsResult`] |
 /// | `restore` | [`RestoreParams`] | [`RestoreResult`] |
@@ -90,6 +92,8 @@ pub mod method {
     pub const LINKS: &str = "links";
     pub const DIFF: &str = "diff";
     pub const SCHEMAS: &str = "schemas";
+    pub const TYPES: &str = "types";
+    pub const STATS: &str = "stats";
     pub const SNAPSHOT: &str = "snapshot";
     pub const SNAPSHOTS: &str = "snapshots";
     pub const RESTORE: &str = "restore";
@@ -360,6 +364,30 @@ pub struct DiffResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SchemasResult {
     pub schemas: std::collections::BTreeMap<String, Value>,
+}
+
+/// Result of `types`: every document type with live documents the caller may
+/// read, and how many, by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TypesResult {
+    pub types: std::collections::BTreeMap<String, u64>,
+}
+
+/// Result of `stats`: how much the database holds. Needs the `storage`
+/// capability (or a system caller).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StatsResult {
+    /// The database file, with its write-ahead log.
+    pub db_bytes: u64,
+    pub docs: u64,
+    pub types: u64,
+    pub change_sets: u64,
+    pub blobs: u64,
+    pub blob_bytes: u64,
+    /// The snapshots directory.
+    pub snapshot_bytes: u64,
 }
 
 /// A snapshot of the database.

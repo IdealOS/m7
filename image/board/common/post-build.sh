@@ -12,6 +12,15 @@ touch "$TARGET_DIR/etc/idealos/dev-image"
 # creates the directory) so the host key, and ssh's known_hosts entry, stay valid.
 ln -snf /data/etc/dropbear "$TARGET_DIR/etc/dropbear"
 
+# NetworkManager keeps saved networks (with their passwords) and its state on
+# /data too (S05data creates the directories).
+if [ -d "$TARGET_DIR/etc/NetworkManager" ]; then
+	rm -rf "$TARGET_DIR/etc/NetworkManager/system-connections" "$TARGET_DIR/var/lib/NetworkManager"
+	mkdir -p "$TARGET_DIR/var/lib"
+	ln -snf /data/etc/NetworkManager/system-connections "$TARGET_DIR/etc/NetworkManager/system-connections"
+	ln -snf /data/var/lib/NetworkManager "$TARGET_DIR/var/lib/NetworkManager"
+fi
+
 # tools/build-image puts the public half of image/output/dev-key here, so
 # tools/deploy-to-pi can log in as root. It is not in git.
 if [ -f "$BOARD_COMMON/dev-key.pub" ]; then

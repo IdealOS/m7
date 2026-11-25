@@ -222,6 +222,20 @@ fn build(
                 }
                 cs.flex_shrink = 1.0;
                 tree.set_style(child, cs).expect("built");
+            } else if let Some(cross) = cross_axis(node.kind) {
+                // "fill" across a stack (a column's width, a row's height) stretches
+                // the child across it, rather than growing it along the stack.
+                let cp = &scene.node(c).expect("built").props;
+                let main = if cross == "w" { "h" } else { "w" };
+                if matches!(dim(cp.get(cross)), Some(Dim::Fill))
+                    && !matches!(dim(cp.get(main)), Some(Dim::Fill))
+                {
+                    let mut cs = tree.style(child).expect("built").clone();
+                    cs.flex_grow = num(cp, "grow", 0.0);
+                    cs.flex_basis = Dimension::auto();
+                    cs.align_self = Some(AlignItems::STRETCH);
+                    tree.set_style(child, cs).expect("built");
+                }
             }
             children.push(child);
         }
@@ -245,6 +259,15 @@ fn build(
     };
     ids.push((tid, id));
     Some(tid)
+}
+
+/// The size prop across a stack's direction (`w` in a column, `h` in a row).
+fn cross_axis(kind: NodeKind) -> Option<&'static str> {
+    match kind {
+        NodeKind::Vstack | NodeKind::Scroll | NodeKind::Dialog => Some("w"),
+        NodeKind::Hstack | NodeKind::Toolbar => Some("h"),
+        _ => None,
+    }
 }
 
 /// A number, a `"N%"` string, or `"fill"`.
@@ -427,6 +450,7 @@ fn measure(
         NodeKind::Menu => (text(&s("label"), None).0.max(40.0) + 40.0, 32.0),
         NodeKind::Image => (num(p, "_iw", 64.0), num(p, "_ih", 64.0)),
         NodeKind::Vlist => (200.0, 160.0),
+        NodeKind::Terminal => (480.0, 300.0),
         _ => (0.0, 0.0),
     };
     (explicit("w").unwrap_or(w), explicit("h").unwrap_or(h))
@@ -468,6 +492,17 @@ pub fn text_size(
 /// Where text sits, for carets, selections and clicks: shaped with the layout
 /// fonts and the renderer's metrics, so it lines up with what's drawn.
 impl Layout {
+    /// A terminal cell's width and height at `size`: the monospace family's
+    /// advance, and the renderer's line height.
+    pub fn cell(&mut self, size: f32) -> (f32, f32) {
+        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, size * 1.3));
+        buffer.set_size(None, None);
+        buffer.set_text(&"M".repeat(20), &Attrs::new().family(Family::Monospace), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) / 20.0;
+        (if w > 0.0 { w } else { size * 0.6 }, (size * 1.3).ceil())
+    }
+
     fn shaped(&mut self, text: &str, size: f32, width: Option<f32>) -> Buffer {
         let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, size * 1.3));
         buffer.set_size(width, None);
@@ -624,6 +659,23 @@ mod tests {
         assert_eq!(d.h, 20.0 + (14.0f32 * 1.3).ceil() + 20.0, "its content and padding");
         assert_eq!(rect(&s, 5).w, 300.0, "its contents are laid out too");
         assert_eq!(rect(&s, 3).y, 0.0, "it takes no space in the column");
+    }
+
+    #[test]
+    fn filling_across_a_stack_stretches_rather_than_grows() {
+        // Settings' section buttons: a column of buttons as wide as the column.
+        let s = laid_out(json!([
+            {"op": "create", "id": 1, "type": "group", "props": {"w": 200, "h": 400}},
+            {"op": "create", "id": 2, "type": "vstack", "props": {"h": 400, "w": 200, "gap": 4}},
+            {"op": "create", "id": 3, "type": "button", "props": {"label": "Network", "w": "fill"}},
+            {"op": "create", "id": 4, "type": "button", "props": {"label": "About", "w": "fill"}},
+            {"op": "insert", "parent": 0, "child": 1, "index": 0},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0},
+            {"op": "insert", "parent": 2, "child": 3, "index": 0},
+            {"op": "insert", "parent": 2, "child": 4, "index": 1}
+        ]));
+        assert_eq!((rect(&s, 3).w, rect(&s, 3).h), (200.0, 32.0));
+        assert_eq!(rect(&s, 4).y, 36.0);
     }
 
     #[test]

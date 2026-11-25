@@ -51,7 +51,7 @@ struct GpuImage {
 /// A shaped text buffer, reused across frames until its inputs change.
 struct CachedText {
     buffer: Buffer,
-    key: (String, u32, u32, bool, bool),
+    key: (String, u32, u32, bool, bool, bool),
     used: bool,
 }
 
@@ -77,7 +77,7 @@ pub struct Renderer {
     atlas: TextAtlas,
     /// One text renderer per layer, so text draws in stacking order.
     text_renderers: Vec<TextRenderer>,
-    texts: HashMap<(NodeId, u8), CachedText>,
+    texts: HashMap<(NodeId, u32), CachedText>,
 }
 
 pub struct FrameStats {
@@ -503,7 +503,7 @@ impl Renderer {
     /// only reshaped when the string, size, width or weight changes. Shaping is in
     /// logical pixels; glyphon applies the display scale at prepare time.
     fn shape(&mut self, t: &TextItem) {
-        let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold, t.center);
+        let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold, t.center, t.mono);
         if let Some(c) = self.texts.get_mut(&(t.node, t.slot))
             && c.key == key
         {
@@ -513,9 +513,9 @@ impl Renderer {
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(t.size, t.size * 1.3));
         let width = (t.rect.w > 0.0).then_some(t.rect.w);
         buffer.set_size(width, None);
-        let mut attrs = Attrs::new().family(Family::SansSerif);
+        let mut attrs = Attrs::new().family(if t.mono { Family::Monospace } else { Family::SansSerif });
         if t.bold {
-            attrs = attrs.weight(Weight::SEMIBOLD);
+            attrs = attrs.weight(if t.mono { Weight::BOLD } else { Weight::SEMIBOLD });
         }
         let align = t.center.then_some(glyphon::cosmic_text::Align::Center);
         buffer.set_text(&t.text, &attrs, Shaping::Advanced, align);
@@ -548,6 +548,7 @@ mod text_tests {
             size: 14.0,
             color: Rgba::TRANSPARENT,
             bold: false,
+            mono: false,
             center: false,
             rect,
             clip,

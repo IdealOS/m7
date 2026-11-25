@@ -40,8 +40,8 @@ use protocol::db::{
     AtParams, AtResult, BacklinkInfo, BlobInfo, ChangeKind, ChangeSetInfo, ChangesParams, ChangesResult,
     CreateParams, DEFAULT_QUERY_LIMIT, DiffParams, DiffResult, DocsResult, FieldChangeInfo, HashParams,
     HistoryResult, IdParams, LinkInfo, LinksResult, MAX_BLOB_BYTES, MAX_WATCHES, Query, RestoreParams,
-    RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, SpliceParams, UndoParams,
-    UndoResult, UpdateParams, VersionInfo, WatchEvent, code, method,
+    RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, SpliceParams, StatsResult,
+    TypesResult, UndoParams, UndoResult, UpdateParams, VersionInfo, WatchEvent, code, method,
 };
 use protocol::perm::{self, AppGrants, GrantsResult};
 use serde::Serialize;
@@ -213,9 +213,21 @@ fn handle_app(store: &mut Store, scope: &Scope, method: &str, params: Value) -> 
             handle_system(store, app, method, params)
         }
         method::SCHEMAS => handle_system(store, app, method, params),
-        method::SNAPSHOT | method::SNAPSHOTS | method::RESTORE => {
-            Err(denied(format!("only system services may use {method}")))
+        method::TYPES => {
+            // Only types it can read some of, counting only those it can.
+            let mut types = std::collections::BTreeMap::new();
+            for t in store.types().map_err(err)?.into_keys() {
+                let n = store.count(&scope.query(&Query::all(t.clone()))).map_err(err)?;
+                if n > 0 {
+                    types.insert(t, n);
+                }
+            }
+            Ok(to_value(TypesResult { types }))
         }
+        method::SNAPSHOT | method::SNAPSHOTS | method::STATS => {
+            Err(denied(format!("{app} needs the storage capability for {method}")))
+        }
+        method::RESTORE => Err(denied("only system services may restore a snapshot")),
         other => Err(error(bus_code::BAD_REQUEST, format!("db has no method {other:?}"))),
     }
 }
@@ -314,6 +326,7 @@ fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -
                 }
             }))
         }
+        method::TYPES => reply(store.types().map(|types| TypesResult { types })),
         method::SCHEMAS => reply(Ok(SchemasResult {
             schemas: db::schemas::all().iter().map(|(name, s)| (name.clone(), s.json.clone())).collect(),
         })),
@@ -549,6 +562,14 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
     Ok(())
 }
 
+/// Whether `caller` may see storage stats and list and take snapshots.
+fn may_store(caller: &Caller, grants: &Grants) -> bool {
+    match caller {
+        Caller::System(_) => true,
+        Caller::App(app) => scope(app, grants).has(perm::capability::STORAGE),
+    }
+}
+
 /// Aborts a task when dropped.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -668,6 +689,20 @@ impl Worker {
     /// The snapshot methods, which need the snapshot directory as well as the store.
     fn snapshot_method(&mut self, method: &str, params: Value) -> Result<Value, BusError> {
         match method {
+            method::STATS => {
+                let (docs, types, change_sets, blobs, blob_bytes) = self.store.counts().map_err(err)?;
+                let db_bytes = self.store.file_bytes().map_err(err)?;
+                let snapshot_bytes = self.snapshots.list().map_err(err)?.iter().map(|s| s.bytes).sum();
+                Ok(to_value(StatsResult {
+                    db_bytes,
+                    docs,
+                    types,
+                    change_sets,
+                    blobs,
+                    blob_bytes,
+                    snapshot_bytes,
+                }))
+            }
             method::SNAPSHOT => reply(self.snapshots.take(&self.store).map(snapshot_info)),
             method::SNAPSHOTS => reply(
                 self.snapshots
@@ -716,9 +751,10 @@ fn work(
         match job {
             Job::Call { caller, method, params, reply } => {
                 let answer = match method.as_str() {
-                    method::SNAPSHOT | method::SNAPSHOTS | method::RESTORE
-                        if matches!(caller, Caller::System(_)) =>
-                    {
+                    method::SNAPSHOT | method::SNAPSHOTS | method::STATS if may_store(&caller, &grants) => {
+                        w.snapshot_method(&method, params)
+                    }
+                    method::RESTORE if matches!(caller, Caller::System(_)) => {
                         let restoring = method == method::RESTORE;
                         let answer = w.snapshot_method(&method, params);
                         // The database changed under every live query.

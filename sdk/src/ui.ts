@@ -287,8 +287,11 @@ export interface TextProps extends Common {
   onChange?: (value: string) => void;
 }
 
-/** One line of editable text. */
-export function textField(props: TextProps & { onSubmit?: (value: string) => void }): UiNode {
+/**
+ * One line of text. `secret` shows bullets instead (a password) and keeps it off
+ * the clipboard; `onChange` still hears the text.
+ */
+export function textField(props: TextProps & { onSubmit?: (value: string) => void; secret?: boolean }): UiNode {
   return node("text_field", { ...props });
 }
 
@@ -317,6 +320,21 @@ export interface ImageProps extends Common {
 /** An image from a blob; its natural size unless given `w` and `h`. */
 export function image(props: ImageProps): UiNode {
   return node("image", { ...props });
+}
+
+export interface TerminalProps extends Common {
+  /** The pty session to show, from `pty.open`. */
+  pty: string;
+  /** Type size of the cells (default 14). */
+  size?: number;
+}
+
+/**
+ * A terminal showing a pty session the app opened. The compositor draws its
+ * screen and sends it what's typed; the app never sees the output.
+ */
+export function terminal(props: TerminalProps): UiNode {
+  return node("terminal", { ...props });
 }
 
 export interface VirtualListProps extends Common {

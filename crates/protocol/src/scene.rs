@@ -24,7 +24,7 @@ pub type Props = Map<String, Value>;
 /// `image`), containers that lay out their children (`vstack`, `hstack`,
 /// `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
 /// draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
-/// `select`, `menu`, `text_field`, `text_area`, `vlist`).
+/// `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +54,11 @@ pub enum NodeKind {
     /// A virtual list: `count` rows of `row_height`, of which the app creates only
     /// the visible ones (it hears which, as `range` events), each with an `index`.
     Vlist,
+    /// A terminal showing pty session `pty` (see [`crate::pty`]), which the app
+    /// opened. The compositor attaches to the session as the app, draws its
+    /// screen, and sends it what's typed and the size that fits; the app sees
+    /// none of it.
+    Terminal,
 }
 
 /// One change to a window's scene graph.
@@ -103,6 +108,7 @@ pub const SERVICE: &str = "compositor";
 /// | `get_clipboard` | none             | [`Clipboard`] |
 /// | `set_clipboard` | [`Clipboard`]    | null   |
 /// | `prompt`      | [`PromptParams`]     | [`PromptResult`] |
+/// | `screen`      | none                 | [`ScreenInfo`] |
 ///
 /// The clipboard belongs to the compositor: text fields copy and paste through it
 /// without asking the app. Apps can write it, with text and, optionally, the id of
@@ -117,6 +123,18 @@ pub mod method {
     pub const GET_CLIPBOARD: &str = "get_clipboard";
     pub const SET_CLIPBOARD: &str = "set_clipboard";
     pub const PROMPT: &str = "prompt";
+    pub const SCREEN: &str = "screen";
+}
+
+/// Result of `screen`: the display, in logical pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ScreenInfo {
+    pub width: u32,
+    pub height: u32,
+    pub workspaces: u32,
+    /// The workspace showing now, from 1.
+    pub workspace: u32,
 }
 
 /// Params of `prompt`: app `app` (called `name`) asks for these things, each in
