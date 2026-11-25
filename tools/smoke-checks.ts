@@ -365,13 +365,21 @@ export function shellPids(log: string): number[] {
   return [...log.matchAll(/session: started shell \(pid (\d+)\)/g)].map((m) => Number(m[1]));
 }
 
+/** What session.conf starts through dev-exec, plus session itself: after a deploy,
+ * each must run from the overlay (/opt/idealos/bin). */
+export const DEPLOYED_SERVICES = ["session", "busd", "permd", "dbd", "secretsd", "ptyd", "netd", "compositor"];
+
 /** Shell command run over SSH after a deploy. `oldShell` is the pid of the shell the
  * first session started, which must be gone once session restarts. */
 export function deployProbe(oldShell: number): string {
   return [
-    "echo exe $(readlink /proc/$(pidof session)/exe)",
-    "echo compositor-exe $(readlink /proc/$(pidof compositor)/exe)",
+    `for b in ${DEPLOYED_SERVICES.join(" ")}; do echo exe-$b $(readlink /proc/$(pidof $b)/exe); done`,
     `[ -d /proc/${oldShell} ] && echo old-shell alive || echo old-shell gone`,
+    // The apps service installs and launches the bundles after a restart; give it time.
+    `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl app list 2>/dev/null | grep -c running); [ "$n" -ge 2 ] && break; sleep 1; done; echo apps-running $n`,
+    // install-apps links each app it installed into one directory: count those
+    // linked from the overlay, out of all of them.
+    "echo apps-overlay $(for l in /run/idealos/bundled-apps/*; do readlink $l; done | grep -c '^/opt/idealos/apps/')/$(ls /run/idealos/bundled-apps | wc -l)",
   ].join("; ");
 }
 
@@ -382,6 +390,9 @@ export function evaluateDeploy(log: string, exit: number | null, probe: string):
   const shells = shellPids(log).length;
   const stopped = /session: SIGTERM, stopping services/.test(log);
   const frames = log.split("\n").filter((l) => FIRST_FRAME.test(l)).length;
+  const stale = DEPLOYED_SERVICES.filter((b) => f.get(`exe-${b}`) !== `/opt/idealos/bin/${b}`);
+  const [fromOverlay, linked] = (f.get("apps-overlay") ?? "").split("/").map(Number);
+  const running = Number(f.get("apps-running") ?? 0);
   return [
     { name: "deploy script exited 0", ok: exit === 0, detail: `exit ${exit}` },
     {
@@ -391,14 +402,28 @@ export function evaluateDeploy(log: string, exit: number | null, probe: string):
     },
     {
       name: "runs the deployed session",
-      ok: f.get("exe") === "/opt/idealos/bin/session",
-      detail: f.get("exe") || "not reported",
+      ok: f.get("exe-session") === "/opt/idealos/bin/session",
+      detail: f.get("exe-session") || "not reported",
+    },
+    {
+      name: "services run from the overlay",
+      ok: stale.length === 0,
+      detail:
+        stale.length === 0
+          ? DEPLOYED_SERVICES.join(", ")
+          : stale.map((b) => `${b}: ${f.get(`exe-${b}`) || "not running"}`).join(", "),
     },
     { name: "old shell stopped", ok: f.get("old-shell") === "gone", detail: f.get("old-shell") ?? "not reported" },
     {
       name: "compositor restarted",
-      ok: frames >= 2 && f.get("compositor-exe") === "/opt/idealos/bin/compositor",
-      detail: `${frames} first frame(s), running ${f.get("compositor-exe") || "nothing"}`,
+      ok: frames >= 2 && f.get("exe-compositor") === "/opt/idealos/bin/compositor",
+      detail: `${frames} first frame(s), running ${f.get("exe-compositor") || "nothing"}`,
     },
+    {
+      name: "apps installed from the overlay",
+      ok: linked !== undefined && linked > 0 && fromOverlay === linked,
+      detail: f.has("apps-overlay") ? `${f.get("apps-overlay")} from /opt/idealos/apps` : "not reported",
+    },
+    { name: "apps running after the restart", ok: running >= 2, detail: `${running} running` },
   ];
 }

@@ -1,11 +1,13 @@
 #!/bin/sh
-# Rebuild session, busd, dbd, permd, secretsd, ptyd, netd, osctl, compositor, kms-probe and app-host with the image's Buildroot toolchain and
-# copy them to target/device. Needs a built image (tools/build-image) for BOARD.
+# Rebuild the device binaries (DEVICE_BINS in tools/_bins.sh) with the image's
+# Buildroot toolchain and copy them to target/device, and bundle the apps into
+# apps/*/dist. Needs a built image (tools/build-image) for BOARD.
 # Both boards share the toolchain (aarch64 cortex-a72, same glibc), so binaries
 # from either output run on both.
 # Usage: [BOARD=qemu|rpi4] tools/build-device-bins
 set -eu
 . "$(dirname "$0")/_vm.sh"
+. "$(dirname "$0")/_bins.sh"
 BOARD="${BOARD:-qemu}"
 BIN="$REPO/target/device"
 
@@ -30,7 +32,7 @@ vm_run "set -e
 	export BR2_DL_DIR=\$HOME/br-dl
 	make -C \$HOME/out/$BOARD idealos-userspace-rebuild"
 mkdir -p "$BIN"
-for b in session busd dbd permd secretsd ptyd netd osctl compositor kms-probe app-host; do
+for b in $DEVICE_BINS; do
 	rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:out/$BOARD/target/usr/bin/$b" "$BIN/$b"
 done
 echo "Device binaries in target/device"

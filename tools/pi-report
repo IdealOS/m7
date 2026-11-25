@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run the hardware report on a running dev image and save it under image/output/reports.
 # Usage: tools/pi-report HOST [PORT] [--quick]
-#   Pi:   tools/pi-report idealos.local
+#   Pi:   tools/pi-report 192.168.1.50   (its address: Settings → Network)
 #   QEMU: tools/pi-report localhost 2222
 # Takes about a minute (--quick: ~30 s, without the database and JavaScript
 # benchmarks). The display goes dark while kms-probe runs, then the desktop returns.

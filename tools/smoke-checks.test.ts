@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEPLOYED_SERVICES,
   deployProbe,
   evaluate,
   evaluateDeploy,
@@ -116,7 +117,13 @@ const DEPLOYED = [
   "session: started compositor (pid 242)",
   "[2026-11-21T10:01:00Z INFO  compositor::backend::kms::run] kms: first frame on screen",
 ].join("\n");
-const DEPLOY_PROBE = "exe /opt/idealos/bin/session\ncompositor-exe /opt/idealos/bin/compositor\nold-shell gone\n";
+const DEPLOY_PROBE = [
+  ...DEPLOYED_SERVICES.map((b) => `exe-${b} /opt/idealos/bin/${b}`),
+  "old-shell gone",
+  "apps-running 2",
+  "apps-overlay 6/6",
+  "",
+].join("\n");
 
 test("a deploy that restarts session from the overlay passes", () => {
   assert.deepEqual(shellPids(DEPLOYED), [183, 241]);
@@ -139,11 +146,47 @@ test("still running the image's session fails the deploy", () => {
   const failed = evaluateDeploy(DEPLOYED, 1, probe)
     .filter((c) => !c.ok)
     .map((c) => c.name);
-  assert.deepEqual(failed, ["deploy script exited 0", "runs the deployed session", "compositor restarted"]);
+  assert.deepEqual(failed, [
+    "deploy script exited 0",
+    "runs the deployed session",
+    "services run from the overlay",
+    "compositor restarted",
+  ]);
 });
 
-test("the deploy probe checks the old shell's pid", () => {
+test("a service still running the image's copy fails the deploy", () => {
+  // Regression: deploy-to-pi pushed only the M1 binaries, so permd, secretsd, ptyd
+  // and netd kept running the flashed versions next to a new session.
+  const probe = DEPLOY_PROBE.replace("exe-ptyd /opt/idealos/bin/ptyd", "exe-ptyd /usr/bin/ptyd").replace(
+    "exe-netd /opt/idealos/bin/netd\n",
+    "exe-netd\n",
+  );
+  const checks = evaluateDeploy(DEPLOYED, 0, probe).filter((c) => !c.ok);
+  assert.deepEqual(
+    checks.map((c) => c.name),
+    ["services run from the overlay"],
+  );
+  assert.equal(checks[0]?.detail, "ptyd: /usr/bin/ptyd, netd: not running");
+});
+
+test("apps installed from the image fail the deploy", () => {
+  // Regression: deploy-to-pi didn't push apps, and boot reinstalled the image's.
+  for (const overlay of ["apps-overlay 0/6", "apps-overlay 0/0", ""]) {
+    const probe = DEPLOY_PROBE.replace("apps-overlay 6/6", overlay);
+    const failed = evaluateDeploy(DEPLOYED, 0, probe)
+      .filter((c) => !c.ok)
+      .map((c) => c.name);
+    assert.deepEqual(failed, ["apps installed from the overlay"], overlay);
+  }
+  const failed = evaluateDeploy(DEPLOYED, 0, DEPLOY_PROBE.replace("apps-running 2", "apps-running 0"))
+    .filter((c) => !c.ok)
+    .map((c) => c.name);
+  assert.deepEqual(failed, ["apps running after the restart"]);
+});
+
+test("the deploy probe checks the old shell's pid and every service", () => {
   assert.match(deployProbe(183), /\/proc\/183 /);
+  for (const b of ["permd", "secretsd", "ptyd", "netd"]) assert.match(deployProbe(183), new RegExp(` ${b}[ ;]`));
 });
 
 test("session's messages count after a shell prompt on the same line", () => {

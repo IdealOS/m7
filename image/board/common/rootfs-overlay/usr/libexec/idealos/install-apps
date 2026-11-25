@@ -1,0 +1,16 @@
+#!/bin/sh
+# Install the bundled apps into the database (and launch the autostart ones),
+# preferring a copy pushed to the dev overlay (/opt/idealos/apps/NAME, see
+# tools/deploy-to-pi) over the one in the read-only image (/usr/share/idealos/apps).
+# Apps pushed but not in the image are installed too.
+# app-host --install takes one directory, so link the chosen copies into one.
+dir=/run/idealos/bundled-apps
+rm -rf "$dir"
+mkdir -p "$dir"
+for src in /usr/share/idealos/apps /opt/idealos/apps; do
+	for app in "$src"/*; do
+		[ -f "$app/manifest.json" ] && [ -f "$app/app.js" ] || continue
+		ln -sfn "$app" "$dir/$(basename "$app")"
+	done
+done
+exec /usr/libexec/idealos/dev-exec app-host --install "$dir"

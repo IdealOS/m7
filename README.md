@@ -49,21 +49,27 @@ make vm            # create the aarch64 Linux build VM (once)
 make check-defconfigs  # seconds: fail if Buildroot would silently drop a defconfig option
 make image-qemu    # Buildroot image for QEMU  -> image/output/qemu (first build ~3 h)
 make smoke-qemu    # boot it headless and check it, input included (~20 s); exits 1 on any failure
-make smoke-deploy  # ...then rebuild the binaries, deploy them over SSH, check the restart
+make smoke-deploy  # ...then rebuild, deploy binaries and apps over SSH, check everything restarted from them
 make smoke-report  # ...then run the Pi's first-boot hardware report against it
 make qemu          # boot it; serial console here, display in a window
 make image-rpi4    # Buildroot image for the Pi -> image/output/rpi4
 tools/flash-sd /dev/diskN
-make deploy HOST=idealos.local          # rebuild and push binaries to a running dev image
+make deploy HOST=192.168.1.50           # rebuild and push binaries and apps to a running dev image
 make deploy HOST=localhost PORT=2222   # ...or to QEMU
-make pi-report HOST=idealos.local       # hardware report + Spike A-D numbers -> image/output/reports
+make pi-report HOST=192.168.1.50        # hardware report + Spike A-D numbers -> image/output/reports
 ```
+
+The image doesn't answer mDNS, so `idealos.local` doesn't resolve: use the Pi's
+address, which Settings → Network shows (or `ip -4 addr` in Terminal).
 
 `tools/build-image` makes an SSH key, `image/output/dev-key`, and bakes its public
 half into dev images as root's only login. `make deploy` uses it, so reflash after
 deleting `image/output`. Deploy builds with the image's own Buildroot toolchain
-(`make device-bins`), copies the binaries to the writable `/opt/idealos/bin` overlay,
-and sends `session` SIGTERM; init restarts it and it prefers the overlay's binaries.
+(`make device-bins`), copies every service binary to the writable `/opt/idealos/bin`
+overlay and every app bundle to `/opt/idealos/apps`, and sends `session` SIGTERM.
+init restarts it; session and its services prefer the overlay's binaries, and at
+boot `install-apps` installs the overlay's bundles over the image's. The overlay
+lives on `/data`, so it survives reboots, and documents are untouched.
 
 On a new board, run `make pi-report` first. It records the board, storage speed, DRM
 cards and connectors, Vulkan drivers and input devices, then stops the desktop to run
@@ -114,7 +120,7 @@ docs/               feature list, implementation plan, screenshots
 | Buildroot image for QEMU | **Built and booted** (Buildroot 2026.08.2, kernel 6.12.58). Boots to `session` in ~0.4 s under HVF; `/data` and the dev overlay mount; the compositor shows its first frame on virtio-gpu (lavapipe), finds QEMU's virtio keyboard and tablet, and moves a window dragged by its title bar and raises the next on Alt+Tab. `make smoke-qemu` checks all of this. |
 | Buildroot image for the Pi | **Built** on the first try (~45 min, reusing downloads): Pi kernel `stable_20250916`, V3DV Vulkan driver, firmware with the `vc4-kms-v3d-pi4` overlay, and the dev SSH key, in a 3.3 GB `sdcard.img`. **Never booted**: no Pi on hand yet. |
 | Lima build VM, image build, QEMU boot | Run end to end. |
-| SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes, and checks that `session` and the compositor restarted from the overlay with the old shell gone. Not yet run against a Pi. |
+| SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes every service binary and app bundle, and checks that session, each service and the apps restarted from the overlay with the old shell gone. Not yet run against a Pi. |
 | Hardware report (`make pi-report`) | **Works against QEMU**: `make smoke-report` runs it end to end and checks every section, both kms-probe runs, the compositor finding input, both benchmark tables, and that the desktop comes back. Not yet run on a Pi. |
 | SD card flashing | `tools/flash-sd` is syntax-checked but **never run**. |
 

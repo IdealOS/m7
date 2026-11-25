@@ -1,9 +1,11 @@
 #!/bin/sh
-# Push new device binaries to a running dev image and restart session to run them.
+# Push new device binaries and app bundles to a running dev image and restart
+# session to run them.
 # Usage: tools/deploy-to-pi HOST [PORT]
-#   Pi:   tools/deploy-to-pi idealos.local
+#   Pi:   tools/deploy-to-pi 192.168.1.50   (its address: Settings → Network)
 #   QEMU: tools/deploy-to-pi localhost 2222
-# Builds first with tools/build-device-bins; NO_BUILD=1 pushes target/device as is.
+# Builds first with tools/build-device-bins; NO_BUILD=1 pushes target/device and
+# apps/*/dist as they are.
 # Logs in as root with image/output/dev-key, which tools/build-image bakes in.
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,18 +13,37 @@ HOST="${1:?usage: tools/deploy-to-pi HOST [PORT]}"
 PORT="${2:-22}"
 BIN="$REPO/target/device"
 . "$REPO/tools/_device.sh"
+. "$REPO/tools/_bins.sh"
 
 [ -n "${NO_BUILD:-}" ] || "$REPO/tools/build-device-bins"
 
-# Binaries go to the writable /opt/idealos overlay; start-session prefers them over
-# the copies baked into the read-only image. Write to .new and rename, because a
-# running executable can't be overwritten in place. (Dropbear has no SFTP server,
-# so plain ssh + cat instead of scp.)
-for b in session busd dbd osctl compositor kms-probe app-host; do
+# Copy stdin to the remote file $1, through $1.new and a rename: a running
+# executable can't be overwritten in place, and a half-written file is never seen.
+# (Dropbear has no SFTP server, so plain ssh + cat instead of scp.)
+push() {
+	remote "mkdir -p \"\$(dirname '$1')\" && cat > '$1.new' && chmod $2 '$1.new' && mv '$1.new' '$1'"
+}
+
+# Everything goes to the writable /opt/idealos overlay. session and the services
+# it starts (through dev-exec) prefer binaries there over the image's copies.
+for b in $DEVICE_BINS; do
 	[ -f "$BIN/$b" ] || { echo "No $BIN/$b. Run tools/build-device-bins."; exit 1; }
-	remote "cat > /opt/idealos/bin/$b.new && chmod 755 /opt/idealos/bin/$b.new &&
-		mv /opt/idealos/bin/$b.new /opt/idealos/bin/$b" <"$BIN/$b"
+	push "/opt/idealos/bin/$b" 755 <"$BIN/$b"
 done
-# session stops its services on SIGTERM; init then respawns it from /opt/idealos/bin.
+
+# Apps go to /opt/idealos/apps/NAME, the name the image uses under
+# /usr/share/idealos/apps. At boot, install-apps installs each from there in
+# preference to the image's copy.
+apps=0
+for dist in "$REPO"/apps/*/dist; do
+	[ -f "$dist/manifest.json" ] && [ -f "$dist/app.js" ] || continue
+	name="$(basename "$(dirname "$dist")")"
+	push "/opt/idealos/apps/$name/manifest.json" 644 <"$dist/manifest.json"
+	push "/opt/idealos/apps/$name/app.js" 644 <"$dist/app.js"
+	apps=$((apps + 1))
+done
+
+# session stops its services on SIGTERM; init then respawns it from /opt/idealos/bin,
+# and its `apps` service installs the pushed bundles.
 remote 'kill $(pidof session)'
-echo "Deployed to $HOST:$PORT"
+echo "Deployed $(echo $DEVICE_BINS | wc -w | tr -d ' ') binaries and $apps apps to $HOST:$PORT"
