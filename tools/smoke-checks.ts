@@ -69,6 +69,10 @@ export const GUEST_SCRIPT = [
   `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl bus call net status 2>/dev/null | grep -c '"kind":"ethernet"'); [ "$n" -ge 1 ] && break; sleep 1; done; echo SMOKE net-wired $n`,
   `echo SMOKE pty-open $(timeout 5 osctl bus stream pty open '{"cols":20,"rows":5}' --count 1 2>&1 | grep -c '"event":"opened"')`,
   "echo SMOKE m7-apps $(osctl app list 2>/dev/null | grep -cE 'org.idealos.(settings|browser|terminal)')",
+  // A Wi-Fi preset (tools/sd-wifi, imported at boot on a Pi) becomes a profile
+  // NetworkManager loads, with the name and password intact: spaces and a backslash
+  // need escaping in a keyfile. QEMU has no Wi-Fi device, but the profile still loads.
+  String.raw`printf 'ssid= Smoke\\Net \npassword=pass word\\1\n' >/tmp/w.txt; /usr/libexec/idealos/import-wifi /tmp/w.txt /etc/NetworkManager/system-connections >/dev/null; D="dbus-send --system --print-reply --dest=org.freedesktop.NetworkManager"; S=/org/freedesktop/NetworkManager/Settings; $D $S org.freedesktop.NetworkManager.Settings.ReloadConnections >/dev/null; w=none; for c in $($D $S org.freedesktop.NetworkManager.Settings.ListConnections | grep -o "$S/[0-9]*"); do $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSettings | grep -qF ' Smoke\Net ' && w=found && $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSecrets string:802-11-wireless-security | grep -qF 'pass word\1' && w=ok; done; echo SMOKE wifi-preset $w`,
   "echo SMOKE end",
 ];
 
@@ -169,6 +173,7 @@ export function evaluate(log: string): Check[] {
     fact("net-wired", "1", "netd reports the wired connection NetworkManager made"),
     fact("pty-open", "1", "ptyd opened a shell session"),
     fact("m7-apps", "3", "Settings, Documents and Terminal are installed"),
+    fact("wifi-preset", "ok", "NetworkManager loaded a Wi-Fi preset with its name and password intact"),
     {
       name: "the apps opened their windows under their own ids",
       ok: ["org.idealos.counter", "org.idealos.notes"].every((id) =>

@@ -1,0 +1,56 @@
+#!/bin/sh
+# Turn a Wi-Fi preset (see tools/sd-wifi) into a NetworkManager profile, so a new
+# device joins the network on its first boot. S05data runs this, before
+# NetworkManager starts, for a wifi.txt it finds on the Pi's boot partition, and
+# then deletes that file. Profiles made here are ordinary saved networks: Settings
+# shows them, and Forget removes them.
+#
+# Usage: import-wifi FILE DIR
+#   FILE holds `ssid=NAME` and `password=SECRET` lines (no password: an open network).
+#   DIR is where NetworkManager keeps profiles (/etc/NetworkManager/system-connections).
+# Prints the network's name on success.
+set -eu
+file="$1"
+dir="$2"
+
+ssid=
+password=
+while IFS= read -r line || [ -n "$line" ]; do
+	line=$(printf '%s' "$line" | tr -d '\r')
+	case "$line" in
+		ssid=*) ssid=${line#ssid=} ;;
+		password=*) password=${line#password=} ;;
+	esac
+done <"$file"
+
+[ -n "$ssid" ] || { echo "import-wifi: $file has no ssid= line" >&2; exit 1; }
+[ ${#ssid} -le 32 ] || { echo "import-wifi: an SSID is at most 32 bytes" >&2; exit 1; }
+if [ -n "$password" ]; then
+	case ${#password} in
+		[89] | [1-5][0-9] | 6[0-4]) ;;
+		*) echo "import-wifi: a WPA password is 8 to 63 characters (or 64 hex digits)" >&2; exit 1 ;;
+	esac
+fi
+
+# Values in a keyfile are GLib key-file strings: a backslash is \\ and a space is \s
+# (unescaped, leading and trailing spaces would be lost).
+escape() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/ /\\s/g'
+}
+
+name=$(printf '%s' "$ssid" | tr -c 'A-Za-z0-9._-' '_')
+uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+out="$dir/preset-$name.nmconnection"
+mkdir -p "$dir"
+# NetworkManager ignores profiles that others can read: they may hold a password.
+umask 077
+{
+	printf '[connection]\nid=%s\nuuid=%s\ntype=wifi\nautoconnect=true\n\n' "$(escape "$ssid")" "$uuid"
+	printf '[wifi]\nmode=infrastructure\nssid=%s\n\n' "$(escape "$ssid")"
+	if [ -n "$password" ]; then
+		printf '[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n' "$(escape "$password")"
+	fi
+	printf '[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n'
+} >"$out.new"
+mv "$out.new" "$out"
+printf '%s\n' "$ssid"

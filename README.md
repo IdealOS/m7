@@ -53,7 +53,8 @@ make smoke-deploy  # ...then rebuild, deploy binaries and apps over SSH, check e
 make smoke-report  # ...then run the Pi's first-boot hardware report against it
 make qemu          # boot it; serial console here, display in a window
 make image-rpi4    # Buildroot image for the Pi -> image/output/rpi4
-tools/flash-sd /dev/diskN
+tools/flash-sd /dev/diskN        # write it to an SD card (diskutil list external); offers to preset Wi-Fi
+tools/sd-wifi /dev/diskN         # preset Wi-Fi on a flashed card: the Pi joins it on its next boot
 make deploy HOST=192.168.1.50           # rebuild and push binaries and apps to a running dev image
 make deploy HOST=localhost PORT=2222   # ...or to QEMU
 make pi-report HOST=192.168.1.50        # hardware report + Spike A-D numbers -> image/output/reports
@@ -61,6 +62,11 @@ make pi-report HOST=192.168.1.50        # hardware report + Spike A-D numbers ->
 
 The image doesn't answer mDNS, so `idealos.local` doesn't resolve: use the Pi's
 address, which Settings → Network shows (or `ip -4 addr` in Terminal).
+
+To reach a new Pi without Ethernet, preset Wi-Fi on the card: `tools/sd-wifi`
+writes the network's name and password to `wifi.txt` on the boot partition, and at
+boot `S05data` saves it as a NetworkManager profile on `/data` and deletes the file.
+It's an ordinary saved network afterwards (Settings → Network can forget it).
 
 `tools/build-image` makes an SSH key, `image/output/dev-key`, and bakes its public
 half into dev images as root's only login. `make deploy` uses it, so reflash after
@@ -122,7 +128,7 @@ docs/               feature list, implementation plan, screenshots
 | Lima build VM, image build, QEMU boot | Run end to end. |
 | SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes every service binary and app bundle, and checks that session, each service and the apps restarted from the overlay with the old shell gone. Not yet run against a Pi. |
 | Hardware report (`make pi-report`) | **Works against QEMU**: `make smoke-report` runs it end to end and checks every section, both kms-probe runs, the compositor finding input, both benchmark tables, and that the desktop comes back. Not yet run on a Pi. |
-| SD card flashing | `tools/flash-sd` is syntax-checked but **never run**. |
+| SD card flashing | **Works**: `tools/flash-sd` wrote the Pi 4 image to a 15.5 GB card, and its four partitions read back on the Mac. `tools/sd-wifi` (Wi-Fi preset) tested against a copy of the image attached as a disk; the Pi side, against QEMU's NetworkManager in `make smoke-qemu`. |
 
 ### Message bus (M2)
 

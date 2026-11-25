@@ -19,4 +19,11 @@ RDISK="$(echo "$DISK" | sed 's|/dev/disk|/dev/rdisk|')"
 diskutil unmountDisk "$DISK"
 sudo dd if="$IMG" of="$RDISK" bs=4m status=progress
 sync
+# The card is still attached, so this is the moment to preset Wi-Fi (tools/sd-wifi
+# ejects it when done).
+printf "Preset a Wi-Fi network, so the Pi joins it on first boot? [y/N]: "
+read -r answer
+case "$answer" in
+	y | Y | yes) exec "$REPO/tools/sd-wifi" "$DISK" ;;
+esac
 diskutil eject "$DISK"

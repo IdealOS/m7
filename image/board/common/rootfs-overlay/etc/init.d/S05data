@@ -11,6 +11,23 @@ start)
 	# NetworkManager's saved networks (passwords included) and state.
 	mkdir -p -m 0700 /data/etc/NetworkManager/system-connections
 	mkdir -p /data/var/lib/NetworkManager
+	# A Wi-Fi preset written to the Pi's boot partition from another computer
+	# (tools/sd-wifi): save it as a NetworkManager profile, which starts next, then
+	# delete it, so the password doesn't stay readable on the card's FAT partition.
+	if [ -b /dev/mmcblk0p1 ]; then
+		mkdir -p /run/boot-fat
+		if mount -t vfat -o rw,noatime /dev/mmcblk0p1 /run/boot-fat 2>/dev/null; then
+			if [ -f /run/boot-fat/wifi.txt ]; then
+				if ssid=$(/usr/libexec/idealos/import-wifi /run/boot-fat/wifi.txt \
+					/data/etc/NetworkManager/system-connections); then
+					echo "S05data: saved Wi-Fi network $ssid"
+				fi
+				# ._wifi.txt is the extended attributes macOS writes beside it.
+				rm -f /run/boot-fat/wifi.txt /run/boot-fat/._wifi.txt
+			fi
+			umount /run/boot-fat
+		fi
+	fi
 	if [ -e /etc/idealos/dev-image ]; then
 		mkdir -p /data/dev-overlay/upper /data/dev-overlay/work
 		mount -t overlay overlay \
