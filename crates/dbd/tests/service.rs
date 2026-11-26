@@ -363,3 +363,20 @@ async fn links_diffs_and_schemas_over_the_bus() {
     assert_eq!(e.code(), "bad_request");
     assert!(e.to_string().contains("name is required"), "{e}");
 }
+
+#[tokio::test]
+async fn pinning_and_compacting_over_the_bus() {
+    let s = Setup::start("compact").await;
+    let c = s.client().await;
+    let d = doc(call(&c, "create", json!({"type": "Note", "data": {"n": 1}})).await.unwrap());
+    let history = call(&c, "history", json!({"id": d.id})).await.unwrap();
+    let created = history["versions"][0]["change_set"].as_i64().unwrap();
+    assert_eq!(history["versions"][0]["pinned"], false);
+    call(&c, "pin", json!({"id": d.id, "change_set": created})).await.unwrap();
+    assert_eq!(call(&c, "history", json!({"id": d.id})).await.unwrap()["versions"][0]["pinned"], true);
+    let err = call(&c, "pin", json!({"id": d.id, "change_set": 999})).await.unwrap_err();
+    assert_eq!(err.code(), code::NOT_FOUND);
+    // Everything here is new, so compaction keeps it all.
+    let done = call(&c, "compact", Value::Null).await.unwrap();
+    assert_eq!(done, json!({"versions": 0, "change_sets": 0, "blobs": 0, "blob_bytes": 0}));
+}

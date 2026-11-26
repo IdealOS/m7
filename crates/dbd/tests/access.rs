@@ -115,6 +115,8 @@ async fn an_app_without_grants_gets_permission_denied() {
             .await
     ));
     assert!(denied(call(&app, "snapshots", Value::Null).await));
+    assert!(call(&app, "compact", Value::Null).await.is_err(), "only the system compacts");
+    assert!(call(&app, "pin", json!({"id": note.id, "change_set": 1})).await.is_err());
     assert!(query(&app, json!({"type": "Note"})).await.is_empty(), "queries see nothing");
     let hits: DocsResult =
         serde_json::from_value(call(&app, "search", json!({"text": "private"})).await.unwrap()).unwrap();

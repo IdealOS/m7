@@ -69,6 +69,11 @@ pub const SERVICE: &str = "db";
 /// | `get_blob` | [`HashParams`] | [`BlobInfo`] and one descriptor |
 /// | `blob_info` | [`HashParams`] | [`BlobInfo`] |
 /// | `splice`  | [`SpliceParams`] | [`UndoResult`] (the change set) |
+/// | `pin`     | [`PinParams`]  | null |
+/// | `compact` | none            | [`CompactResult`] |
+///
+/// `pin` and `compact` are for system services and tools only. dbd compacts
+/// history once a day by itself; `compact` runs it now.
 ///
 /// `put_blob` stores the contents of a regular file (or memfd) passed with the
 /// request, and `get_blob` answers with a read-only descriptor for the blob.
@@ -101,6 +106,8 @@ pub mod method {
     pub const GET_BLOB: &str = "get_blob";
     pub const BLOB_INFO: &str = "blob_info";
     pub const SPLICE: &str = "splice";
+    pub const PIN: &str = "pin";
+    pub const COMPACT: &str = "compact";
 }
 
 /// Error codes the `db` service sends, besides the broker's `bad_request`.
@@ -211,6 +218,9 @@ pub struct VersionInfo {
     /// The change set this one undid, if it was an undo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undoes: Option<i64>,
+    /// Pinned: history compaction never removes it.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Result of `history`: every change to the document, oldest first.
@@ -423,6 +433,35 @@ pub struct RestoreParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestoreResult {
     pub saved: SnapshotInfo,
+}
+
+/// Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version
+/// after change set `change_set`, so history compaction keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PinParams {
+    pub id: String,
+    pub change_set: i64,
+    #[serde(default = "yes")]
+    pub pinned: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Result of `compact`: what history compaction removed. Everything from the last
+/// 30 days stays; older, the last version of each day, and after a year, of each
+/// week. Then blobs nothing needs any more are deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CompactResult {
+    /// Document versions removed from history.
+    pub versions: u64,
+    /// Change sets left with no versions, removed.
+    pub change_sets: u64,
+    pub blobs: u64,
+    pub blob_bytes: u64,
 }
 
 /// Params of `get_blob` and `blob_info`.

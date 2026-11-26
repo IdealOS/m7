@@ -48,6 +48,8 @@ fn document() -> Value {
     g.subschema_for::<db::SnapshotsResult>();
     g.subschema_for::<db::RestoreParams>();
     g.subschema_for::<db::RestoreResult>();
+    g.subschema_for::<db::PinParams>();
+    g.subschema_for::<db::CompactResult>();
     g.subschema_for::<db::HashParams>();
     g.subschema_for::<db::BlobInfo>();
     g.subschema_for::<protocol::scene::PromptParams>();

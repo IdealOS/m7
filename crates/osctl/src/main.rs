@@ -28,6 +28,9 @@
 //! osctl [--socket PATH] db snapshot                    take a snapshot now
 //! osctl [--socket PATH] db snapshots                   list snapshots, newest first
 //! osctl [--socket PATH] db restore NAME                replace the database with a snapshot (saving the current state)
+//! osctl [--socket PATH] db pin ID CHANGE_SET          keep a version through history compaction
+//! osctl [--socket PATH] db unpin ID CHANGE_SET
+//! osctl [--socket PATH] db compact                     compact history now (dbd does daily)
 //! osctl [--socket PATH] db put-blob FILE               store a file as a blob; prints its hash
 //! osctl [--socket PATH] db get-blob HASH [OUT]         write a blob to OUT (default: standard output)
 //! osctl [--socket PATH] db blob-info HASH
@@ -64,7 +67,7 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] db (create TYPE [JSON] | get ID | update ID JSON | delete ID | query JSON \
 | search WORDS... [--type TYPE] [--limit N] | history ID | at ID CHANGE_SET | changes [--limit N] | undo CHANGE_SET \
 | watch JSON [--count N] | diff ID FROM TO | link ID FIELD TARGET | links ID | schemas | snapshot | snapshots \
-| restore NAME | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
+| restore NAME | pin ID CHANGE_SET | unpin ID CHANGE_SET | compact | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
        osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
        osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])";
 
@@ -432,15 +435,22 @@ fn db_command(
                 _ => (method::BLOB_INFO, json!({"hash": positional[0]})),
             }
         }
-        "schemas" | "snapshot" | "snapshots" => {
+        "schemas" | "snapshot" | "snapshots" | "compact" => {
             arity(0, 0)?;
             allowed(&[])?;
             let m = match sub {
                 "schemas" => method::SCHEMAS,
                 "snapshot" => method::SNAPSHOT,
+                "compact" => method::COMPACT,
                 _ => method::SNAPSHOTS,
             };
             (m, json!({}))
+        }
+        "pin" | "unpin" => {
+            arity(2, 2)?;
+            allowed(&[])?;
+            let set = change_set(&positional[1])?;
+            (method::PIN, json!({"id": positional[0], "change_set": set, "pinned": sub == "pin"}))
         }
         "restore" => {
             arity(1, 1)?;
@@ -510,6 +520,11 @@ mod tests {
         assert_eq!(parse_str("db diff a 0 7").unwrap().1, db("diff", json!({"id": "a", "from": 0, "to": 7})));
         assert_eq!(parse_str("db links a").unwrap().1, db("links", json!({"id": "a"})));
         assert_eq!(parse_str("db snapshots").unwrap().1, db("snapshots", json!({})));
+        assert_eq!(parse_str("db compact").unwrap().1, db("compact", json!({})));
+        assert_eq!(
+            parse_str("db unpin abc 12").unwrap().1,
+            db("pin", json!({"id": "abc", "change_set": 12, "pinned": false}))
+        );
         assert_eq!(
             parse_str("db restore snapshot-1-2.db").unwrap().1,
             db("restore", json!({"name": "snapshot-1-2.db"}))

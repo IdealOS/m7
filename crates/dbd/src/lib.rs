@@ -38,10 +38,11 @@ use protocol::BusError;
 use protocol::bus::{Sender, code as bus_code, valid_app_id};
 use protocol::db::{
     AtParams, AtResult, BacklinkInfo, BlobInfo, ChangeKind, ChangeSetInfo, ChangesParams, ChangesResult,
-    CreateParams, DEFAULT_QUERY_LIMIT, DiffParams, DiffResult, DocsResult, FieldChangeInfo, HashParams,
-    HistoryResult, IdParams, LinkInfo, LinksResult, MAX_BLOB_BYTES, MAX_WATCHES, Query, RestoreParams,
-    RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult, SpliceParams, StatsResult,
-    TypesResult, UndoParams, UndoResult, UpdateParams, VersionInfo, WatchEvent, code, method,
+    CompactResult, CreateParams, DEFAULT_QUERY_LIMIT, DiffParams, DiffResult, DocsResult, FieldChangeInfo,
+    HashParams, HistoryResult, IdParams, LinkInfo, LinksResult, MAX_BLOB_BYTES, MAX_WATCHES, PinParams,
+    Query, RestoreParams, RestoreResult, SchemasResult, SearchParams, SnapshotInfo, SnapshotsResult,
+    SpliceParams, StatsResult, TypesResult, UndoParams, UndoResult, UpdateParams, VersionInfo, WatchEvent,
+    code, method,
 };
 use protocol::perm::{self, AppGrants, GrantsResult};
 use serde::Serialize;
@@ -274,6 +275,7 @@ fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -
                         origin: v.origin,
                         kind: kind(v.kind),
                         undoes: v.undoes,
+                        pinned: v.pinned,
                     })
                     .collect(),
             });
@@ -336,6 +338,10 @@ fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -
             let set = store.splice(&p.id, &p.path, p.at as usize, p.delete as usize, &p.insert, origin);
             reply(set.map(|change_set| UndoResult { change_set }))
         }
+        method::PIN => {
+            let p: PinParams = parse(params)?;
+            reply(store.pin(&p.id, p.change_set, p.pinned))
+        }
         other => Err(error(bus_code::BAD_REQUEST, format!("db has no method {other:?}"))),
     }
 }
@@ -385,6 +391,11 @@ pub const BATCH: Duration = Duration::from_millis(16);
 /// How often dbd takes a snapshot.
 pub const SNAPSHOT_EVERY: Duration = Duration::from_secs(60 * 60);
 
+/// How often dbd compacts history, and how long after starting it first does, so
+/// it isn't part of booting.
+pub const COMPACT_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+pub const COMPACT_FIRST: Duration = Duration::from_secs(10 * 60);
+
 /// Where dbd keeps the files beside its database.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -417,6 +428,8 @@ enum Job {
     Flush,
     /// Refresh query statistics, take the hourly snapshot and prune old ones.
     Snapshot,
+    /// The daily history compaction.
+    Compact,
     /// Record a blob whose file was just written.
     AddBlob { hash: String, size: u64, reply: Reply },
     /// Look up a blob and open it, to answer `get_blob`.
@@ -455,6 +468,19 @@ pub async fn serve(bus: Client, store: Store, config: Config) -> Result<(), Stri
             every.tick().await;
             let Some(jobs) = weak_jobs.upgrade() else { break };
             if jobs.send(Job::Snapshot).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // The daily compaction, first a while after starting.
+    let weak_jobs = jobs.downgrade();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval_at(tokio::time::Instant::now() + COMPACT_FIRST, COMPACT_EVERY);
+        loop {
+            every.tick().await;
+            let Some(jobs) = weak_jobs.upgrade() else { break };
+            if jobs.send(Job::Compact).await.is_err() {
                 break;
             }
         }
@@ -720,6 +746,25 @@ impl Worker {
         }
     }
 
+    /// Thin history out and delete the blobs nothing needs, logging what went.
+    fn compact(&mut self) -> db::Result<db::Compacted> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let done = db::compact_history(&mut self.store, &self.blobs, now, &db::Retention::default())?;
+        if done != db::Compacted::default() {
+            log::info!(
+                "dbd: compacted history: {} versions, {} change sets, {} blobs ({} bytes)",
+                done.versions,
+                done.change_sets,
+                done.blobs,
+                done.blob_bytes
+            );
+        }
+        Ok(done)
+    }
+
     fn get_blob(&self, hash: &str, caller: &Caller, grants: &Grants) -> Result<(Value, OwnedFd), BusError> {
         if let Caller::App(app) = caller {
             check_blob(&self.store, &scope(app, grants), hash)?;
@@ -754,6 +799,14 @@ fn work(
                     method::SNAPSHOT | method::SNAPSHOTS | method::STATS if may_store(&caller, &grants) => {
                         w.snapshot_method(&method, params)
                     }
+                    method::COMPACT if matches!(caller, Caller::System(_)) => {
+                        crate::reply(w.compact().map(|c| CompactResult {
+                            versions: c.versions,
+                            change_sets: c.change_sets,
+                            blobs: c.blobs,
+                            blob_bytes: c.blob_bytes,
+                        }))
+                    }
                     method::RESTORE if matches!(caller, Caller::System(_)) => {
                         let restoring = method == method::RESTORE;
                         let answer = w.snapshot_method(&method, params);
@@ -779,6 +832,11 @@ fn work(
                 }
                 Err(e) => log::error!("dbd: snapshot failed: {e}"),
             },
+            Job::Compact => {
+                if let Err(e) = w.compact() {
+                    log::error!("dbd: compacting history: {e}");
+                }
+            }
             Job::AddBlob { hash, size, reply: r } => {
                 let _ = r.send(reply(w.store.add_blob(&hash, size).map(blob_info)));
             }

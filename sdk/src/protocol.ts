@@ -239,6 +239,20 @@ export type Clipboard = { text: string; doc?: string | null };
 export type Commit = { window: number; ops: SceneOp[] };
 
 /**
+ * Result of `compact`: what history compaction removed. Everything from the last
+ * 30 days stays; older, the last version of each day, and after a year, of each
+ * week. Then blobs nothing needs any more are deleted.
+ */
+export type CompactResult = {
+  /** Document versions removed from history. */
+  versions: number;
+  /** Change sets left with no versions, removed. */
+  change_sets: number;
+  blobs: number;
+  blob_bytes: number;
+};
+
+/**
  * Params of `connect`: join `ssid`, with `password` if it's secure and not
  * known yet.
  */
@@ -535,6 +549,12 @@ export type OpenWindowParams = {
 export type OrderBy = [string, Direction];
 
 /**
+ * Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version
+ * after change set `change_set`, so history compaction keeps it.
+ */
+export type PinParams = { id: string; change_set: number; pinned?: boolean };
+
+/**
  * Params of `prompt`: app `app` (called `name`) asks for these things, each in
  * words (see `describe`), for `reason`.
  */
@@ -772,6 +792,8 @@ export type VersionInfo = {
   /** Who: the service name or app id that made the change. */
   origin: string;
   kind: ChangeKind;
+  /** Pinned: history compaction never removes it. */
+  pinned?: boolean;
   /** The change set this one undid, if it was an undo. */
   undoes?: number | null;
 };

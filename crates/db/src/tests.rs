@@ -1263,9 +1263,13 @@ fn creators_are_recorded_and_backfilled_by_the_migration() {
     let old = {
         let mut s = Store::open(&path).unwrap();
         let d = s.create("Note", &obj(json!({"a": 1})), "org.x.old").unwrap();
-        // Make it look like a version 3 database, from before creators.
+        // Make it look like a version 3 database, from before creators (and before
+        // version 5's pins and version blobs).
         s.connection()
-            .execute_batch("DROP INDEX documents_creator; ALTER TABLE documents DROP COLUMN creator;")
+            .execute_batch(
+                "DROP INDEX documents_creator; ALTER TABLE documents DROP COLUMN creator;
+                 DROP TABLE version_blobs; ALTER TABLE doc_versions DROP COLUMN pinned;",
+            )
             .unwrap();
         s.connection().pragma_update(None, "user_version", 3).unwrap();
         d.id
@@ -1306,4 +1310,207 @@ fn guarded_writes_roll_back_when_the_result_is_out_of_reach() {
     assert!(!s.matches(&d.id, &family).unwrap());
     assert!(s.matches(&d.id, &obj(json!({"year": 2024}))).unwrap());
     assert!(matches!(s.matches("nope", &family), Err(Error::NotFound(_))));
+}
+
+// --- History compaction ------------------------------------------------------
+
+/// The time compaction runs at in these tests: noon UTC on day 20601 of the epoch
+/// (2026-05-28, a Thursday). Days with `d % 7 == 4` are Mondays.
+const NOW: i64 = 20601 * retention::DAY_MS + 12 * HOUR;
+const HOUR: i64 = 60 * 60 * 1000;
+
+/// Noon (plus `hour`) on epoch day `day`.
+fn day(day: i64, hour: i64) -> i64 {
+    day * retention::DAY_MS + hour * HOUR
+}
+
+/// Date the newest change set `at`, and return it.
+fn dated(s: &Store, at: i64) -> i64 {
+    let set = s.newest_change_set().unwrap();
+    s.conn.execute("UPDATE change_sets SET at = ?2 WHERE id = ?1", rusqlite::params![set, at]).unwrap();
+    set
+}
+
+/// Patch document `id` with `patch`, dated `at`; returns the change set.
+fn edit_at(s: &mut Store, id: &str, patch: Value, at: i64) -> i64 {
+    s.update(id, &obj(patch), "t").unwrap();
+    dated(s, at)
+}
+
+fn kept(s: &Store, id: &str) -> Vec<i64> {
+    s.history(id).unwrap().iter().map(|v| v.change_set).collect()
+}
+
+#[test]
+fn compaction_keeps_recent_history_then_the_last_of_each_day_then_of_each_week() {
+    let mut s = Store::open_in_memory().unwrap();
+    let id = s.create("Note", &obj(json!({"n": 0})), "t").unwrap().id;
+    let created = dated(&s, day(20000, 0));
+    // Over a year old, so weekly. Days 20227 to 20233 are one week, 20234 (a Monday)
+    // to 20240 the next.
+    let a = edit_at(&mut s, &id, json!({"n": 1}), day(20228, 0));
+    let b = edit_at(&mut s, &id, json!({"n": 2}), day(20230, 0));
+    let c = edit_at(&mut s, &id, json!({"n": 3}), day(20234, 0));
+    let d = edit_at(&mut s, &id, json!({"n": 4}), day(20235, 0));
+    // A hundred days old, so daily; f is pinned.
+    let e = edit_at(&mut s, &id, json!({"n": 5}), day(20500, 1));
+    let f = edit_at(&mut s, &id, json!({"n": 6}), day(20500, 2));
+    let g = edit_at(&mut s, &id, json!({"n": 7}), day(20500, 3));
+    let h = edit_at(&mut s, &id, json!({"n": 8}), day(20501, 0));
+    s.pin(&id, f, true).unwrap();
+    // Recent: all kept.
+    let i = edit_at(&mut s, &id, json!({"n": 9}), day(20590, 1));
+    let j = edit_at(&mut s, &id, json!({"n": 10}), day(20590, 2));
+    assert!(matches!(s.pin(&id, 999, true), Err(Error::NotFound(_))));
+
+    let (versions, _) = s.thin_history(NOW, &Retention::default()).unwrap();
+    assert_eq!(versions, 3);
+    assert_eq!(kept(&s, &id), vec![created, b, d, f, g, h, i, j]);
+    assert!(!kept(&s, &id).iter().any(|v| [a, c, e].contains(v)));
+    assert!(s.history(&id).unwrap().iter().find(|v| v.change_set == f).unwrap().pinned);
+    // Kept versions still read back, and diffs span the gaps.
+    assert_eq!(s.at(&id, d).unwrap()["n"], 4);
+    assert_eq!(s.diff(&id, b, d).unwrap().len(), 1);
+    // A second pass finds nothing more.
+    assert_eq!(s.thin_history(NOW, &Retention::default()).unwrap().0, 0);
+}
+
+#[test]
+fn compaction_drops_change_sets_once_nothing_needs_them() {
+    let mut s = Store::open_in_memory().unwrap();
+    let id = s.create("Note", &obj(json!({"n": 0})), "t").unwrap().id;
+    let gone = edit_at(&mut s, &id, json!({"n": 1}), day(20500, 1));
+    edit_at(&mut s, &id, json!({"n": 2}), day(20500, 2));
+    // An undone change set stays while the undo points at it.
+    let undone = edit_at(&mut s, &id, json!({"n": 3}), day(20501, 1));
+    s.undo(undone, "t").unwrap();
+    dated(&s, day(20501, 2));
+    let r = Retention::default();
+    // The thinned change set's update is still logged, unfolded, so it stays.
+    assert_eq!(s.thin_history(NOW, &r).unwrap(), (2, 0));
+    // Fold the log (every COMPACT_AFTER updates), then it can go.
+    for n in 0..COMPACT_AFTER {
+        s.update(&id, &obj(json!({"m": n})), "t").unwrap();
+    }
+    let (_, change_sets) = s.thin_history(NOW, &r).unwrap();
+    assert_eq!(change_sets, 1);
+    assert!(matches!(s.change_set(gone), Err(Error::NotFound(_))));
+    assert!(s.change_set(undone).is_ok());
+}
+
+#[test]
+fn compaction_leaves_history_dated_while_the_clock_was_unset() {
+    let mut s = Store::open_in_memory().unwrap();
+    let id = s.create("Note", &obj(json!({"n": 0})), "t").unwrap().id;
+    // 1970: written before the network set the clock.
+    let a = edit_at(&mut s, &id, json!({"n": 1}), 1_000);
+    let b = edit_at(&mut s, &id, json!({"n": 2}), 2_000);
+    s.thin_history(NOW, &Retention::default()).unwrap();
+    assert!(kept(&s, &id).contains(&a) && kept(&s, &id).contains(&b));
+}
+
+#[test]
+fn compaction_deletes_only_the_blobs_nothing_needs() {
+    let dir = TempDir::new("sweep");
+    let blobs = Blobs::new(dir.0.join("blobs")).unwrap();
+    let mut s = Store::open_in_memory().unwrap();
+    let put = |s: &mut Store, bytes: &[u8], created: i64| {
+        let (hash, size) = blobs.write(&mut &bytes[..], blobs::MAX_BLOB_BYTES).unwrap();
+        s.add_blob(&hash, size).unwrap();
+        s.conn
+            .execute("UPDATE blobs SET created = ?2 WHERE hash = ?1", rusqlite::params![hash, created])
+            .unwrap();
+        hash
+    };
+    let old = day(20100, 0);
+    let live = put(&mut s, b"live", old);
+    let thinned = put(&mut s, b"thinned", old);
+    let in_kept = put(&mut s, b"in a kept version", old);
+    let deleted = put(&mut s, b"of a deleted doc", old);
+    let unused = put(&mut s, b"never used", old);
+    let fresh = put(&mut s, b"just uploaded", NOW - HOUR);
+    let unset = put(&mut s, b"stored in 1970", 1_000);
+    let blob = |h: &str| json!({"$blob": h});
+
+    s.create("Note", &obj(json!({"f": blob(&live)})), "t").unwrap();
+    // Used only by a version thinned out: later that day the field changed.
+    let b = s.create("Note", &obj(json!({})), "t").unwrap().id;
+    dated(&s, day(20100, 0));
+    edit_at(&mut s, &b, json!({"f": blob(&thinned)}), day(20500, 1));
+    edit_at(&mut s, &b, json!({"f": null}), day(20500, 2));
+    // Used by the last version of a day, which is kept.
+    let c = s.create("Note", &obj(json!({})), "t").unwrap().id;
+    dated(&s, day(20100, 0));
+    edit_at(&mut s, &c, json!({"f": blob(&in_kept)}), day(20500, 1));
+    edit_at(&mut s, &c, json!({"f": null}), day(20501, 1));
+    // A deleted document keeps its blobs, so undoing the delete works.
+    let d = s.create("Note", &obj(json!({"f": blob(&deleted)})), "t").unwrap().id;
+    dated(&s, day(20100, 0));
+    s.delete(&d, "t").unwrap();
+    dated(&s, day(20100, 1));
+    // A file the database never recorded (a crash before add_blob), long ago,
+    // and one written just now.
+    let (stray, stray_size) = blobs.write(&mut &b"stray"[..], blobs::MAX_BLOB_BYTES).unwrap();
+    let long_ago =
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis((NOW - 2 * retention::DAY_MS) as u64);
+    std::fs::File::open(blobs.path(&stray).unwrap()).unwrap().set_modified(long_ago).unwrap();
+    let (uploading, _) = blobs.write(&mut &b"being uploaded"[..], blobs::MAX_BLOB_BYTES).unwrap();
+
+    let done = compact_history(&mut s, &blobs, NOW, &Retention::default()).unwrap();
+    assert_eq!(done.blobs, 3, "{done:?}");
+    assert_eq!(done.blob_bytes, (b"thinned".len() + b"never used".len()) as u64 + stray_size);
+    for h in [&thinned, &unused, &stray] {
+        assert!(matches!(blobs.open(h), Err(Error::NotFound(_))), "{h} should be gone");
+        assert!(matches!(s.blob_info(h), Err(Error::NotFound(_))));
+    }
+    for h in [&live, &in_kept, &deleted, &fresh, &unset] {
+        assert!(blobs.open(h).is_ok() && s.blob_info(h).is_ok(), "{h} should stay");
+    }
+    assert!(blobs.open(&uploading).is_ok(), "a fresh file the database doesn't know yet stays");
+    // Undoing the delete still finds its blob.
+    let delete = s.history(&d).unwrap().last().unwrap().change_set;
+    s.undo(delete, "t").unwrap();
+    assert_eq!(s.get(&d).unwrap().data["f"], blob(&deleted));
+    assert_eq!(compact_history(&mut s, &blobs, NOW, &Retention::default()).unwrap().blobs, 0);
+}
+
+#[test]
+fn upgrading_records_the_blobs_of_existing_versions() {
+    let dir = TempDir::new("version-blobs");
+    let path = dir.0.join("test.db");
+    let blobs = Blobs::new(dir.0.join("blobs")).unwrap();
+    let rows = |s: &Store| -> Vec<(i64, i64, String)> {
+        s.conn
+            .prepare("SELECT doc, change_set, hash FROM version_blobs ORDER BY doc, change_set, hash")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let before = {
+        let mut s = Store::open(&path).unwrap();
+        let mut hashes = Vec::new();
+        for bytes in [&b"one"[..], b"two"] {
+            let (h, n) = blobs.write(&mut &bytes[..], blobs::MAX_BLOB_BYTES).unwrap();
+            s.add_blob(&h, n).unwrap();
+            hashes.push(h);
+        }
+        let id = s.create("Note", &obj(json!({"a": {"$blob": hashes[0]}})), "t").unwrap().id;
+        s.update(&id, &obj(json!({"b": {"$blob": hashes[1]}})), "t").unwrap();
+        s.update(&id, &obj(json!({"a": null})), "t").unwrap();
+        s.delete(&id, "t").unwrap();
+        s.create("Note", &obj(json!({"none": 1})), "t").unwrap();
+        let rows = rows(&s);
+        assert_eq!(rows.len(), 1 + 2 + 1 + 1, "create, update, update, delete");
+        // Back to schema version 4, as a database from before compaction.
+        s.conn
+            .execute_batch(
+                "DROP TABLE version_blobs; ALTER TABLE doc_versions DROP COLUMN pinned; PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        rows
+    };
+    let s = Store::open(&path).unwrap();
+    assert_eq!(rows(&s), before);
 }

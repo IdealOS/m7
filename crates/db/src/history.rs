@@ -31,6 +31,8 @@ pub struct Version {
     pub kind: Kind,
     /// The change set this one undid, if it was an undo.
     pub undoes: Option<i64>,
+    /// Whether it's pinned, so history compaction keeps it.
+    pub pinned: bool,
 }
 
 /// A change set: one write, possibly to several documents.
@@ -60,15 +62,16 @@ impl Store {
     pub fn history(&self, id: &str) -> Result<Vec<Version>> {
         let row = self.row_of(id)?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT v.change_set, c.at, c.origin, v.kind, c.undoes
+            "SELECT v.change_set, c.at, c.origin, v.kind, c.undoes, v.pinned
              FROM doc_versions v JOIN change_sets c ON c.id = v.change_set
              WHERE v.doc = ?1 ORDER BY v.change_set",
         )?;
-        let rows = stmt
-            .query_map([row], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?, r.get(4)?)))?;
+        let rows = stmt.query_map([row], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?, r.get(4)?, r.get(5)?))
+        })?;
         rows.map(|r| {
-            let (change_set, at, origin, kind, undoes) = r?;
-            Ok(Version { change_set, at, origin, kind: Kind::parse(&kind)?, undoes })
+            let (change_set, at, origin, kind, undoes, pinned) = r?;
+            Ok(Version { change_set, at, origin, kind: Kind::parse(&kind)?, undoes, pinned })
         })
         .collect()
     }

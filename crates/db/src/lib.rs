@@ -20,6 +20,7 @@ pub mod live;
 mod loro_json;
 pub mod query;
 mod refs;
+pub mod retention;
 pub mod schemas;
 pub mod sha256;
 pub mod snapshot;
@@ -29,6 +30,7 @@ pub use history::FieldChange;
 pub use history::{ChangeSet, Version};
 pub use live::Watches;
 pub use refs::{Backlink, Link};
+pub use retention::{Compacted, Retention, compact_history};
 pub use snapshot::{SnapshotInfo, Snapshots};
 
 use std::path::Path;
@@ -127,6 +129,18 @@ const MIGRATIONS: &[&str] = &[
         SELECT cs.origin FROM doc_versions v JOIN change_sets cs ON cs.id = v.change_set
         WHERE v.doc = documents.doc AND v.kind = 'create');
     CREATE INDEX documents_creator ON documents (creator, doc);",
+    // 5: history compaction (see `retention`). Pinned versions are never thinned
+    // out, and each version records the blobs its data refers to, so a blob is
+    // deleted only once no kept version needs it. Thinning a version drops its rows.
+    "ALTER TABLE doc_versions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE version_blobs (
+        doc        INTEGER NOT NULL,
+        change_set INTEGER NOT NULL,
+        hash       TEXT NOT NULL REFERENCES blobs (hash),
+        PRIMARY KEY (doc, change_set, hash),
+        FOREIGN KEY (doc, change_set) REFERENCES doc_versions (doc, change_set) ON DELETE CASCADE
+    ) STRICT;
+    CREATE INDEX version_blobs_hash ON version_blobs (hash);",
 ];
 
 const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
@@ -244,6 +258,7 @@ impl Store {
         let set = change_set(&tx, now, origin, None)?;
         record_version(&tx, row, set, Kind::Create, &Frontiers::default(), &doc.oplog_frontiers())?;
         write_views(&tx, row, doc_type, &json, false)?;
+        retention::record_blobs(&tx, row, set)?;
         check_guard(&tx, row, doc_type, self.guard.as_ref())?;
         tx.commit()?;
         Ok(Doc { id, doc_type: doc_type.into(), created: now, updated: now, data: loro_json::read(&doc) })
@@ -538,6 +553,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     if (1..3).contains(&version) {
         refs::backfill(&tx)?;
     }
+    if (3..5).contains(&version) {
+        retention::backfill(&tx, read_peer(&tx)?)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -650,7 +668,8 @@ fn log_change(
         compact(tx, row, doc)?;
     }
     record_version(tx, row, set, Kind::Update, &before.frontiers, &doc.oplog_frontiers())?;
-    write_views(tx, row, doc_type, &json, true)
+    write_views(tx, row, doc_type, &json, true)?;
+    retention::record_blobs(tx, row, set)
 }
 
 /// Take a document out of queries and search, keeping its state.
@@ -658,8 +677,10 @@ fn delete_row(tx: &Transaction, row: i64, set: i64, at: i64, version: &Frontiers
     tx.execute("UPDATE documents SET deleted = ?2, updated = ?2 WHERE doc = ?1", params![row, at])?;
     tx.execute("DELETE FROM doc_json WHERE doc = ?1", [row])?;
     tx.execute("DELETE FROM fts WHERE rowid = ?1", [row])?;
-    refs::clear(tx, row)?;
-    record_version(tx, row, set, Kind::Delete, version, version)
+    // The deleted state still refers to its blobs, for undo.
+    record_version(tx, row, set, Kind::Delete, version, version)?;
+    retention::record_blobs(tx, row, set)?;
+    refs::clear(tx, row)
 }
 
 /// Bring a deleted document back into queries and search.
@@ -668,7 +689,8 @@ fn restore_row(tx: &Transaction, row: i64, doc_type: &str, doc: &LoroDoc, set: i
     tx.execute("UPDATE documents SET deleted = NULL, updated = ?2 WHERE doc = ?1", params![row, at])?;
     let version = doc.oplog_frontiers();
     record_version(tx, row, set, Kind::Restore, &version, &version)?;
-    write_views(tx, row, doc_type, &json, false)
+    write_views(tx, row, doc_type, &json, false)?;
+    retention::record_blobs(tx, row, set)
 }
 
 /// The document's JSON copy, refusing ones too big to store.

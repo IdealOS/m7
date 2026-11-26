@@ -7,8 +7,8 @@
 //! place read-only, so a blob is never seen half-written and never changes.
 //!
 //! The `blobs` table records which blobs exist; `blob_refs` (kept by every write)
-//! records which live documents use them. Deleting unused blobs waits for history
-//! compaction (M8): a blob an old version refers to must stay for undo.
+//! records which live documents use them, and `version_blobs` which versions do.
+//! History compaction ([`crate::retention`]) deletes the blobs neither needs.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -109,6 +109,47 @@ impl Blobs {
         std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o444)).map_err(|e| io(tmp, e))?;
         std::fs::rename(tmp, &path).map_err(|e| io(&path, e))?;
         Ok((hash, size))
+    }
+
+    /// Delete blob `hash`'s file, if it's there. Only history compaction does this,
+    /// once the database has forgotten the blob.
+    pub fn remove(&self, hash: &str) -> Result<()> {
+        let path = self.path(hash)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(&path, e)),
+        }
+        // An emptied `ab/` directory goes too; one still holding blobs stays.
+        let _ = std::fs::remove_dir(path.parent().expect("blob paths have a directory"));
+        Ok(())
+    }
+
+    /// Every blob file: its hash, when it was last modified, and its size.
+    /// Anything that isn't named like a blob is left out.
+    pub fn files(&self) -> Result<Vec<(String, std::time::SystemTime, u64)>> {
+        let mut out = Vec::new();
+        for dir in std::fs::read_dir(&self.dir).map_err(|e| io(&self.dir, e))? {
+            let dir = dir.map_err(|e| io(&self.dir, e))?;
+            let prefix = dir.file_name().to_string_lossy().into_owned();
+            if prefix.len() != 2 || !dir.file_type().map_err(|e| io(&dir.path(), e))?.is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(dir.path()).map_err(|e| io(&dir.path(), e))? {
+                let file = file.map_err(|e| io(&dir.path(), e))?;
+                let hash = format!("{prefix}{}", file.file_name().to_string_lossy());
+                if !valid_hash(&hash) {
+                    continue;
+                }
+                let meta = file.metadata().map_err(|e| io(&file.path(), e))?;
+                if meta.is_file() {
+                    let modified = meta.modified().map_err(|e| io(&file.path(), e))?;
+                    out.push((hash, modified, meta.len()));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// Open blob `hash` for reading.

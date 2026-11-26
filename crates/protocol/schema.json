@@ -454,6 +454,40 @@
       ],
       "type": "object"
     },
+    "CompactResult": {
+      "description": "Result of `compact`: what history compaction removed. Everything from the last\n30 days stays; older, the last version of each day, and after a year, of each\nweek. Then blobs nothing needs any more are deleted.",
+      "properties": {
+        "blob_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blobs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "change_sets": {
+          "description": "Change sets left with no versions, removed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "versions": {
+          "description": "Document versions removed from history.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "versions",
+        "change_sets",
+        "blobs",
+        "blob_bytes"
+      ],
+      "type": "object"
+    },
     "ConnectParams": {
       "description": "Params of `connect`: join `ssid`, with `password` if it's secure and not\nknown yet.",
       "properties": {
@@ -1395,6 +1429,27 @@
         }
       ],
       "type": "array"
+    },
+    "PinParams": {
+      "description": "Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version\nafter change set `change_set`, so history compaction keeps it.",
+      "properties": {
+        "change_set": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pinned": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "change_set"
+      ],
+      "type": "object"
     },
     "PromptParams": {
       "description": "Params of `prompt`: app `app` (called `name`) asks for these things, each in\nwords (see `describe`), for `reason`.",
@@ -2338,6 +2393,11 @@
         "origin": {
           "description": "Who: the service name or app id that made the change.",
           "type": "string"
+        },
+        "pinned": {
+          "default": false,
+          "description": "Pinned: history compaction never removes it.",
+          "type": "boolean"
         },
         "undoes": {
           "description": "The change set this one undid, if it was an undo.",
