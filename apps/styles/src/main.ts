@@ -123,7 +123,7 @@ await openWindow({ title: "Style Editor", width: 900, height: 600, style }, () =
     label({ text: "Preview", size: 16, weight: "bold" }),
     label({ text: "Body text, and a muted line below it." }),
     label({ text: "Secondary text", color: "$muted" }),
-    hstack({ gap: 8 }, button({ label: "Button" }), button({ label: "Accent", color: "$accent", text_color: "$accent-text" })),
+    hstack({ gap: 8 }, button({ label: "Button" }), button({ label: "Primary", class: "primary" })),
     checkbox({ label: "Checkbox", checked: on, onChange: setOn }),
     toggle({ label: "Toggle", checked: on, onChange: setOn }),
     slider({ value: level, min: 0, max: 100, w: 200, onChange: setLevel }),

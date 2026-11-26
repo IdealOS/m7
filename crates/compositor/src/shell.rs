@@ -88,11 +88,8 @@ pub fn install(scene: &mut Scene, w: f32, workspace: u32) {
 pub fn set_workspace(scene: &mut Scene, n: u32) {
     for i in 0..WORKSPACES {
         let current = i + 1 == n;
-        let p = if current {
-            json!({"color": "$accent", "text_color": "$accent-text"})
-        } else {
-            json!({"color": "$control", "text_color": "$text"})
-        };
+        // The current one is a primary button: the accent, with hover and pressed shades.
+        let p = json!({"class": if current { "primary" } else { "" }});
         scene.apply(SceneOp::Set { id: FIRST_WORKSPACE + i as NodeId, props: props(p) });
     }
 }
@@ -154,8 +151,8 @@ mod tests {
         assert_eq!(press(&scene, 600.0, 15.0), None);
         assert_eq!(press(&scene, 20.0, 40.0), None, "below the bar");
         set_workspace(&mut scene, 3);
-        assert_eq!(scene.node(FIRST_WORKSPACE + 2).unwrap().props["color"], "$accent");
-        assert_eq!(scene.node(FIRST_WORKSPACE).unwrap().props["color"], "$control");
+        assert_eq!(scene.node(FIRST_WORKSPACE + 2).unwrap().props["class"], "primary");
+        assert_eq!(scene.node(FIRST_WORKSPACE).unwrap().props["class"], "");
         set_clock(&mut scene, "09:41");
         assert_eq!(scene.node(CLOCK).unwrap().props["text"], "09:41");
         let t = clock_text(std::time::SystemTime::now());

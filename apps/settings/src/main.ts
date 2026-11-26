@@ -487,8 +487,7 @@ await openWindow({ title: "Settings", width: 760, height: 520 }, () => {
       button({
         label: s,
         w: "fill",
-        color: () => (section() === s ? "$accent" : "$control"),
-        text_color: () => (section() === s ? "$accent-text" : "$text"),
+        class: () => (section() === s ? "primary" : ""),
         onClick: () => setSection(s),
       }),
     ),

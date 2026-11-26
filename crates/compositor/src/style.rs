@@ -742,6 +742,28 @@ mod tests {
         assert_eq!(light.root(None).color, light.vars["text"]);
     }
 
+    /// A primary button is the accent, a shade deeper hovered and deeper still
+    /// pressed, in both themes, over the plain button rules.
+    #[test]
+    fn primary_buttons_shade_the_accent_when_hovered_and_pressed() {
+        let sheet = Arc::new(Sheet::system());
+        for dark in [false, true] {
+            let s = Scope::system(sheet.clone(), dark);
+            let bg = |p: Value| style_of(&s, NodeKind::Button, p).background;
+            assert_eq!(bg(json!({"class": "primary"})), Some(s.vars["accent"]));
+            assert_eq!(bg(json!({"class": "primary", "_hover": true})), Some(s.vars["accent-hover"]));
+            assert_eq!(
+                bg(json!({"class": "primary", "_hover": true, "pressed": true})),
+                Some(s.vars["accent-pressed"])
+            );
+            assert_eq!(
+                style_of(&s, NodeKind::Button, json!({"class": "primary"})).color,
+                s.vars["accent-text"]
+            );
+            assert_ne!(s.vars["accent-hover"], s.vars["accent"], "dark: {dark}");
+        }
+    }
+
     #[test]
     fn specificity_then_origin_then_order_decide() {
         let system = Arc::new(

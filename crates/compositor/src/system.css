@@ -12,6 +12,8 @@
   --muted: #6b7280;
   --accent: #3b82f6;
   --accent-text: #ffffff;
+  --accent-hover: #2563eb;
+  --accent-pressed: #1d4ed8;
   --control: #eef1f6;
   --control-hover: #e4e8ef;
   --control-pressed: #c9d2df;
@@ -48,6 +50,12 @@ button, select, menu {
 }
 button:hover, select:hover, menu:hover { background: var(--control-hover); }
 button:pressed, select:pressed, menu:pressed { background: var(--control-pressed); }
+
+/* The main action (`class: "primary"`): the accent, a shade deeper when hovered
+   and pressed. */
+.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.primary:pressed { background: var(--accent-pressed); border-color: var(--accent-pressed); }
 
 checkbox { background: var(--surface); border-color: var(--control-border); }
 /* A checked box and a toggle that's on show the accent, hovered or not. */
@@ -99,6 +107,8 @@ terminal {
     --muted: #94a3b8;
     --accent: #60a5fa;
     --accent-text: #0b1220;
+    --accent-hover: #93c5fd;
+    --accent-pressed: #3b82f6;
     --control: #273449;
     --control-hover: #2f3e57;
     --control-pressed: #3b4b66;

@@ -261,6 +261,9 @@ own, sent with `open_window`. Layout stays in props.
 .code  { font-family: "DejaVu Sans Mono", monospace; font-size: 13px; }
 ```
 
+- **Primary buttons**: `class: "primary"` on a button gives it the accent,
+  shaded by `--accent-hover` and `--accent-pressed` when hovered and pressed.
+  The system sheet defines all three; an app can override any of them.
 - **Selectors**: a widget kind (`button`), a class (`.primary`) or both
   (`button.primary`), each with at most one state: `:hover`, `:pressed`,
   `:focus`, `:disabled`, `:checked`. `:root` holds variables and the starting

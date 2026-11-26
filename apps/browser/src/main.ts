@@ -181,8 +181,7 @@ await openWindow({ title: "Documents", width: 980, height: 620 }, () => {
         button({
           label: () => `${entry()[0]}  ${entry()[1]}`,
           w: "fill",
-          color: () => (type() === entry()[0] ? "$accent" : "$control"),
-          text_color: () => (type() === entry()[0] ? "$accent-text" : "$text"),
+          class: () => (type() === entry()[0] ? "primary" : ""),
           onClick: () => {
             setType(entry()[0]);
             setFilters([]);
