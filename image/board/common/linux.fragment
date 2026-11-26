@@ -17,6 +17,13 @@ CONFIG_SECURITY=y
 CONFIG_SECURITY_LANDLOCK=y
 CONFIG_LSM="landlock"
 
+# Backups (M8): USB drives holding exFAT, mounted by backupd
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_USB_STORAGE=y
+CONFIG_EXFAT_FS=y
+CONFIG_NLS_UTF8=y
+
 # Read-only root with a writable /opt/idealos overlay in dev images
 CONFIG_EXT4_FS=y
 CONFIG_OVERLAY_FS=y

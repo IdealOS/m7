@@ -727,6 +727,7 @@ impl Worker {
                     blobs,
                     blob_bytes,
                     snapshot_bytes,
+                    device: format!("{:016x}", self.store.peer()),
                 }))
             }
             method::SNAPSHOT => reply(self.snapshots.take(&self.store).map(snapshot_info)),
@@ -737,7 +738,7 @@ impl Worker {
             ),
             _ => {
                 let p: RestoreParams = parse(params)?;
-                let saved = self.snapshots.restore(&mut self.store, &p.name);
+                let saved = self.snapshots.restore_as(&mut self.store, &p.name, p.adopt);
                 if saved.is_ok() {
                     log::warn!("dbd: restored snapshot {}", p.name);
                 }

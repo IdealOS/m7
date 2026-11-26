@@ -9,6 +9,7 @@
     "autostart": false,
     "permissions": [
       { "capability": "service:net" },
+      { "capability": "service:backup" },
       { "capability": "service:session" },
       { "capability": "permissions" },
       { "capability": "storage" },

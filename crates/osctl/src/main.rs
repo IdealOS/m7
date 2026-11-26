@@ -43,6 +43,11 @@
 //! osctl [--socket PATH] perm revoke ID...            remove grants by id
 //! osctl [--socket PATH] perm revoke --app APP        remove every grant of an app
 //! osctl [--socket PATH] perm audit [--limit N]       the audit log, newest first
+//! osctl [--socket PATH] backup status                 drives, and any backup or restore in progress
+//! osctl [--socket PATH] backup setup DRIVE            make a drive (sda1) a backup drive
+//! osctl [--socket PATH] backup now DRIVE              back up to it now
+//! osctl [--socket PATH] backup list DRIVE             the backups on it, newest first
+//! osctl [--socket PATH] backup restore DRIVE NAME     restore one (saving the current state as a snapshot)
 //! ```
 //!
 //! Without `--socket`, osctl uses the bus connection session gave it, if it was
@@ -69,7 +74,8 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
 | watch JSON [--count N] | diff ID FROM TO | link ID FIELD TARGET | links ID | schemas | snapshot | snapshots \
 | restore NAME | pin ID CHANGE_SET | unpin ID CHANGE_SET | compact | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
        osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
-       osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])";
+       osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])
+       osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -105,7 +111,7 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if g == "bus" || g == "db" || g == "app" || g == "perm" => g,
+        Some(g) if ["bus", "db", "app", "perm", "backup"].contains(&g.as_str()) => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
@@ -183,6 +189,10 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     }
     if group == "perm" {
         return Ok((socket, perm_command(&sub, &positional, &flags, arity, allowed, json)?));
+    }
+    if group == "backup" {
+        allowed(&[])?;
+        return Ok((socket, backup_command(&sub, &positional, arity)?));
     }
     if group == "db" && sub == "watch" {
         arity(1, 1)?;
@@ -269,6 +279,39 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         other => return Err(format!("unknown bus subcommand {other}")),
     };
     Ok((socket, command))
+}
+
+/// `osctl backup ...` is shorthand for a request to backupd. Backing up and
+/// restoring wait up to an hour: the first backup copies every blob.
+fn backup_command(
+    sub: &str,
+    positional: &[String],
+    arity: impl Fn(usize, usize) -> Result<(), String>,
+) -> Result<Command, String> {
+    use protocol::backup::method;
+    use serde_json::json;
+    let long = Some(Duration::from_secs(60 * 60));
+    let (method, params, timeout) = match sub {
+        "status" => {
+            arity(0, 0)?;
+            (method::STATUS, json!({}), None)
+        }
+        "setup" | "now" | "list" => {
+            arity(1, 1)?;
+            let m = match sub {
+                "setup" => method::SETUP,
+                "now" => method::BACK_UP,
+                _ => method::BACKUPS,
+            };
+            (m, json!({"drive": positional[0]}), if sub == "now" { long } else { None })
+        }
+        "restore" => {
+            arity(2, 2)?;
+            (method::RESTORE, json!({"drive": positional[0], "name": positional[1]}), long)
+        }
+        other => return Err(format!("unknown backup subcommand {other}")),
+    };
+    Ok(Command::Call { to: protocol::backup::SERVICE.into(), method: method.into(), params, timeout })
 }
 
 fn change_set(text: &str) -> Result<i64, String> {
@@ -589,6 +632,29 @@ mod tests {
             "bus stream db",
             "db get a --type x",
         ] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_backup_commands() {
+        let backup = |method: &str, params: serde_json::Value, timeout: Option<Duration>| Command::Call {
+            to: "backup".into(),
+            method: method.into(),
+            params,
+            timeout,
+        };
+        let hour = Some(Duration::from_secs(3600));
+        assert_eq!(parse_str("backup status").unwrap().1, backup("status", json!({}), None));
+        assert_eq!(
+            parse_str("backup now sda1").unwrap().1,
+            backup("back_up", json!({"drive": "sda1"}), hour)
+        );
+        assert_eq!(
+            parse_str("backup restore sda1 0123456789abcdef/backup-1-2.db").unwrap().1,
+            backup("restore", json!({"drive": "sda1", "name": "0123456789abcdef/backup-1-2.db"}), hour)
+        );
+        for bad in ["backup now", "backup list a b", "backup eject sda1", "backup status --limit 2"] {
             assert!(parse_str(bad).is_err(), "{bad}");
         }
     }

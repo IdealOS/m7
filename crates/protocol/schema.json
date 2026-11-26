@@ -216,6 +216,39 @@
       ],
       "type": "object"
     },
+    "BackedUp": {
+      "description": "Result of `back_up`.",
+      "properties": {
+        "backup": {
+          "$ref": "#/$defs/BackupInfo"
+        },
+        "blobs_copied": {
+          "description": "Blobs copied this time; the rest were on the drive already.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes_copied": {
+          "description": "Bytes copied this time, the database included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pruned": {
+          "description": "Old backups deleted to keep `KEEP`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "backup",
+        "blobs_copied",
+        "bytes_copied",
+        "pruned"
+      ],
+      "type": "object"
+    },
     "BacklinkInfo": {
       "description": "A link into a document from another live document.",
       "properties": {
@@ -235,6 +268,96 @@
         "id",
         "type",
         "path"
+      ],
+      "type": "object"
+    },
+    "BackupInfo": {
+      "description": "One backup on a drive.",
+      "properties": {
+        "bytes": {
+          "description": "The database copy's size; its blobs are shared and not counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "change_set": {
+          "description": "The newest change set it holds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "device": {
+          "description": "The device it's of (its database's peer id, in hex).",
+          "type": "string"
+        },
+        "name": {
+          "description": "How `restore` names it: `<device>/backup-<ms>-<change set>.db`.",
+          "type": "string"
+        },
+        "taken": {
+          "description": "When it was taken, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "this_device": {
+          "description": "Whether that's this device.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "device",
+        "this_device",
+        "taken",
+        "change_set",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "BackupStatus": {
+      "description": "Everything backupd knows: the drives, and what it's doing.",
+      "properties": {
+        "busy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Busy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What's in progress, if anything."
+        },
+        "drives": {
+          "items": {
+            "$ref": "#/$defs/Drive"
+          },
+          "type": "array"
+        },
+        "error": {
+          "description": "Why the last backup or restore failed, until the next one succeeds.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "drives"
+      ],
+      "type": "object"
+    },
+    "BackupsResult": {
+      "description": "Result of `backups`: every backup on the drive, newest first.",
+      "properties": {
+        "backups": {
+          "items": {
+            "$ref": "#/$defs/BackupInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "backups"
       ],
       "type": "object"
     },
@@ -315,6 +438,35 @@
       "required": [
         "code",
         "message"
+      ],
+      "type": "object"
+    },
+    "Busy": {
+      "description": "A backup or restore in progress.",
+      "properties": {
+        "doing": {
+          "$ref": "#/$defs/Doing"
+        },
+        "done": {
+          "description": "Bytes copied so far, of `total`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "drive": {
+          "type": "string"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "drive",
+        "doing",
+        "done",
+        "total"
       ],
       "type": "object"
     },
@@ -668,6 +820,68 @@
       },
       "required": [
         "docs"
+      ],
+      "type": "object"
+    },
+    "Doing": {
+      "enum": [
+        "backing_up",
+        "restoring"
+      ],
+      "type": "string"
+    },
+    "Drive": {
+      "description": "A drive backupd can use: a plugged-in exFAT drive.",
+      "properties": {
+        "bytes": {
+          "description": "Its size, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "free": {
+          "description": "Free space, in bytes, when last looked at.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "How methods name it: its block device (`sda1`).",
+          "type": "string"
+        },
+        "last": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BackupInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This device's newest backup on it."
+        },
+        "set_up": {
+          "description": "Whether it's a backup drive (it holds an `idealos-backup` folder).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "bytes",
+        "free",
+        "set_up"
+      ],
+      "type": "object"
+    },
+    "DriveParams": {
+      "description": "Params naming a drive.",
+      "properties": {
+        "drive": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "drive"
       ],
       "type": "object"
     },
@@ -1610,9 +1824,29 @@
       ],
       "type": "object"
     },
+    "RestoreBackupParams": {
+      "description": "Params of `restore`: replace the database with backup `name` from `drive`,\nbringing its blobs back too. The state replaced is kept as a snapshot, so the\nrestore can be undone. A backup of another device makes this device that one.",
+      "properties": {
+        "drive": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "drive",
+        "name"
+      ],
+      "type": "object"
+    },
     "RestoreParams": {
       "description": "Params of `restore`: replace the database with snapshot `name`.",
       "properties": {
+        "adopt": {
+          "description": "Take a snapshot of another device's database too, and become that device.\nbackupd sets it to restore a backup onto a new device.",
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
         }
@@ -2246,6 +2480,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "device": {
+          "default": "",
+          "description": "This device, as backups name it: its database's peer id, in hex.",
+          "type": "string"
+        },
         "docs": {
           "format": "uint64",
           "minimum": 0,
@@ -2655,6 +2894,10 @@
   "description": "Bus frames are a 4-byte big-endian length followed by one UTF-8 JSON `Message`.",
   "title": "idealos wire protocol",
   "x-constants": {
+    "BACKUP_SERVICE": {
+      "description": "The name backupd claims.",
+      "value": "backup"
+    },
     "BROKER": {
       "description": "The broker's own name: `hello`, `claim`, `release` and `list` go to it, and `adopt`, with which session hands it connections for services and apps.",
       "value": "bus"

@@ -398,6 +398,9 @@ pub struct StatsResult {
     pub blob_bytes: u64,
     /// The snapshots directory.
     pub snapshot_bytes: u64,
+    /// This device, as backups name it: its database's peer id, in hex.
+    #[serde(default)]
+    pub device: String,
 }
 
 /// A snapshot of the database.
@@ -425,6 +428,10 @@ pub struct SnapshotsResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestoreParams {
     pub name: String,
+    /// Take a snapshot of another device's database too, and become that device.
+    /// backupd sets it to restore a backup onto a new device.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopt: bool,
 }
 
 /// Result of `restore`: the snapshot of the state it replaced, so restoring that

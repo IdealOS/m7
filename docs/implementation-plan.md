@@ -330,7 +330,7 @@ Goal: no data is lost to a dead SD card or a bad update.
 
 - [ ] `backupd`: scheduled snapshots, and backup to a USB drive. Backups are incremental because blobs are named by hash.
 - [ ] Optional encryption of backups, using a key held by `secretsd`.
-- [ ] Restore: a recovery boot mode that restores the data partition from a backup.
+- [ ] Restore: a recovery boot mode that restores the data partition from a backup. Restoring onto a running system works first (Settings > Backup, or `osctl backup restore`): a freshly flashed card boots, then takes on the backed-up device's database and identity. The recovery boot is for a device that can't start.
 - [ ] History compaction: keep everything for 30 days, then daily for a year, then weekly; pinned versions are kept; unreferenced blobs are swept.
 - [ ] RAUC A/B system updates, with automatic rollback if the new slot fails to boot. How releases reach beta testers (GitHub Releases, a release image, signing, database rollback) is planned in [releases.md](releases.md).
 - [ ] Settings: Storage and Backup pages.

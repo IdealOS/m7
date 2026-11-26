@@ -9,7 +9,11 @@
 //! Restoring copies a snapshot back over the live database (the backup API again),
 //! after first taking a snapshot of the current state, so a restore can itself be
 //! undone. A snapshot from an older build is migrated as it's restored; one from a
-//! newer build is refused.
+//! newer build is refused, and so is another device's, unless the restore adopts it:
+//! a new device restoring a backup takes on the backed-up device's identity.
+//!
+//! Backups (`backupd`) are snapshots copied to a drive with the blobs they refer
+//! to; [`describe`] reads what a snapshot file holds without opening it as a store.
 
 use std::path::{Path, PathBuf};
 
@@ -113,6 +117,13 @@ impl Snapshots {
     /// Replace `store`'s contents with snapshot `name`, first taking a snapshot of
     /// what's there now. Returns that snapshot, so the restore can be undone.
     pub fn restore(&self, store: &mut Store, name: &str) -> Result<SnapshotInfo> {
+        self.restore_as(store, name, false)
+    }
+
+    /// [`Snapshots::restore`], but with `adopt` a snapshot of another device's
+    /// database is taken too, and this device becomes that one (its Loro peer id).
+    /// That's how a new device restores a backup.
+    pub fn restore_as(&self, store: &mut Store, name: &str, adopt: bool) -> Result<SnapshotInfo> {
         let Some(snap) = parse_name(name) else {
             return Err(Error::Invalid(format!("not a snapshot name: {name:?}")));
         };
@@ -120,7 +131,7 @@ impl Snapshots {
         if info(&path)?.is_none() {
             return Err(Error::NotFound(format!("snapshot {name}")));
         }
-        check(&path, store.peer)?;
+        check(&path, (!adopt).then_some(store.peer))?;
         let saved = self.take(store)?;
         store.conn.restore(MAIN_DB, &path, rusqlite::backup::NO_PROGRESS)?;
         // The restored copy came from a DELETE-mode file; keep the live one in WAL.
@@ -129,13 +140,50 @@ impl Snapshots {
         }
         migrate(&store.conn)?;
         schemas::sync_indexes(&store.conn)?;
+        store.peer = read_peer(&store.conn)?;
         debug_assert_eq!(snap.1, store.newest_change_set()?);
         Ok(saved)
     }
 }
 
-/// Refuse a snapshot that is damaged, from a newer build, or from another device.
-fn check(path: &Path, peer: u64) -> Result<()> {
+/// What a snapshot file holds, read without opening it as a store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotFacts {
+    /// The Loro peer id of the device it's from.
+    pub peer: u64,
+    pub schema_version: i64,
+    /// The newest change set it holds (0 if none).
+    pub change_set: i64,
+    /// Every blob it records, with its size: what a backup must carry with it.
+    pub blobs: Vec<(String, u64)>,
+}
+
+/// Read the snapshot file at `path`, refusing one that is damaged or from a newer
+/// build.
+pub fn describe(path: &Path) -> Result<SnapshotFacts> {
+    check(path, None)?;
+    let snap = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let change_set = snap.query_row("SELECT IFNULL(max(id), 0) FROM change_sets", [], |r| r.get(0))?;
+    let blobs = blobs_in(&snap)?;
+    Ok(SnapshotFacts { peer: read_peer(&snap)?, schema_version: schema_version(&snap)?, change_set, blobs })
+}
+
+/// The blobs the snapshot file at `path` records, without checking the file first
+/// (as [`describe`] does): for going over many snapshots quickly.
+pub fn blobs_of(path: &Path) -> Result<Vec<(String, u64)>> {
+    blobs_in(&Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?)
+}
+
+fn blobs_in(snap: &Connection) -> Result<Vec<(String, u64)>> {
+    Ok(snap
+        .prepare("SELECT hash, size FROM blobs ORDER BY hash")?
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Refuse a snapshot that is damaged, from a newer build, or (given `peer`) from
+/// another device.
+fn check(path: &Path, peer: Option<u64>) -> Result<()> {
     let snap = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let ok: String = snap.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if ok != "ok" {
@@ -147,18 +195,19 @@ fn check(path: &Path, peer: u64) -> Result<()> {
             "the snapshot's schema version {version} is newer than this build ({SCHEMA_VERSION})"
         )));
     }
-    if read_peer(&snap)? != peer {
+    if peer.is_some_and(|p| read_peer(&snap).ok() != Some(p)) {
         return Err(Error::Invalid("the snapshot is of another device's database".into()));
     }
     Ok(())
 }
 
-fn name(taken: i64, change_set: i64) -> String {
+/// The file name of a snapshot taken at `taken` holding up to `change_set`.
+pub fn name(taken: i64, change_set: i64) -> String {
     format!("snapshot-{taken}-{change_set}.db")
 }
 
 /// (taken, change set) from a snapshot's file name, if it is one.
-fn parse_name(name: &str) -> Option<(i64, i64)> {
+pub fn parse_name(name: &str) -> Option<(i64, i64)> {
     let (taken, set) = name.strip_prefix("snapshot-")?.strip_suffix(".db")?.split_once('-')?;
     let digits = |s: &str| !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit());
     (digits(taken) && digits(set)).then(|| Some((taken.parse().ok()?, set.parse().ok()?)))?

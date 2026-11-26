@@ -6,7 +6,7 @@
 //! under `x-constants`, which JSON Schema has no keyword for.
 
 use protocol::bus::{self, code};
-use protocol::{broker, db, net, perm, pty, secrets};
+use protocol::{backup, broker, db, net, perm, pty, secrets};
 use serde_json::{Value, json};
 
 fn document() -> Value {
@@ -80,6 +80,11 @@ fn document() -> Value {
     g.subschema_for::<net::ConnectParams>();
     g.subschema_for::<net::SsidParams>();
     g.subschema_for::<net::WifiParams>();
+    g.subschema_for::<backup::BackupStatus>();
+    g.subschema_for::<backup::DriveParams>();
+    g.subschema_for::<backup::BackedUp>();
+    g.subschema_for::<backup::BackupsResult>();
+    g.subschema_for::<backup::RestoreBackupParams>();
     g.subschema_for::<protocol::session::InfoResult>();
     g.subschema_for::<protocol::scene::ScreenInfo>();
     g.subschema_for::<db::TypesResult>();
@@ -119,6 +124,7 @@ fn document() -> Value {
         "SECRETS_SERVICE": constant(secrets::SERVICE.into(), "The name secretsd claims."),
         "PTY_SERVICE": constant(pty::SERVICE.into(), "The name ptyd claims."),
         "NET_SERVICE": constant(net::SERVICE.into(), "The name netd claims."),
+        "BACKUP_SERVICE": constant(backup::SERVICE.into(), "The name backupd claims."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

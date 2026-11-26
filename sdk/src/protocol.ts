@@ -6,6 +6,9 @@
 //
 // Integers are 64-bit on the wire; ids and counts stay well below 2^53.
 
+/** The name backupd claims. */
+export const BACKUP_SERVICE = "backup";
+
 /**
  * The broker's own name: `hello`, `claim`, `release` and `list` go to it, and `adopt`, with which
  * session hands it connections for services and apps.
@@ -162,6 +165,17 @@ export type AuditParams = {
 /** Result of `audit`, newest first. */
 export type AuditResult = { entries: AuditEntry[] };
 
+/** Result of `back_up`. */
+export type BackedUp = {
+  backup: BackupInfo;
+  /** Blobs copied this time; the rest were on the drive already. */
+  blobs_copied: number;
+  /** Bytes copied this time, the database included. */
+  bytes_copied: number;
+  /** Old backups deleted to keep `KEEP`. */
+  pruned: number;
+};
+
 /** A link into a document from another live document. */
 export type BacklinkInfo = {
   /** The linking document. */
@@ -170,6 +184,34 @@ export type BacklinkInfo = {
   /** Its field holding the link. */
   path: string;
 };
+
+/** One backup on a drive. */
+export type BackupInfo = {
+  /** How `restore` names it: `<device>/backup-<ms>-<change set>.db`. */
+  name: string;
+  /** The device it's of (its database's peer id, in hex). */
+  device: string;
+  /** Whether that's this device. */
+  this_device: boolean;
+  /** When it was taken, in milliseconds since the Unix epoch. */
+  taken: number;
+  /** The newest change set it holds. */
+  change_set: number;
+  /** The database copy's size; its blobs are shared and not counted. */
+  bytes: number;
+};
+
+/** Everything backupd knows: the drives, and what it's doing. */
+export type BackupStatus = {
+  drives: Drive[];
+  /** What's in progress, if anything. */
+  busy?: Busy | null;
+  /** Why the last backup or restore failed, until the next one succeeds. */
+  error?: string | null;
+};
+
+/** Result of `backups`: every backup on the drive, newest first. */
+export type BackupsResult = { backups: BackupInfo[] };
 
 /** A stored blob. */
 export type BlobInfo = {
@@ -203,6 +245,15 @@ export type BrokerErrorCode =
 
 /** Why a request failed. `code` is one of the broker's codes or a service's own. */
 export type BusError = { code: string; message: string };
+
+/** A backup or restore in progress. */
+export type Busy = {
+  drive: string;
+  doing: Doing;
+  /** Bytes copied so far, of `total`. */
+  done: number;
+  total: number;
+};
 
 /** A capability: `network`, `clipboard`, `permissions` or `service:NAME`. */
 export type CapabilityRule = { capability: string };
@@ -310,6 +361,25 @@ export type Doc = {
 
 /** Result of `query` and `search`. */
 export type DocsResult = { docs: Doc[] };
+
+export type Doing = "backing_up" | "restoring";
+
+/** A drive backupd can use: a plugged-in exFAT drive. */
+export type Drive = {
+  /** How methods name it: its block device (`sda1`). */
+  id: string;
+  /** Its size, in bytes. */
+  bytes: number;
+  /** Free space, in bytes, when last looked at. */
+  free: number;
+  /** Whether it's a backup drive (it holds an `idealos-backup` folder). */
+  set_up: boolean;
+  /** This device's newest backup on it. */
+  last?: BackupInfo | null;
+};
+
+/** Params naming a drive. */
+export type DriveParams = { drive: string };
 
 /**
  * One field that differs. Objects are compared field by field, arrays and other
@@ -598,8 +668,22 @@ export type RequestResult = {
 /** Params of `resize`. */
 export type ResizeParams = { id: string; cols: number; rows: number };
 
+/**
+ * Params of `restore`: replace the database with backup `name` from `drive`,
+ * bringing its blobs back too. The state replaced is kept as a snapshot, so the
+ * restore can be undone. A backup of another device makes this device that one.
+ */
+export type RestoreBackupParams = { drive: string; name: string };
+
 /** Params of `restore`: replace the database with snapshot `name`. */
-export type RestoreParams = { name: string };
+export type RestoreParams = {
+  name: string;
+  /**
+   * Take a snapshot of another device's database too, and become that device.
+   * backupd sets it to restore a backup onto a new device.
+   */
+  adopt?: boolean;
+};
 
 /**
  * Result of `restore`: the snapshot of the state it replaced, so restoring that
@@ -742,6 +826,8 @@ export type StatsResult = {
   blob_bytes: number;
   /** The snapshots directory. */
   snapshot_bytes: number;
+  /** This device, as backups name it: its database's peer id, in hex. */
+  device?: string;
 };
 
 /** The one trust level `adopt` names explicitly. */

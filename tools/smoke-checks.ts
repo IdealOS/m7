@@ -73,6 +73,14 @@ export const GUEST_SCRIPT = [
   // NetworkManager loads, with the name and password intact: spaces and a backslash
   // need escaping in a keyfile. QEMU has no Wi-Fi device, but the profile still loads.
   String.raw`printf 'ssid= Smoke\\Net \npassword=pass word\\1\n' >/tmp/w.txt; /usr/libexec/idealos/import-wifi /tmp/w.txt /etc/NetworkManager/system-connections >/dev/null; D="dbus-send --system --print-reply --dest=org.freedesktop.NetworkManager"; S=/org/freedesktop/NetworkManager/Settings; $D $S org.freedesktop.NetworkManager.Settings.ReloadConnections >/dev/null; w=none; for c in $($D $S org.freedesktop.NetworkManager.Settings.ListConnections | grep -o "$S/[0-9]*"); do $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSettings | grep -qF ' Smoke\Net ' && w=found && $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSecrets string:802-11-wireless-security | grep -qF 'pass word\1' && w=ok; done; echo SMOKE wifi-preset $w`,
+  // M8: backupd finds the exFAT disk the harness plugs in (vdb) and makes it a
+  // backup drive. Setting one up starts a backup on its own, so backing up by hand
+  // may first find it busy. Then a later change is undone by restoring the backup,
+  // and the drive is left unmounted.
+  `n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do n=$(osctl backup status 2>/dev/null | grep -c '"id":"vdb"'); [ "$n" -ge 1 ] && break; sleep 1; done; echo SMOKE backup-drive $n`,
+  `osctl backup setup vdb >/dev/null 2>&1; osctl db create SmokeBackup '{"k":"kept"}' >/dev/null; B=; i=0; while [ -z "$B" ] && [ $i -lt 30 ]; do B=$(osctl backup now vdb 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4); [ -z "$B" ] && sleep 1; i=$((i+1)); done; echo SMOKE backup-now $(echo "$B" | grep -c '/backup-')`,
+  `osctl db create SmokeBackup '{"k":"after"}' >/dev/null; osctl backup restore vdb "$B" >/dev/null 2>&1; echo SMOKE backup-restore $(osctl db query '{"type":"SmokeBackup"}' 2>&1 | grep -o '"k":"[a-z]*"' | tr '\\n' ' ')`,
+  "echo SMOKE backup-unmounted $(grep -c /run/idealos/backup /proc/mounts)",
   // session keeps what it and the services print in /data/log/session.log (for
   // reading over SSH), stamped like dmesg; the console shell keeps the terminal.
   String.raw`grep -q "^\[ *[0-9]*\.[0-9]*\] session: started compositor" /data/log/session.log && grep -q "^\[.*\] .*kms: first frame on screen" /data/log/session.log && echo SMOKE session-log ok`,
@@ -178,6 +186,10 @@ export function evaluate(log: string): Check[] {
     fact("pty-open", "1", "ptyd opened a shell session"),
     fact("m7-apps", "3", "Settings, Documents and Terminal are installed"),
     fact("wifi-preset", "ok", "NetworkManager loaded a Wi-Fi preset with its name and password intact"),
+    fact("backup-drive", "1", "backupd found the exFAT drive"),
+    fact("backup-now", "1", "backupd backed up to it"),
+    fact("backup-restore", '"k":"kept"', "restoring the backup put the database back as it was"),
+    fact("backup-unmounted", "0", "the drive is unmounted while backupd isn't using it"),
     fact("session-log", "ok", "session kept the services' output in /data/log/session.log, stamped"),
     fact("console-tty", "ok", "the console shell writes to the terminal, not the log"),
     {
@@ -378,7 +390,7 @@ export function shellPids(log: string): number[] {
 
 /** What session.conf starts through dev-exec, plus session itself: after a deploy,
  * each must run from the overlay (/opt/idealos/bin). */
-export const DEPLOYED_SERVICES = ["session", "busd", "permd", "dbd", "secretsd", "ptyd", "netd", "compositor"];
+export const DEPLOYED_SERVICES = ["session", "busd", "permd", "dbd", "secretsd", "ptyd", "netd", "backupd", "compositor"];
 
 /** Shell command run over SSH after a deploy. `oldShell` is the pid of the shell the
  * first session started, which must be gone once session restarts. */

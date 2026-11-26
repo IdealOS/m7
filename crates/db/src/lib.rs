@@ -479,6 +479,11 @@ impl Store {
     }
 
     /// Run `sql` and return its rows' first column, for tests and `--explain`.
+    /// This device's Loro peer id, which also names its backups.
+    pub fn peer(&self) -> u64 {
+        self.peer
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }

@@ -74,6 +74,26 @@ const work = mkdtempSync(join(tmpdir(), "iq-"));
 const disk = join(work, "disk.img");
 copyFileSync(join(OUT, "disk.img"), disk, constants.COPYFILE_FICLONE);
 
+/** A 64 MB exFAT disk with no partition table, as a USB stick might be, for the
+ * backup checks: made with macOS's own tools, no sudo needed. */
+function exfatDisk(path: string): void {
+  const run = (cmd: string, args: string[]) => {
+    const r = spawnSync(cmd, args, { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`${cmd} failed: ${r.stderr}`);
+    return r.stdout;
+  };
+  run("mkfile", ["-n", "64m", path]);
+  const attached = run("hdiutil", ["attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", path]);
+  const dev = attached.trim().split(/\s+/)[0];
+  try {
+    run("newfs_exfat", ["-v", "BACKUP", dev]);
+  } finally {
+    run("hdiutil", ["detach", dev]);
+  }
+}
+const backupDisk = join(work, "backup.img");
+exfatDisk(backupDisk);
+
 const qemu = spawn(
   "qemu-system-aarch64",
   [
@@ -81,6 +101,8 @@ const qemu = spawn(
     ...["-kernel", join(OUT, "Image")],
     ...["-append", "root=/dev/vda1 rootfstype=ext4 rootwait ro console=tty0 console=ttyAMA0"],
     ...["-drive", `file=${disk},if=virtio,format=raw`],
+    // The backup drive: /dev/vdb in the guest.
+    ...["-drive", `file=${backupDisk},if=virtio,format=raw`],
     ...["-device", "virtio-gpu-pci", "-display", "none"],
     ...["-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"],
     ...["-netdev", `user,id=net0,hostfwd=tcp:127.0.0.1:${sshPort}-:22`, "-device", "virtio-net-pci,netdev=net0"],
