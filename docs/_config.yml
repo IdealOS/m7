@@ -1,0 +1,5 @@
+# GitHub Pages builds this folder into https://idealos.github.io/m7/ with its
+# default Jekyll setup: Markdown pages render as they are and links between them
+# keep working. architecture.html is served unchanged.
+title: IdealOS
+description: A desktop OS for the Raspberry Pi built around one database and one message bus.

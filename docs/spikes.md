@@ -23,7 +23,7 @@ these only show the design is sound and the benchmark works.**
 
 `tools/spike-kms [--buffers 2|3] [--frames N] [--windows N]` (or `make spike-kms`).
 
-**Setup.** The spike runs in a small Lima VM ([idealos-spike.yaml](../tools/lima/idealos-spike.yaml)),
+**Setup.** The spike runs in a small Lima VM ([idealos-spike.yaml](https://github.com/IdealOS/m7/blob/main/tools/lima/idealos-spike.yaml)),
 not in a Buildroot image:
 
 - QEMU 11.1 from Homebrew with HVF acceleration, 4 vCPUs and 4 GiB of RAM;
@@ -33,7 +33,7 @@ not in a Buildroot image:
 The guest sees the same `virtio_gpu` DRM device the idealos QEMU image will see. That
 answers the spike without the Buildroot build (see "Disk space" below).
 
-**What [kms-probe](../spikes/kms-probe/src/main.rs) does:**
+**What [kms-probe](https://github.com/IdealOS/m7/blob/main/spikes/kms-probe/src/main.rs) does:**
 
 1. Opens `/dev/dri/card0`, finds the connected connector, its preferred mode and a CRTC.
 2. Renders the Phase 0 demo (20 windows, 407 nodes) with the real compositor renderer
@@ -41,7 +41,7 @@ answers the spike without the Buildroot build (see "Disk space" below).
 3. Copies the rows into an `XRGB8888` dumb buffer (the same bytes on little-endian).
 4. Page-flips on vblank, animating a window and the HUD text on every frame.
 5. Captures the guest's scanout from the host through QEMU's QMP `screendump`
-   ([qmp-screendump.ts](../tools/qmp-screendump.ts)). That proves the pixels reached
+   ([qmp-screendump.ts](https://github.com/IdealOS/m7/blob/main/tools/qmp-screendump.ts)). That proves the pixels reached
    the display, not just a buffer.
 
 ![kms-probe on virtio-gpu, captured over QMP](screenshots/spike-a-qemu-kms.png)
@@ -64,7 +64,7 @@ Setting up the wgpu device on lavapipe takes 20–40 ms.
    1280×800 in about 10 ms on 4 vCPUs, and the copy into the dumb buffer adds 1 ms.
    - This is the KMS backend's design for QEMU, and the fallback for any GPU that can't
      export dmabufs.
-   - The [`Offscreen`](../crates/compositor/src/headless.rs) target used here is the
+   - The [`Offscreen`](https://github.com/IdealOS/m7/blob/main/crates/compositor/src/headless.rs) target used here is the
      same code that renders screenshots.
 2. **Use three scanout buffers.** With two, the next frame can't start until the pending
    flip lands, because the only free buffer is still on screen.
@@ -143,7 +143,7 @@ free disk, so the VM is now 10 GiB.
 
 `make spike-db` (or `db-bench --docs N --updates N --body-bytes N --db PATH --keep`).
 
-What it does: it follows M3's write path ([store.rs](../spikes/db-bench/src/store.rs)).
+What it does: it follows M3's write path ([store.rs](https://github.com/IdealOS/m7/blob/main/spikes/db-bench/src/store.rs)).
 Each email is a Loro document. One SQLite transaction (WAL mode, `synchronous=NORMAL`) writes:
 
 - the Loro snapshot (`doc_state`);
@@ -214,7 +214,7 @@ Other results:
 What it does:
 
 - It spawns copies of itself as app processes. Each one starts an rquickjs runtime and
-  runs [app.js](../spikes/js-bench/src/app.js), a stand-in for an app plus the SDK:
+  runs [app.js](https://github.com/IdealOS/m7/blob/main/spikes/js-bench/src/app.js), a stand-in for an app plus the SDK:
   - SolidJS-style `signal` and `effect`;
   - 500 labels, each bound to a signal;
   - every change emits a `set` op, batched into one `commit` frame per flush;
