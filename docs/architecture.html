@@ -1,0 +1,732 @@
+<!doctype html>
+<!-- Published copy: https://claude.ai/artifact/BPhLSkuCzcZNbedjBcCVT5 (private). Open this file in a browser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IdealOS Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a layered stack diagram (hardware at the bottom, apps on top) beside a sticky
+   detail sidebar; a milestone strip across the top. Status is drawn in the border:
+   solid = built, solid amber dot = partly built, dashed = planned, dotted = future. */
+:root {
+  --bg: #F2F4F6;
+  --panel: #FFFFFF;
+  --ink: #17202B;
+  --muted: #5A6574;
+  --line: #D3D9E0;
+  --accent: #1C6A85;
+  --accent-soft: #DFEDF2;
+  --built: #1C6A85;
+  --partial: #B4761A;
+  --planned: #8B95A3;
+  --future: #7656A6;
+  --band: #E8ECF0;
+  --font-display: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10141A; --panel: #171D25; --ink: #E4E9EF; --muted: #95A0AE; --line: #29323D;
+    --accent: #62B5D3; --accent-soft: #19303B; --built: #62B5D3; --partial: #E1A54B;
+    --planned: #6D7785; --future: #A88BD3; --band: #141A21; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10141A; --panel: #171D25; --ink: #E4E9EF; --muted: #95A0AE; --line: #29323D;
+  --accent: #62B5D3; --accent-soft: #19303B; --built: #62B5D3; --partial: #E1A54B;
+  --planned: #6D7785; --future: #A88BD3; --band: #141A21; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body);
+  font-size: 14px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 48px;
+}
+.wrap { max-width: 1340px; margin: 0 auto; display: grid; gap: 20px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header */
+header { display: grid; gap: 10px; }
+.eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 700; letter-spacing: -0.01em; }
+.lede { max-width: 70ch; color: var(--muted); margin: 0; font-size: 15px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: var(--muted); align-items: center; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 22px; height: 12px; border-radius: 3px; border: 1.5px solid var(--built); background: var(--panel); }
+.swatch.partial { border-color: var(--partial); }
+.swatch.planned { border: 1.5px dashed var(--planned); background: transparent; }
+.swatch.future { border: 1.5px dotted var(--future); background: transparent; }
+
+/* Milestones */
+.milestones { display: grid; gap: 8px; }
+.ms-strip { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
+.ms {
+  flex: 1 0 58px; min-width: 58px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 5px; padding: 6px 6px 7px; text-align: left; cursor: pointer; display: grid; gap: 2px;
+}
+.ms b { font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+.ms small { font-size: 10.5px; color: var(--muted); line-height: 1.25; }
+.ms .bar { height: 3px; border-radius: 2px; background: var(--built); }
+.ms.partial .bar { background: linear-gradient(90deg, var(--built) 70%, var(--partial) 70%); }
+.ms.planned { background: transparent; border-style: dashed; }
+.ms.planned .bar { background: var(--line); }
+.ms.next .bar { background: repeating-linear-gradient(90deg, var(--partial) 0 4px, transparent 4px 7px); }
+.ms[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.phase-labels { display: flex; gap: 4px; font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+
+/* Main */
+main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 20px; align-items: start; }
+@media (max-width: 980px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+.diagram { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 30px; }
+.crumbs button { border: 1px solid var(--line); background: var(--bg); border-radius: 5px; padding: 3px 10px; cursor: pointer; }
+.crumbs .here { font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+.hint { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+.layer { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; background: var(--band); border-radius: 6px; padding: 10px; }
+.layer-head { display: grid; align-content: start; gap: 3px; }
+.layer-head h3 { font-size: 13px; font-weight: 600; }
+.layer-head p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.nodes { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+@media (max-width: 640px) { .layer { grid-template-columns: minmax(0, 1fr); } }
+
+.node {
+  flex: 1 1 150px; max-width: 260px; min-height: 58px; text-align: left; cursor: pointer;
+  background: var(--panel); border: 1.5px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  display: grid; gap: 2px; align-content: start; position: relative;
+  transition: opacity 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.node .n { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 6px; }
+.node .s { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
+.node .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--built); flex: none; }
+.node .parts { font-size: 10.5px; color: var(--accent); font-family: var(--font-mono); }
+.node.built { border-color: color-mix(in srgb, var(--built) 45%, var(--line)); }
+.node.partial { border-color: color-mix(in srgb, var(--partial) 55%, var(--line)); }
+.node.partial .dot { background: var(--partial); }
+.node.planned { background: transparent; border-style: dashed; border-color: var(--planned); }
+.node.planned .n { color: var(--muted); font-weight: 500; }
+.node.planned .dot { background: transparent; border: 1.5px solid var(--planned); }
+.node.future { background: transparent; border-style: dotted; border-color: var(--future); }
+.node.future .dot { background: transparent; border: 1.5px solid var(--future); }
+.node:hover { border-color: var(--accent); }
+.node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 1px var(--accent) inset; }
+.node.related { border-color: var(--accent); border-style: solid; }
+.diagram.focus .node:not(.selected):not(.related) { opacity: 0.4; }
+.diagram.focus .node:not(.selected):not(.related):hover { opacity: 0.8; }
+@media (prefers-reduced-motion: reduce) { .node { transition: none; } }
+
+/* Sidebar */
+aside {
+  position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px);
+  max-height: calc(100vh - 32px); overflow: auto; min-width: 0;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px;
+  display: grid; gap: 14px; align-content: start;
+}
+@media (max-width: 980px) { aside { position: static; max-height: none; } }
+aside h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+aside p { margin: 0; max-width: 65ch; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 500; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); width: fit-content; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--built); }
+.pill.partial i { background: var(--partial); }
+.pill.planned i { background: transparent; border: 1.5px solid var(--planned); }
+.pill.future i { background: transparent; border: 1.5px solid var(--future); }
+.sec { display: grid; gap: 6px; }
+.sec h4 { margin: 0; font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.sec ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: 13px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 5px; padding: 2px 8px; font-size: 12.5px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.chip:hover { border-color: var(--accent); }
+.chip.planned { border-style: dashed; color: var(--muted); }
+.inside-btn { justify-self: start; border: 1px solid var(--accent); color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 6px 12px; cursor: pointer; font-weight: 500; }
+.gaps li::marker { color: var(--partial); }
+.overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.overview-stats div { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.overview-stats b { display: block; font-family: var(--font-display); font-size: 22px; font-variant-numeric: tabular-nums; }
+.overview-stats span { font-size: 11.5px; color: var(--muted); }
+footer { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">idealos · architecture as of 25 Nov 2026 · M0–M7 built</div>
+    <h1>IdealOS Architecture</h1>
+    <p class="lede">A desktop OS for the Raspberry Pi where every piece of data is a document in one database, and every process talks through one message bus. Pick a component to see what it does and what it talks to; components with parts open into their own diagram.</p>
+    <div class="legend" aria-label="Legend">
+      <span><i class="swatch"></i>Built</span>
+      <span><i class="swatch partial"></i>Partly built</span>
+      <span><i class="swatch planned"></i>Planned (milestone shown)</span>
+      <span><i class="swatch future"></i>Future project, unscheduled</span>
+    </div>
+  </header>
+
+  <section class="milestones" aria-label="Milestones">
+    <div class="ms-strip" id="ms-strip"></div>
+  </section>
+
+  <main>
+    <section class="diagram" id="diagram" aria-label="Architecture diagram">
+      <div class="crumbs" id="crumbs"></div>
+      <div id="layers" style="display:grid;gap:10px"></div>
+    </section>
+    <aside id="side" aria-live="polite" aria-label="Component details"></aside>
+  </main>
+
+  <footer>Drawn from the repository's README status tables and docs/implementation-plan.md. Set in Inter, the face built into the IdealOS compositor.</footer>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------------
+// Data. status: built | partial | planned | future. ms: milestones it belongs to.
+// rel: what it talks to (highlighted on selection). parent: the component whose
+// inside view shows it. layer (top level) or group (inside views) places it.
+// ---------------------------------------------------------------------------------
+const MILESTONES = [
+  { id: "M0", name: "First boot", status: "built", phase: 0, text: "Monorepo and CI, the Lima build VM, Buildroot images for QEMU and the Pi, and SSH deploys. QEMU boots to session in about 0.4 s." },
+  { id: "M1", name: "Pixels", status: "partial", phase: 0, text: "The compositor draws a scene graph through wgpu, hosted on macOS and on KMS in QEMU and on the Pi. Still to do: region damage, and the zero-copy scanout path (Spike B)." },
+  { id: "M2", name: "Message bus", status: "built", phase: 1, text: "busd routes requests and pub/sub between services and apps, with identity by construction, descriptor passing and bounded queues." },
+  { id: "M3", name: "Database v1", status: "built", phase: 1, text: "The document store: Loro documents in SQLite, queries, live queries, full-text search, links, blobs, history, undo and snapshots." },
+  { id: "M4", name: "App runtime", status: "built", phase: 1, text: "TypeScript apps run in QuickJS, one process each, with the SDK's signals and widgets; session launches them." },
+  { id: "M5", name: "Widgets and WM", status: "built", phase: 1, text: "Taffy layout, the full widget set, focus and keyboard, bound text fields, the clipboard, the window manager, workspaces and the top bar." },
+  { id: "M6", name: "Permissions", status: "built", phase: 1, text: "permd's grants and audit log, enforced in busd, dbd and the compositor; trusted prompts; app sandboxes; secretsd." },
+  { id: "M7", name: "First apps", status: "built", phase: 1, text: "ptyd and the Terminal, netd and Settings, and the Documents browser. Ends Phase 1. Joining Wi-Fi from Settings is untested on a Pi; a Pi 3B+ joined from a preset." },
+  { id: "M8", name: "Backup and updates", status: "next", phase: 2, text: "Next: backupd, encrypted backups, a recovery restore, history compaction, RAUC A/B updates with rollback, and the Storage and Backup pages." },
+  { id: "M9", name: "Text editor", status: "planned", phase: 2, text: "An editor app on the bound multiline widget, with a version history sidebar." },
+  { id: "M10", name: "Email", status: "planned", phase: 2, text: "maild syncs Gmail into Email, Thread and Label documents; a Mail app reads, archives, labels and sends." },
+  { id: "M11", name: "Music", status: "planned", phase: 2, text: "audiod on PipeWire, an audio importer, and a player app." },
+  { id: "M12", name: "Chat", status: "planned", phase: 2, text: "A chat service interface, a dummy service that replies, and a chat app built against the interface." },
+  { id: "M13", name: "Browser", status: "planned", phase: 2, text: "browser-host embeds Servo and shows each tab as an external surface in the compositor." },
+  { id: "M14", name: "DB shell", status: "planned", phase: 2, text: "A pipeline query shell, importd for USB drives, and a history viewer. Ends Phase 2." },
+];
+
+const LAYERS = [
+  { id: "apps", name: "Apps", text: "TypeScript, one sandboxed QuickJS process each" },
+  { id: "runtime", name: "App runtime", text: "Runs an app and gives it the system's APIs" },
+  { id: "services", name: "System services", text: "Rust; each claims a name on the bus" },
+  { id: "bus", name: "Message bus", text: "Every request and event passes through here" },
+  { id: "supervisor", name: "Supervisor", text: "The first process after init" },
+  { id: "platform", name: "Platform", text: "Linux and the Buildroot image" },
+  { id: "targets", name: "Where it runs", text: "Development and device targets" },
+  { id: "tools", name: "Developer tools", text: "Build, deploy, inspect and test" },
+];
+
+const N = [
+  // ----- Apps -----
+  { id: "counter", name: "Counter", sub: "apps/counter", layer: "apps", status: "built", ms: ["M4"],
+    summary: "The first app: a button and a number, built with the SDK's signals. Starts at boot.",
+    points: ["Shows how an app opens a window and reacts to clicks", "Autostarts on the device"],
+    rel: ["app-host", "sdk", "compositor"] },
+  { id: "notes", name: "Notes", sub: "apps/notes", layer: "apps", status: "built", ms: ["M4", "M6"],
+    summary: "A live list of Note documents that can add one. Starts at boot.",
+    points: ["Follows a live query (db.live), so new notes appear without polling", "Its manifest asks to read and create notes; installing it grants exactly that", "Runs in its own network namespace under seccomp (checked by the QEMU smoke test)"],
+    rel: ["app-host", "sdk", "dbd", "compositor", "permd"] },
+  { id: "gallery", name: "Widget Gallery", sub: "apps/gallery", layer: "apps", status: "built", ms: ["M5"],
+    summary: "Every widget in one window, for testing. Installed but not started; launch it from the Apps menu.",
+    points: ["Includes a text area bound to a \"Gallery scratchpad\" note, edited by the compositor directly", "Shows an image blob, a grid, a split view and a dialog"],
+    rel: ["app-host", "sdk", "compositor", "dbd"] },
+  { id: "settings", name: "Settings", sub: "apps/settings", layer: "apps", status: "built", ms: ["M7"],
+    summary: "Network, Permissions, Display, Storage and About pages.",
+    points: ["Network: status, the Wi-Fi switch, scanning, joining with a hidden password, forgetting", "Permissions: every app's grants by name, revoking, the recent audit log", "Display: the screen and workspaces, from the compositor", "Storage: database size, documents, blobs, history and snapshots, and taking one now", "About: version, kernel, uptime and services, from session"],
+    facts: [["Grants", "permissions, storage, service:net, service:session, read App documents"]],
+    gaps: ["Display settings show the screen but can't change it", "Joining Wi-Fi from Settings hasn't been tried on a Pi yet"],
+    rel: ["app-host", "sdk", "netd", "permd", "dbd", "session", "compositor"] },
+  { id: "documents", name: "Documents", sub: "apps/browser", layer: "apps", status: "built", ms: ["M7"],
+    summary: "The document browser: every document type the system holds, searchable and inspectable. It changes nothing.",
+    points: ["Types with counts, full-text search, and a filter builder (field, operator, value)", "An inspector with each field, links out and in (followable), and the version history", "Reads every type through a {\"type\": \"*\"} grant"],
+    rel: ["app-host", "sdk", "dbd", "compositor"] },
+  { id: "terminal-app", name: "Terminal", sub: "apps/terminal", layer: "apps", status: "built", ms: ["M7"],
+    summary: "A shell in a window. The app only opens a session; the compositor draws the grid and ptyd runs the shell, so output never passes through JavaScript.",
+    points: ["Holds service:pty, described to the user as \"run commands with full access to this device\""],
+    gaps: ["No scrollback, selection or copy yet", "Wide characters draw in one cell"],
+    rel: ["app-host", "ptyd", "compositor"] },
+  { id: "editor-app", name: "Editor", sub: "M9", layer: "apps", status: "planned", ms: ["M9"],
+    summary: "A text editor on the bound multiline widget: open, create, rename, find and replace, with a version history sidebar. Plain text and Markdown first.",
+    rel: ["dbd", "compositor"] },
+  { id: "mail-app", name: "Mail", sub: "M10", layer: "apps", status: "planned", ms: ["M10"],
+    summary: "Thread list (a live query), reader and composer over the documents maild syncs. Plain text and simple HTML first; full HTML through a Servo surface after M13.",
+    rel: ["maild", "dbd", "compositor"] },
+  { id: "music-app", name: "Music", sub: "M11", layer: "apps", status: "planned", ms: ["M11"],
+    summary: "Library by artist and album, playlists, queue and now playing, over Track documents.",
+    rel: ["audiod", "dbd"] },
+  { id: "chat-app", name: "Chat", sub: "M12", layer: "apps", status: "planned", ms: ["M12"],
+    summary: "Built against the chat service interface, not the dummy service, so real services can plug in later.",
+    rel: ["chatd", "dbd"] },
+  { id: "browser-app", name: "Web browser", sub: "M13", layer: "apps", status: "planned", ms: ["M13"],
+    summary: "Tabs, address bar, back and forward. History and bookmarks are documents, so they show up in Documents.",
+    rel: ["browser-host", "dbd"] },
+  { id: "dbshell-app", name: "DB shell and history", sub: "M14", layer: "apps", status: "planned", ms: ["M14"],
+    summary: "A Nushell-style pipeline language in the terminal (emails | where from.name == \"Bob\" | first 10), and a history viewer with a timeline per document and global undo.",
+    rel: ["dbd", "ptyd"] },
+
+  // ----- Runtime -----
+  { id: "app-host", name: "app-host", sub: "crates/app-host", layer: "runtime", status: "built", ms: ["M4"],
+    summary: "One process per app: QuickJS (rquickjs) runs the app's bundle as an ES module, with the bus as its only way out.",
+    points: ["A prelude provides console, timers and __idealos: requests, streamed requests and cancels", "One thread; JavaScript and Rust exchange only ids and JSON", "Ends when the app exits or has nothing left to wait for; errors in callbacks are logged and the app carries on", "app-host --install puts the bundled apps in the database at boot"],
+    facts: [["Heap limit", "256 MB"], ["Measured", "8 apps on a Pi 3B+: each ready in ~180 ms, 44 MiB together"]],
+    gaps: ["App bundles aren't signed"],
+    rel: ["busd", "session", "sdk", "dbd", "compositor"] },
+  { id: "sdk", name: "@idealos/sdk", sub: "sdk/", layer: "runtime", status: "built", ms: ["M4", "M5", "M7"],
+    summary: "What apps are written against: the bus, the database and live queries, SolidJS-style signals, windows and every widget.",
+    points: ["db: query, get, put, update, remove, search, and live (a signal that follows watch)", "signal, effect, memo, batch, root; UI is built once and only changed values are sent", "Ops go out as one commit per microtask", "permissions.request, clipboard, terminal(), pty.open()", "Types generated from the Rust protocol (make protocol)"],
+    rel: ["app-host", "protocol"] },
+
+  // ----- Services -----
+  { id: "compositor", name: "Compositor", sub: "crates/compositor", layer: "services", status: "partial", ms: ["M1", "M4", "M5", "M6", "M7"],
+    summary: "Owns the screen and input: the scene graph, layout, widgets, text, the wgpu renderer, the window manager and trusted prompts. Apps describe their windows; the compositor draws and drives them.",
+    points: ["Typing, dragging, scrolling and menus never wait on the app", "Acts for apps where needed (bound text, image blobs) with the app's own permissions", "Two backends: a window on macOS, and DRM/KMS on Linux"],
+    facts: [["Bus name", "compositor"], ["Pi 3B+", "~250 ms per 1080p frame on the CPU (lavapipe)"], ["M3 Mac", "60 fps hosted"]],
+    gaps: ["Damage is per frame, not per region", "No zero-copy scanout on the Pi yet"],
+    rel: ["busd", "dbd", "permd", "ptyd", "session", "app-host", "image", "secretsd"] },
+  { id: "dbd", name: "Database", sub: "crates/db · crates/dbd", layer: "services", status: "built", ms: ["M3", "M5", "M6", "M7"],
+    summary: "The document store at the center of the system, served on the bus as db. Every app's data, history and blobs live here.",
+    points: ["Loro documents in SQLite, with a JSON copy for queries and FTS5 for search", "Live queries stream diffs; history keeps every version; undo is a new change", "Enforces each app's grants on every read and write"],
+    facts: [["Bus name", "db"], ["On the device", "/data/db/idealos.db, with snapshots/ and blobs/"], ["Pi 3B+", "create 4.9 ms p50; FTS rare word 2.3 ms"]],
+    gaps: ["History compaction and blob sweeping wait for M8"],
+    rel: ["busd", "permd", "compositor", "app-host", "backupd"] },
+  { id: "permd", name: "permd", sub: "crates/permd", layer: "services", status: "built", ms: ["M6"],
+    summary: "Keeps the grants table and audit log, and asks the compositor to prompt the user.",
+    points: ["An app starts with nothing beyond what it creates; its manifest's permissions are granted at install", "Publishes the whole table on perm.grants; busd, dbd, the compositor and session follow the newest version", "Stored in its own SQLite file, outside the database apps can reach", "Managers list, grant and revoke (osctl perm, Settings)"],
+    facts: [["Bus name", "perm"], ["Grant kinds", "read, write, create a type (optionally filtered); network, clipboard, permissions, storage, service:NAME"]],
+    rel: ["busd", "dbd", "compositor", "session"] },
+  { id: "secretsd", name: "secretsd", sub: "crates/secretsd", layer: "services", status: "partial", ms: ["M6"],
+    summary: "An encrypted store of secrets, each owned by the service or app that stored it.",
+    points: ["put, get, delete, list, by the identity the broker stamped", "XChaCha20-Poly1305 under a device key, with owner and name as associated data"],
+    gaps: ["The key is a file on the device: with no login yet there's no passphrase to derive it from"],
+    rel: ["busd", "maild", "backupd"] },
+  { id: "ptyd", name: "ptyd", sub: "crates/ptyd", layer: "services", status: "built", ms: ["M7"],
+    summary: "Runs shells on pseudo-terminals and parses their output into screens, in Rust.",
+    points: ["vte escape-sequence parser with its own grid: cursor movement, scrolling regions, the alternate screen, 16/256/24-bit color", "Streams changed rows at most every 16 ms", "Only a session's owner may attach, type or resize"],
+    facts: [["Bus name", "pty"]],
+    rel: ["busd", "compositor", "terminal-app"] },
+  { id: "netd", name: "netd", sub: "crates/netd", layer: "services", status: "built", ms: ["M7"],
+    summary: "Wraps NetworkManager's D-Bus API: state, connections, the Wi-Fi switch, scanning, joining and forgetting.",
+    points: ["watch streams the status as it changes", "A failed join deletes the profile it made", "--fake serves a pretend network for development"],
+    facts: [["Bus name", "net"], ["Pi 3B+", "On Wi-Fi from a preset written by tools/sd-wifi"]],
+    rel: ["busd", "settings", "image"] },
+  { id: "backupd", name: "backupd", sub: "M8", layer: "services", status: "planned", ms: ["M8"],
+    summary: "Scheduled snapshots and incremental backups to a USB drive (blobs are named by hash, so only new ones copy), optionally encrypted with a key in secretsd, and a recovery boot that restores them.",
+    rel: ["dbd", "secretsd"] },
+  { id: "maild", name: "maild", sub: "M10", layer: "services", status: "planned", ms: ["M10"],
+    summary: "Gmail API sync: a full sync, then incremental from the history ID, mapped to Email, Thread and Label documents; attachments become blobs. Writes back read, archive, label, delete and send.",
+    rel: ["dbd", "secretsd", "mail-app"] },
+  { id: "audiod", name: "audiod", sub: "M11", layer: "services", status: "planned", ms: ["M11"],
+    summary: "Playback on PipeWire, decoding with symphonia.",
+    rel: ["music-app", "dbd"] },
+  { id: "chatd", name: "chatd-dummy", sub: "M12", layer: "services", status: "planned", ms: ["M12"],
+    summary: "Simulated contacts who reply after a delay and change presence, behind the chat service interface.",
+    rel: ["chat-app", "dbd"] },
+  { id: "browser-host", name: "browser-host", sub: "M13", layer: "services", status: "planned", ms: ["M13"],
+    summary: "Embeds Servo and renders each tab into a buffer shared with the compositor as a dmabuf, shown through an external-surface node. Sandboxed with the network grant.",
+    rel: ["compositor", "browser-app", "importd"] },
+  { id: "importd", name: "importd", sub: "M14", layer: "services", status: "planned", ms: ["M14"],
+    summary: "Detects USB drives and imports images (with EXIF), audio, PDFs, vCards and text as documents and blobs; exports them back to files.",
+    rel: ["dbd"] },
+
+  // ----- Bus -----
+  { id: "busd", name: "busd", sub: "crates/busd", layer: "bus", status: "built", ms: ["M2", "M6"],
+    summary: "The broker. Routes requests by service name, delivers pub/sub, stamps every message with its sender, and checks each app's permissions before delivering.",
+    points: ["Identity comes from the connection session handed over, never from what a client claims", "Bounded queues: a connection that stops reading is dropped", "Passes file descriptors, so blobs travel as memfds rather than JSON"],
+    facts: [["Socket", "/run/idealos/bus.sock"], ["M3 Mac", "37.5 µs round trip p50, 290,000 requests/s"], ["Pi 3B+", "429.5 µs p50, 14,707 requests/s, 68,308 publishes/s"]],
+    rel: ["session", "permd", "bus-client", "protocol", "app-host", "osctl"] },
+  { id: "bus-client", name: "bus-client", sub: "crates/bus-client", layer: "bus", status: "built", ms: ["M2"],
+    summary: "The async Rust client every service uses: requests, streamed requests, subscriptions, publishing, serving claimed names, and descriptors on all of them.",
+    points: ["Dropping a request or stream cancels it", "Refuses to send past the 4 MiB frame limit rather than lose the connection", "Uses the connection session handed over when there is one"],
+    rel: ["busd", "protocol"] },
+  { id: "protocol", name: "protocol", sub: "crates/protocol", layer: "bus", status: "built", ms: ["M2"],
+    summary: "The wire types shared by Rust and TypeScript: the bus envelope and framing, scene-graph ops, queries and grants.",
+    points: ["crates/protocol-schema exports JSON Schema; tools/gen-protocol.ts generates sdk/src/protocol.ts", "A Rust test and a tools test fail when either file is out of date"],
+    rel: ["busd", "bus-client", "sdk"] },
+
+  // ----- Supervisor -----
+  { id: "session", name: "session", sub: "crates/session", layer: "supervisor", status: "built", ms: ["M0", "M2", "M4", "M6"],
+    summary: "Starts every service from session.conf, restarts what exits, makes each service's bus connection, launches apps in sandboxes, and keeps the system log.",
+    points: ["Hands each service a connection the broker already trusts (identity by construction)", "Launches each app as app-host --app ID inside a network namespace, Landlock and seccomp", "Keeps everything printed in /data/log/session.log, stamped like dmesg"],
+    facts: [["Config", "/etc/idealos/session.conf (dev images: /data/session.conf if present)"], ["Bus name", "session (launch, stop, apps, info)"]],
+    rel: ["busd", "app-host", "compositor", "dbd", "permd", "secretsd", "ptyd", "netd", "image"] },
+
+  // ----- Platform -----
+  { id: "image", name: "Buildroot image", sub: "image/", layer: "platform", status: "built", ms: ["M0", "M7"],
+    summary: "A small Linux system built with Buildroot: the Pi kernel, Mesa, NetworkManager and our binaries, with a read-only root and a writable data partition.",
+    points: ["BusyBox init mounts /data, imports any Wi-Fi preset, and starts session", "Dev images add SSH and a writable /opt/idealos overlay for deploys", "One config family for QEMU, the Pi 3 and the Pi 4"],
+    facts: [["Buildroot", "2026.08.2"], ["Kernels", "6.12.58 (QEMU), Pi 6.12.47"]],
+    gaps: ["No network time: the Pi's clock reads 1970 until something sets it"],
+    rel: ["session", "netd", "compositor"] },
+  { id: "rauc", name: "A/B updates", sub: "M8 · RAUC", layer: "platform", status: "planned", ms: ["M8"],
+    summary: "RAUC system updates into the idle root slot, with automatic rollback if the new slot fails to boot. Release delivery to beta testers is planned in docs/releases.md.",
+    rel: ["image"] },
+  { id: "recovery", name: "Recovery restore", sub: "M8", layer: "platform", status: "planned", ms: ["M8"],
+    summary: "A recovery boot mode that restores the data partition from a backup.",
+    rel: ["image", "backupd"] },
+
+  // ----- Targets -----
+  { id: "t-mac", name: "macOS (hosted)", sub: "cargo run", layer: "targets", status: "built", ms: ["M1"],
+    summary: "Everything except the KMS backend runs natively on the Mac: the compositor in a winit window on Metal, and the bus, database and services as ordinary processes. The everyday development loop.",
+    rel: ["compositor"] },
+  { id: "t-qemu", name: "QEMU", sub: "make qemu", layer: "targets", status: "built", ms: ["M0", "M1"],
+    summary: "The full image on virtio-gpu with lavapipe, under HVF on Apple Silicon. make smoke-qemu boots it headless and runs 41 checks.",
+    rel: ["image"] },
+  { id: "t-pi4", name: "Raspberry Pi 4", sub: "make image-rpi4", layer: "targets", status: "partial", ms: ["M0"],
+    summary: "The main target: V3DV gives wgpu a real GPU. The image builds and flashes, but has never booted: no Pi 4 on hand yet.",
+    rel: ["image"] },
+  { id: "t-pi3", name: "Raspberry Pi 3B+", sub: "make image-rpi3", layer: "targets", status: "built", ms: ["M7"],
+    summary: "A stand-in: boots to the desktop on 1080p HDMI, joins Wi-Fi, and takes deploys, pi-report and pi-state. Its GPU has no Vulkan driver, so it renders on the CPU at about 4 fps.",
+    facts: [["Memory", "905 MiB usable"], ["SD card", "22 MiB/s reads"]],
+    gaps: ["Needs a 5.1 V 2.5 A supply: undervoltage throttles it"],
+    rel: ["image", "pi3-gles"] },
+
+  // ----- Tools -----
+  { id: "osctl", name: "osctl", sub: "crates/osctl", layer: "tools", status: "built", ms: ["M2", "M3", "M4", "M6"],
+    summary: "The command-line tool for everything on the bus.",
+    points: ["osctl bus: list, call, stream, pub, sub, tap (a live trace), bench", "osctl db: create, get, query, search, history, undo, watch, links, snapshots, blobs", "osctl app install DIR [--watch]: build, install and launch, reinstalling on every save", "osctl perm: list, grant, revoke, audit"],
+    rel: ["busd", "dbd", "permd", "session"] },
+  { id: "devtools", name: "Build and device tools", sub: "tools/ · Makefile", layer: "tools", status: "built", ms: ["M0"],
+    summary: "Scripts that build images, flash and preset SD cards, deploy over SSH, inspect a running device and run the smoke tests.",
+    rel: ["image", "t-qemu", "t-pi3", "t-pi4"] },
+  { id: "spikes", name: "Spikes", sub: "spikes/", layer: "tools", status: "built", ms: ["M1", "M3", "M4"],
+    summary: "Benchmarks kept to rerun on new hardware: kms-probe (Spikes A/B, the KMS frame path), db-bench (C, Loro and SQLite) and js-bench (D, QuickJS apps).",
+    facts: [["Pi 3B+ kms-probe", "render + readback ~227 ms, copy 11 ms"], ["Pi 3B+ js-bench", "21,986 signal updates/s"]],
+    rel: ["compositor", "dbd", "app-host"] },
+
+  // ===== Inside: compositor =====
+  { id: "c-scene", parent: "compositor", group: "Model", name: "Scene graph", sub: "scene.rs", status: "built", ms: ["M1", "M4"],
+    summary: "The tree of nodes every window is made of. Apps name nodes with their own ids, translated per window, so an app reaches only its own.",
+    points: ["A commit is checked whole before any of it applies", "Only a window's opener may commit to it", "At most 20,000 nodes per window"] },
+  { id: "c-bridge", parent: "compositor", group: "Model", name: "Bus bridge", sub: "bus.rs · apps.rs", status: "built", ms: ["M4"],
+    summary: "Claims compositor on a bus thread and hands requests to the frame loop, so rendering never waits on I/O.",
+    points: ["open_window is a streamed request: the window lasts exactly as long as the request, so a crashed app leaves nothing behind", "Later parts carry the window's events (click, change, submit, choose, range, cancel)"] },
+  { id: "c-layout", parent: "compositor", group: "Model", name: "Layout", sub: "layout.rs · taffy", status: "built", ms: ["M5"],
+    summary: "Taffy flexbox and grid lay out every container. Text is measured with the renderer's own metrics, so what's measured is what's drawn.",
+    points: ["Runs only when a commit changes something that affects layout"] },
+  { id: "c-widgets", parent: "compositor", group: "Interaction", name: "Widgets", sub: "draw.rs · textedit.rs", status: "built", ms: ["M5", "M7"],
+    summary: "label, button, checkbox, toggle, slider, select, menu, text_field (with secret), text_area, image, scroll, vlist, split, toolbar, dialog and terminal.",
+    points: ["State the compositor owns (focus, caret, selection, scroll) lives in _-prefixed props apps can't set", "Bound text fields edit a document field directly through dbd's splice"],
+    gaps: ["Bound fields load once: another writer's changes don't show until the field is made again", "Images are PNG only, at most 4096 px a side"] },
+  { id: "c-input", parent: "compositor", group: "Interaction", name: "Input, focus, clipboard", sub: "input.rs", status: "built", ms: ["M1", "M5"],
+    summary: "Both backends feed one Seat, so mouse, tablet and keyboard drive the same code.",
+    points: ["Tab order, focus rings, keyboard control of every widget", "The clipboard holds text and an optional document reference; reading it takes the clipboard grant"] },
+  { id: "c-wm", parent: "compositor", group: "Interaction", name: "Window manager and shell", sub: "wm.rs · shell.rs", status: "built", ms: ["M5"],
+    summary: "Title bars with close and maximize, move, resize, four workspaces, Alt+Tab with a switcher, and a top bar with the Apps menu and a clock.",
+    points: ["Ctrl+Alt+Left/Right or 1–4 switch workspaces; adding Shift takes the window along"] },
+  { id: "c-prompt", parent: "compositor", group: "Interaction", name: "Trusted prompts", sub: "prompt.rs", status: "built", ms: ["M6"],
+    summary: "Permission prompts drawn over everything, the top bar included, so no app can cover or imitate them. \"Don't allow\" has the focus.",
+    points: ["The app's name and reason appear as quotes beside its app id"] },
+  { id: "c-term", parent: "compositor", group: "Interaction", name: "Terminal node", sub: "terminal.rs", status: "built", ms: ["M7"],
+    summary: "Attaches to a ptyd session as the app, draws the cell grid in the monospace face, and sends keys as xterm does." },
+  { id: "c-render", parent: "compositor", group: "Drawing", name: "Renderer", sub: "render.rs · wgpu", status: "built", ms: ["M1"],
+    summary: "wgpu with instanced SDF rounded rectangles and glyphon text per layer. Inter is built in as the UI face.",
+    points: ["An idle scene draws nothing"], gaps: ["Damage is per frame: any change redraws the whole screen"] },
+  { id: "c-damage", parent: "compositor", group: "Drawing", name: "Region damage", sub: "M1 leftover", status: "planned", ms: ["M1"],
+    summary: "Redraw and copy only the regions that changed. The biggest win left for the copy path on every device." },
+  { id: "c-images", parent: "compositor", group: "Drawing", name: "Images", sub: "image.rs", status: "partial", ms: ["M5"],
+    summary: "PNG blobs, decoded and shared, fetched as the window's app. Transforms beyond translation aren't started.",
+    facts: [["Cache", "128 MiB of images no window shows"]] },
+  { id: "c-hosted", parent: "compositor", group: "Backends", name: "Hosted backend", sub: "backend/hosted.rs", status: "built", ms: ["M1"],
+    summary: "A winit window on macOS (wgpu on Metal), for day-to-day development." },
+  { id: "c-kms", parent: "compositor", group: "Backends", name: "KMS backend", sub: "backend/kms/", status: "built", ms: ["M1"],
+    summary: "Full-screen output on DRM/KMS: wgpu renders offscreen, the pixels are copied into one of three dumb buffers, and that buffer is page-flipped on vblank.",
+    points: ["libinput and xkbcommon for input; the pointer is a hardware cursor, so moving it costs no redraw", "Turns the text console's keyboard and drawing off while it runs, and gives them back on SIGTERM", "--render-height can render fewer rows and let the display hardware scale them up (opt-in: text gets fuzzy)"] },
+  { id: "c-zerocopy", parent: "compositor", group: "Backends", name: "Zero-copy scanout", sub: "Spike B", status: "planned", ms: ["M1"],
+    summary: "On the Pi 4, V3DV renders into a texture exported as a dmabuf and imported as the KMS framebuffer, with no readback or copy." },
+  { id: "pi3-gles", parent: "compositor", group: "Backends", name: "Pi 3 OpenGL ES 2.0 renderer", sub: "future project", status: "future", ms: [],
+    summary: "The Pi 3's GPU only does OpenGL ES 2.0, which wgpu can't use. A second renderer behind the DrawList, on EGL and GBM, with zero-copy scanout, would give it native 1080p at 30 fps or better.",
+    points: ["Filed under Future projects in docs/implementation-plan.md; not scheduled"] },
+
+  // ===== Inside: database =====
+  { id: "d-store", parent: "dbd", group: "Storage", name: "Document store", sub: "crates/db", status: "built", ms: ["M3"],
+    summary: "Each document is a Loro document. One SQLite transaction (WAL) per change writes its update, a JSON copy for queries and an FTS5 row for search.",
+    points: ["Updates are JSON merge patches that write only what changed", "Updates fold into the snapshot every 64", "Documents are at most 1 MiB of JSON; ids are UUIDv7"] },
+  { id: "d-blobs", parent: "dbd", group: "Storage", name: "Blobs", sub: "blobs/ab/cdef…", status: "built", ms: ["M3"],
+    summary: "Immutable files named by SHA-256, stored once however often they're added, passed in and out as file descriptors.",
+    gaps: ["Deleting unused blobs waits for history compaction (M8)"] },
+  { id: "d-snap", parent: "dbd", group: "Storage", name: "Snapshots", sub: "SQLite backup API", status: "built", ms: ["M3"],
+    summary: "One an hour (none if nothing changed), keeping 48. A restore saves the current state first, so it can be undone, and live queries re-run against the restored data." },
+  { id: "d-schemas", parent: "dbd", group: "Storage", name: "System schemas", sub: "schemas/", status: "built", ms: ["M3"],
+    summary: "JSON Schemas for App, Contact, Email, Image, Message, Playlist, Setting, TextDocument and Track. Writes of those types are checked; each schema's x-indexes become expression indexes." },
+  { id: "d-query", parent: "dbd", group: "Reading", name: "Queries and search", sub: "Mongo-style filters", status: "built", ms: ["M3"],
+    summary: "Filters ($eq, $in, $contains, $and, $or, link operators …) compile to SQL that matches the expression indexes. Values are always bound.",
+    points: ["A reference evaluator agrees with the SQL on 100,000 random filters", "Search matches every word, with FTS5 syntax treated as text"] },
+  { id: "d-live", parent: "dbd", group: "Reading", name: "Live queries", sub: "watch", status: "built", ms: ["M3"],
+    summary: "A streamed request: the result, then diffs (added, changed, removed, order). Writes collect for 16 ms, and a query re-runs only if a changed document could affect it.",
+    facts: [["Effect", "20 live queries refresh in under 1.5 ms after a write (was 126 ms)"]] },
+  { id: "d-links", parent: "dbd", group: "Reading", name: "Links", sub: "{\"$link\": id}", status: "built", ms: ["M3"],
+    summary: "Links live in a document's data, so history and undo carry them, and a links table follows them both ways ($linksTo, $linkedFrom). One hop for now." },
+  { id: "d-history", parent: "dbd", group: "Changing", name: "History and undo", sub: "change sets", status: "built", ms: ["M3"],
+    summary: "Every change belongs to a change set. history, at and diff read any version; undo reverts a change set with a new one, so undoing it redoes." },
+  { id: "d-splice", parent: "dbd", group: "Changing", name: "Collaborative text", sub: "splice", status: "built", ms: ["M5"],
+    summary: "Edits a string field as Loro text, an insert and delete at a position, which merges with other edits. Bound text widgets use it." },
+  { id: "d-grants", parent: "dbd", group: "Changing", name: "Grant enforcement", sub: "M6", status: "built", ms: ["M6"],
+    summary: "ANDs each app's read filter into every query, search and live query; checks writes before and inside their transaction; re-runs an app's live queries when its grants change.",
+    gaps: ["An app's search is filtered after it runs, so it may return fewer than limit"] },
+  { id: "d-compact", parent: "dbd", group: "Changing", name: "History compaction", sub: "M8", status: "planned", ms: ["M8"],
+    summary: "Keep everything for 30 days, then daily for a year, then weekly; pinned versions stay; unreferenced blobs are swept." },
+
+  // ===== Inside: bus =====
+  { id: "b-route", parent: "busd", group: "Messages", name: "Request routing", sub: "router", status: "built", ms: ["M2"],
+    summary: "Routes by service name and rewrites request ids. Every request ends with exactly one answer: the service's, a timeout (30 s default), service_gone, or nothing after a cancel." },
+  { id: "b-pubsub", parent: "busd", group: "Messages", name: "Pub/sub", sub: "prefix.* topics", status: "built", ms: ["M2"],
+    summary: "Topics with prefix wildcards. Apps may publish and subscribe only under app.<their id>." },
+  { id: "b-fds", parent: "busd", group: "Messages", name: "Descriptor passing", sub: "SCM_RIGHTS", status: "built", ms: ["M2"],
+    summary: "Requests, responses and publishes carry up to 16 descriptors; each subscriber gets its own copies." },
+  { id: "b-tap", parent: "busd", group: "Messages", name: "Tap", sub: "osctl bus tap", status: "built", ms: ["M2"],
+    summary: "A live trace of every message, for trusted connections. A slow tap misses trace messages instead of being dropped." },
+  { id: "b-identity", parent: "busd", group: "Trust", name: "Identity by construction", sub: "adopt", status: "built", ms: ["M2"],
+    summary: "session makes a socket pair per service and app, gives one end to the process and hands the broker the other. Messages are stamped with that identity; a client's own from is dropped." },
+  { id: "b-perm", parent: "busd", group: "Trust", name: "Permission checks", sub: "M6", status: "built", ms: ["M6"],
+    summary: "An app may send requests only to db, compositor, perm and secrets (which check requests themselves) and to services it holds service:NAME for." },
+  { id: "b-limits", parent: "busd", group: "Trust", name: "Limits and backpressure", sub: "bounded queues", status: "built", ms: ["M2"],
+    summary: "Each connection's queue holds at most 4,096 frames, 16 MiB and 256 descriptors; one that stops reading is dropped.",
+    facts: [["Per connection", "1,024 pending requests, 256 subscriptions, 64 names"], ["Frame limit", "4 MiB"]] },
+  { id: "b-fuzz", parent: "busd", group: "Trust", name: "Randomized tests", sub: "BUS_FUZZ_SEEDS", status: "built", ms: ["M2"],
+    summary: "Seeded router, decoder and live-broker tests; 100,000 router seeds (200 million events) and 50 million damaged frames pass." },
+
+  // ===== Inside: session =====
+  { id: "s-super", parent: "session", group: "Services", name: "Supervision", sub: "restart backoff", status: "built", ms: ["M0"],
+    summary: "Restarts what exits, backing off from 1 s to 30 s; a minute up counts as healthy. Gives up after 5 quick failures in a row and says how to retry.",
+    points: ["SIGTERM stops every service (SIGKILL after 2 s), so a restart leaves nothing behind"] },
+  { id: "s-conn", parent: "session", group: "Services", name: "Bus connections", sub: "bus=broker|system|app:ID", status: "built", ms: ["M2"],
+    summary: "Starts busd with session's own connection in place, then gives each service a connection the broker adopts. If busd dies, the services that had connections restart too." },
+  { id: "s-log", parent: "session", group: "Services", name: "System log", sub: "/data/log/session.log", status: "built", ms: [],
+    summary: "Everything session and its services print goes to the console and to the log, each line stamped with seconds since boot like dmesg. Root only; capped at two 1 MiB files.",
+    points: ["console services (the console shell) keep the terminal", "make pi-state shows the end of it over SSH"] },
+  { id: "s-launch", parent: "session", group: "Apps", name: "App launching", sub: "launch · stop · apps", status: "built", ms: ["M4"],
+    summary: "Runs app-host --app ID with an app:ID connection and restarts it like a service. Only trusted connections may launch or stop apps." },
+  { id: "s-sandbox", parent: "session", group: "Apps", name: "Sandbox", sub: "netns · Landlock · seccomp", status: "built", ms: ["M6"],
+    summary: "Three layers set up between fork and exec, each standing alone: a network namespace (loopback only without network), Landlock (reads only system program and library directories, writes only its runtime directory), and seccomp (no new Unix sockets, no ptrace, mount, unshare, bpf …).",
+    gaps: ["Apps run as the same Unix user as the services; the sandbox is what keeps them apart"] },
+
+  // ===== Inside: image =====
+  { id: "i-parts", parent: "image", group: "Disk", name: "Partitions", sub: "genimage", status: "built", ms: ["M0"],
+    summary: "Boot (FAT), root A, root B and data. Root is read-only; data is ext4 and holds the database, saved networks, SSH host keys, caches and the log." },
+  { id: "i-boot", parent: "image", group: "Disk", name: "Boot sequence", sub: "inittab · S05data · start-session", status: "built", ms: ["M0", "M7"],
+    summary: "BusyBox init runs S05data, which mounts /data, turns a wifi.txt preset into a NetworkManager profile and deletes it, and mounts the dev overlay. Then start-session runs session on the console." },
+  { id: "i-dev", parent: "image", group: "Disk", name: "Dev image extras", sub: "dropbear · /opt/idealos", status: "built", ms: ["M0"],
+    summary: "SSH with a baked-in dev key, and a writable overlay on /opt/idealos that deploys push binaries and apps into; services prefer the overlay's copies." },
+  { id: "i-kernel", parent: "image", group: "System", name: "Kernel and drivers", sub: "vc4 · v3d · brcmfmac", status: "built", ms: ["M0", "M7"],
+    summary: "The Pi kernel with xz-compressed modules, loaded by kmod's modprobe. The build fails if the display or Wi-Fi drivers aren't indexed." },
+  { id: "i-gfx", parent: "image", group: "System", name: "Graphics stack", sub: "Mesa", status: "built", ms: ["M0"],
+    summary: "Mesa with lavapipe (CPU Vulkan, QEMU and the Pi 3) and V3DV (the Pi 4's GPU), libdrm, libinput and xkbcommon. Shader cache on /data/cache." },
+  { id: "i-net", parent: "image", group: "System", name: "Networking", sub: "NetworkManager", status: "built", ms: ["M7"],
+    summary: "NetworkManager, wpa_supplicant and D-Bus, with the Pi's Wi-Fi firmware and saved networks on /data." },
+  { id: "i-time", parent: "image", group: "System", name: "Network time", sub: "not planned yet", status: "planned", ms: [],
+    summary: "Nothing sets the clock yet, so the Pi starts at 1970 and document timestamps on the device are wrong. Not yet on any milestone." },
+
+  // ===== Inside: developer tools =====
+  { id: "x-build", parent: "devtools", group: "Make and ship", name: "Build images", sub: "tools/build-image · make image-*", status: "built", ms: ["M0"],
+    summary: "Builds the QEMU, Pi 3 and Pi 4 images in the Lima build VM; tools/build-device-bins rebuilds just our binaries with the image's toolchain." },
+  { id: "x-flash", parent: "devtools", group: "Make and ship", name: "Flash and preset", sub: "tools/flash-sd · tools/sd-wifi", status: "built", ms: ["M0"],
+    summary: "Writes an image to an SD card, then optionally presets a Wi-Fi network (name and password as arguments or asked for) that the Pi joins on first boot." },
+  { id: "x-deploy", parent: "devtools", group: "Make and ship", name: "Deploy", sub: "make deploy", status: "built", ms: ["M0"],
+    summary: "Pushes every service binary and app bundle to a running dev image over SSH and restarts session." },
+  { id: "x-state", parent: "devtools", group: "Inspect", name: "pi-state", sub: "make pi-state", status: "built", ms: [],
+    summary: "What a running device is doing: board, clock speed, temperature and undervoltage, memory and storage, services and any session gave up on, network, display, kernel warnings and the log. Changes nothing." },
+  { id: "x-report", parent: "devtools", group: "Inspect", name: "pi-report", sub: "make pi-report", status: "built", ms: ["M1"],
+    summary: "The hardware report: storage speed, DRM and Vulkan details, input devices, kms-probe runs and all the benchmarks, saved under image/output/reports." },
+  { id: "x-smoke", parent: "devtools", group: "Test", name: "Smoke tests", sub: "make smoke-qemu · smoke-deploy", status: "built", ms: ["M0"],
+    summary: "Boots the QEMU image headless, drives it over the serial console and QMP (dragging a window, Alt+Tab), and checks 41 facts; variants test deploys and the hardware report." },
+  { id: "x-ci", parent: "devtools", group: "Test", name: "CI and lint", sub: "make lint · lint-device", status: "built", ms: ["M0"],
+    summary: "GitHub CI runs fmt, clippy and tests; lint-device runs clippy and tests for the Linux-only code in the build VM." },
+];
+
+// ---------------------------------------------------------------------------------
+const byId = Object.fromEntries(N.map((n) => [n.id, n]));
+const childrenOf = (id) => N.filter((n) => n.parent === id);
+const STATUS = { built: "Built", partial: "Partly built", planned: "Planned", future: "Future project" };
+const MS_STATUS = { built: "Done", partial: "Mostly done", next: "Next", planned: "Planned" };
+
+const state = { view: null, selected: null, milestone: null };
+const fill = (parent, ...kids) => parent.replaceChildren(...kids.flat().filter((k) => k != null && k !== false && k !== 0));
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k.nodeType ? k : document.createTextNode(k));
+  return e;
+};
+
+// Relations are drawn both ways: whatever names this node, and whatever it names.
+function related(id) {
+  const out = new Set(byId[id]?.rel || []);
+  for (const n of N) if ((n.rel || []).includes(id)) out.add(n.id);
+  out.delete(id);
+  return out;
+}
+// A node shown in the current view that stands for `id` (itself, or its parent).
+function shownAs(id) {
+  const n = byId[id];
+  if (!n) return null;
+  return n.parent && n.parent !== state.view ? n.parent : id;
+}
+
+function renderMilestones() {
+  const strip = document.getElementById("ms-strip");
+  strip.replaceChildren(...MILESTONES.map((m) =>
+    el("button", { class: `ms ${m.status}`, "aria-pressed": String(state.milestone === m.id), title: `${m.id} ${m.name}: ${MS_STATUS[m.status]}`,
+      onclick: () => go(state.milestone === m.id ? { milestone: null } : { milestone: m.id, selected: null }) },
+      el("b", {}, m.id), el("small", {}, m.name), el("span", { class: "bar" }))));
+}
+
+function nodeButton(n) {
+  const kids = childrenOf(n.id);
+  const rel = state.selected ? related(state.selected) : new Set();
+  const relShown = new Set([...rel].map(shownAs));
+  const msHit = state.milestone && (n.ms || []).includes(state.milestone);
+  const cls = ["node", n.status,
+    state.selected === n.id && "selected",
+    (relShown.has(n.id) || msHit || (state.selected && byId[state.selected]?.parent === n.id)) && "related"].filter(Boolean).join(" ");
+  return el("button", { class: cls, "aria-pressed": String(state.selected === n.id), "data-id": n.id,
+      onclick: () => {
+        if (state.selected === n.id && kids.length) go({ view: n.id, selected: n.id });
+        else go({ selected: n.id, milestone: null });
+      },
+      ondblclick: () => kids.length && go({ view: n.id, selected: n.id }) },
+    el("span", { class: "n" }, el("i", { class: "dot" }), n.name),
+    el("span", { class: "s" }, n.sub || ""),
+    kids.length ? el("span", { class: "parts" }, `${kids.length} parts ›`) : null);
+}
+
+function renderDiagram() {
+  const crumbs = document.getElementById("crumbs");
+  const layers = document.getElementById("layers");
+  const diagram = document.getElementById("diagram");
+  diagram.classList.toggle("focus", Boolean(state.selected || state.milestone));
+  if (!state.view) {
+    crumbs.replaceChildren(el("span", { class: "here" }, "Whole system"),
+      el("span", { class: "hint" }, "Click a component for details; click it again to look inside."));
+    layers.replaceChildren(...LAYERS.map((L) =>
+      el("div", { class: "layer" },
+        el("div", { class: "layer-head" }, el("h3", {}, L.name), el("p", {}, L.text)),
+        el("div", { class: "nodes" }, ...N.filter((n) => n.layer === L.id).map(nodeButton)))));
+  } else {
+    const p = byId[state.view];
+    crumbs.replaceChildren(
+      el("button", { onclick: () => go({ view: null, selected: p.id }) }, "‹ Whole system"),
+      el("span", { class: "here" }, `Inside ${p.name}`),
+      el("span", { class: "hint" }, "Esc goes back"));
+    const kids = childrenOf(p.id);
+    const groups = [...new Set(kids.map((k) => k.group))];
+    layers.replaceChildren(...groups.map((g) =>
+      el("div", { class: "layer" },
+        el("div", { class: "layer-head" }, el("h3", {}, g)),
+        el("div", { class: "nodes" }, ...kids.filter((k) => k.group === g).map(nodeButton)))));
+  }
+}
+
+function chip(id) {
+  const n = byId[id];
+  if (!n) return null;
+  return el("button", { class: `chip ${n.status === "planned" || n.status === "future" ? "planned" : ""}`,
+    onclick: () => go({ selected: id, view: n.parent || (state.view && !n.parent ? null : state.view), milestone: null }) }, n.name);
+}
+
+function section(title, ...content) {
+  const kids = content.flat().filter(Boolean);
+  return kids.length ? el("div", { class: "sec" }, el("h4", {}, title), ...kids) : null;
+}
+
+function renderSide() {
+  const side = document.getElementById("side");
+  if (state.milestone) {
+    const m = MILESTONES.find((x) => x.id === state.milestone);
+    const hits = N.filter((n) => (n.ms || []).includes(m.id));
+    fill(side,
+      el("div", { class: "eyebrow" }, `Milestone · Phase ${m.phase}`),
+      el("h2", {}, `${m.id} ${m.name}`),
+      el("span", { class: `pill ${m.status === "next" ? "planned" : m.status}` }, el("i"), MS_STATUS[m.status]),
+      el("p", {}, m.text),
+      section("Components", el("div", { class: "chips" }, ...hits.map((n) => chip(n.id)))));
+    return;
+  }
+  const n = byId[state.selected];
+  if (!n) { renderOverview(side); return; }
+  const kids = childrenOf(n.id);
+  const layer = n.parent ? `Inside ${byId[n.parent].name} · ${n.group}` : LAYERS.find((L) => L.id === n.layer)?.name;
+  const ms = (n.ms || []).length ? ` · ${n.ms.join(", ")}` : "";
+  fill(side,
+    el("div", { class: "eyebrow" }, layer + ms),
+    el("h2", {}, n.name),
+    el("span", { class: `pill ${n.status}` }, el("i"), STATUS[n.status]),
+    n.sub ? el("div", { class: "mono", style: "color:var(--muted);font-size:12px" }, n.sub) : null,
+    el("p", {}, n.summary),
+    kids.length && state.view !== n.id ? el("button", { class: "inside-btn", onclick: () => go({ view: n.id, selected: n.id }) }, `Look inside: ${kids.length} parts ›`) : null,
+    section("What it does", n.points ? el("ul", {}, ...n.points.map((p) => el("li", {}, p))) : null),
+    section("Facts", n.facts ? el("dl", { class: "facts" }, ...n.facts.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])) : null),
+    section("Not done yet", n.gaps ? el("ul", { class: "gaps" }, ...n.gaps.map((g) => el("li", {}, g))) : null),
+    section("Parts", kids.length ? el("div", { class: "chips" }, ...kids.map((k) => chip(k.id))) : null),
+    section("Talks to", related(n.id).size ? el("div", { class: "chips" }, ...[...related(n.id)].map(chip)) : null),
+    n.parent ? section("Part of", el("div", { class: "chips" }, chip(n.parent))) : null);
+}
+
+function renderOverview(side) {
+  const top = N.filter((n) => !n.parent);
+  const count = (s) => N.filter((n) => n.status === s).length;
+  fill(side,
+    el("div", { class: "eyebrow" }, "Overview"),
+    el("h2", {}, "One database, one bus"),
+    el("p", {}, "Apps are TypeScript in QuickJS, each in its own sandboxed process. They keep their data as documents in the database and reach everything through the bus, which knows who every message is from. The compositor draws their windows; session starts and watches it all."),
+    el("div", { class: "overview-stats" },
+      el("div", {}, el("b", {}, String(count("built"))), el("span", {}, "built")),
+      el("div", {}, el("b", {}, String(count("partial"))), el("span", {}, "partly built")),
+      el("div", {}, el("b", {}, String(count("planned") + count("future"))), el("span", {}, "planned or future"))),
+    section("Start here", el("div", { class: "chips" }, ...["busd", "dbd", "compositor", "session", "app-host"].map(chip))),
+    section("How a click reaches an app", el("ul", {},
+      el("li", {}, "libinput hands the compositor the click; its window manager finds the widget"),
+      el("li", {}, "The compositor sends a click event on the app's open_window stream, through busd"),
+      el("li", {}, "The app's handler writes a document through dbd, which checks its grants"),
+      el("li", {}, "dbd's live query streams the change back; the app sends a commit; the compositor redraws"))),
+    el("p", { style: "color:var(--muted);font-size:12.5px" }, `${top.length} components on the main diagram, ${N.length - top.length} more inside them.`));
+}
+
+function render() {
+  renderMilestones();
+  renderDiagram();
+  renderSide();
+}
+
+// Navigation, mirrored in the hash: #id selects a component (opening its parent's
+// inside view if it has one); #view-id opens a component's inside view.
+function go(change) {
+  Object.assign(state, change);
+  if (state.selected && byId[state.selected]?.parent) state.view = byId[state.selected].parent;
+  const hash = state.view && state.selected === state.view ? `view-${state.view}` : state.selected || state.milestone || "";
+  if (location.hash.slice(1) !== hash) history.replaceState(null, "", hash ? `#${hash}` : location.pathname + location.search);
+  render();
+  if (change.selected && window.matchMedia("(max-width: 980px)").matches) {
+    document.getElementById("side").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+function fromHash() {
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (h.startsWith("view-") && byId[h.slice(5)]) return { view: h.slice(5), selected: h.slice(5), milestone: null };
+  if (byId[h]) return { view: byId[h].parent || null, selected: h, milestone: null };
+  if (MILESTONES.some((m) => m.id === h)) return { view: null, selected: null, milestone: h };
+  return { view: null, selected: null, milestone: null };
+}
+window.addEventListener("hashchange", () => { Object.assign(state, fromHash()); render(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (state.view) go({ view: null, selected: state.view });
+  else if (state.selected || state.milestone) go({ selected: null, milestone: null });
+});
+Object.assign(state, fromHash());
+render();
+</script>
+</body>
+</html>

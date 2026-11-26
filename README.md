@@ -127,7 +127,7 @@ apps/               the apps that ship with the system (counter, notes, gallery,
 schemas/            JSON Schemas for the system document types
 image/              Buildroot external tree: defconfigs, kernel fragments, rootfs overlay
 tools/              build VM, image build, QEMU, SD card, deploy scripts
-docs/               feature list, implementation plan, screenshots
+docs/               feature list, implementation plan, architecture.html (an interactive map), screenshots
 ```
 
 ## Status: Phase 0
