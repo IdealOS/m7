@@ -17,8 +17,15 @@ echo "$INFO" | grep -Eq "Device Location: +External|Removable Media: +(Removable
 	|| { echo "$DISK is not an external or removable disk. Refusing."; exit 1; }
 
 PART="${DISK}s1"
-diskutil mount "$PART" >/dev/null 2>&1 || true
-MNT="$(diskutil info "$PART" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')"
+# Straight after flash-sd writes the card, macOS takes a few seconds to read the new
+# partition table, and the boot partition can't be mounted until it has.
+MNT=
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+	diskutil mount "$PART" >/dev/null 2>&1 || true
+	MNT="$(diskutil info "$PART" 2>/dev/null | sed -n 's/^ *Mount Point: *//p')"
+	[ -n "$MNT" ] && [ -d "$MNT" ] && break
+	sleep 1
+done
 if [ -z "$MNT" ] || [ ! -d "$MNT" ]; then
 	echo "Can't mount the boot partition $PART. Remove the card, put it back, and run this again."
 	exit 1

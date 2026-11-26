@@ -32,6 +32,27 @@ RDISK="$(echo "$DISK" | sed 's|/dev/disk|/dev/rdisk|')"
 diskutil unmountDisk "$DISK"
 sudo dd if="$IMG" of="$RDISK" bs=4m status=progress
 sync
+# A worn-out card can go read-only inside while reporting every write as done, so
+# read two parts back and compare them with the image: the partition table, and the
+# start of the first root partition. Not the boot partition: macOS mounts that FAT
+# partition as soon as it appears and writes to it. It can't mount ext4, so the root
+# partition stays as written. The raw device bypasses the Mac's cache.
+VERIFY_MB=16
+# Partition 2's first sector, from its entry in the image's partition table.
+ROOT_LBA=$(od -An -tu4 -j $((446 + 16 + 8)) -N4 "$IMG" | tr -d ' ')
+# Rounded up to a whole MiB (it starts one sector past 64 MiB), so the read stays
+# inside the root partition.
+ROOT_MB=$(((ROOT_LBA * 512 + 1048575) / 1048576))
+# cmp's two trailing numbers skip that many bytes into each file first.
+if ! sudo dd if="$RDISK" bs=512 count=1 2>/dev/null | cmp -s -n 512 - "$IMG" ||
+	! sudo dd if="$RDISK" bs=1m skip="$ROOT_MB" count=$VERIFY_MB 2>/dev/null |
+		cmp -s -n $((VERIFY_MB * 1048576)) - "$IMG" 0 $((ROOT_MB * 1048576)); then
+	echo "The card doesn't hold what was written: its partition table or root partition differs from the image."
+	echo "It is probably failing (old cards often ignore writes silently). Try another card."
+	diskutil eject "$DISK" >/dev/null 2>&1 || true
+	exit 1
+fi
+echo "Verified the card's partition table and $VERIFY_MB MB of its root partition."
 # The card is still attached, so this is the moment to preset Wi-Fi (tools/sd-wifi
 # ejects it when done).
 [ $# -gt 0 ] && exec "$REPO/tools/sd-wifi" "$DISK" "$@"
