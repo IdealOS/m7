@@ -345,12 +345,19 @@ impl Renderer {
             bytemuck::bytes_of(&Globals { viewport: [w as f32, h as f32], _pad: [0.0; 2] }),
         );
 
+        // A plain full-screen background becomes the clear colour, which a tiled GPU
+        // applies for free, instead of a quad shaded on every pixel. On a Pi 4 at
+        // 3440x1440 that quad cost ~27 ms a frame.
+        let background = background_fill(list, size, scale);
+        let clear = background.unwrap_or(clear);
+
         // Quads for every layer go into one instance buffer; each layer draws a range.
         let mut instances = Vec::new();
         let mut ranges = Vec::with_capacity(list.layers.len());
-        for layer in &list.layers {
+        for (i, layer) in list.layers.iter().enumerate() {
             let start = instances.len() as u32;
-            for q in &layer.quads {
+            let skip = usize::from(i == 0 && background.is_some());
+            for q in &layer.quads[skip..] {
                 instances.push(QuadInstance {
                     rect: phys(q.rect, scale),
                     color: q.color.to_linear(),
@@ -534,6 +541,61 @@ fn text_bounds(t: &TextItem) -> Rect {
 
 fn phys(r: Rect, scale: f32) -> [f32; 4] {
     [r.x * scale, r.y * scale, r.w * scale, r.h * scale]
+}
+
+/// The colour of a plain background the frame can be cleared to, in place of its quad:
+/// the very first quad (nothing is drawn beneath it), when it is opaque, square,
+/// borderless and covers the whole target, clip included.
+fn background_fill(list: &DrawList, (w, h): (u32, u32), scale: f32) -> Option<Rgba> {
+    let q = list.layers.first()?.quads.first()?;
+    let covers = |r: Rect| {
+        r.x * scale <= 0.0
+            && r.y * scale <= 0.0
+            && (r.x + r.w) * scale >= w as f32
+            && (r.y + r.h) * scale >= h as f32
+    };
+    let plain = q.color.0[3] == 255 && q.radius <= 0.0 && q.border_width <= 0.0;
+    (plain && covers(q.rect) && covers(q.clip)).then_some(q.color)
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use crate::scene::{Layer, QuadItem};
+
+    fn quad(rect: Rect, color: Rgba) -> QuadItem {
+        QuadItem { rect, color, border_color: color, border_width: 0.0, radius: 0.0, clip: Rect::INFINITE }
+    }
+    fn list(quads: Vec<QuadItem>) -> DrawList {
+        DrawList { layers: vec![Layer { quads, texts: Vec::new(), images: Vec::new() }] }
+    }
+    const GREY: Rgba = Rgba([223, 229, 236, 255]);
+    const SCREEN: Rect = Rect { x: 0.0, y: 0.0, w: 1720.0, h: 720.0 };
+
+    #[test]
+    fn a_plain_full_screen_background_becomes_the_clear() {
+        // 1720x720 logical at scale 2 is 3440x1440 physical.
+        assert_eq!(background_fill(&list(vec![quad(SCREEN, GREY)]), (3440, 1440), 2.0), Some(GREY));
+        let bigger = Rect { x: -10.0, y: -10.0, w: 2000.0, h: 900.0 };
+        assert_eq!(background_fill(&list(vec![quad(bigger, GREY)]), (3440, 1440), 2.0), Some(GREY));
+    }
+
+    #[test]
+    fn anything_else_is_drawn_as_a_quad() {
+        let size = (3440, 1440);
+        let translucent = quad(SCREEN, Rgba([223, 229, 236, 200]));
+        let rounded = QuadItem { radius: 8.0, ..quad(SCREEN, GREY) };
+        let bordered = QuadItem { border_width: 1.0, ..quad(SCREEN, GREY) };
+        let clipped = QuadItem { clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, ..quad(SCREEN, GREY) };
+        let short = quad(Rect { h: 700.0, ..SCREEN }, GREY);
+        for q in [translucent, rounded, bordered, clipped, short] {
+            assert_eq!(background_fill(&list(vec![q.clone()]), size, 2.0), None, "{q:?}");
+        }
+        // Only the first quad: one drawn over another can't become the clear.
+        let window = quad(Rect { x: 10.0, y: 10.0, w: 100.0, h: 100.0 }, GREY);
+        assert_eq!(background_fill(&list(vec![window, quad(SCREEN, GREY)]), size, 2.0), None);
+        assert_eq!(background_fill(&DrawList::default(), size, 2.0), None);
+    }
 }
 
 #[cfg(test)]

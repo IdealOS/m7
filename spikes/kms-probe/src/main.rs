@@ -123,8 +123,10 @@ impl Timings {
 pub fn animate(scene: &mut compositor::scene::Scene, frame: usize, hud: &str) {
     use protocol::SceneOp;
     let top = scene.top_level();
-    // The top bar is last; the window just under it is the frontmost.
-    if top.len() >= 2 {
+    // The desktop is first and the top bar last; the window just under the bar is the
+    // frontmost. With no windows there's nothing to slide: moving the desktop itself
+    // would make it stop covering the screen and measure a cost the desktop never has.
+    if top.len() >= 3 {
         let id = top[top.len() - 2];
         let x = 300.0 + 200.0 * (frame as f32 / 30.0).sin();
         let props = serde_json::json!({ "x": x }).as_object().cloned().unwrap_or_default();
