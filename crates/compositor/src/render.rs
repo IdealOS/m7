@@ -326,6 +326,12 @@ impl Renderer {
 
     /// Record one frame. `size` is the target size in physical pixels and
     /// `scale` the logical-to-physical factor.
+    ///
+    /// `damage` (logical pixels, see [`crate::damage`]) limits the frame to those
+    /// rectangles: the target keeps its contents and only the damage is redrawn, each
+    /// rectangle filled with the background and every layer drawn clipped to it. The
+    /// target must hold the frame the damage was worked out against. `None` redraws
+    /// everything.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -337,6 +343,7 @@ impl Renderer {
         scale: f32,
         list: &DrawList,
         clear: Rgba,
+        damage: Option<&[Rect]>,
     ) -> FrameStats {
         let (w, h) = size;
         queue.write_buffer(
@@ -350,12 +357,47 @@ impl Renderer {
         // 3440x1440 that quad cost ~27 ms a frame.
         let background = background_fill(list, size, scale);
         let clear = background.unwrap_or(clear);
+        // Scissor rectangles (physical pixels) for a partial frame.
+        let scissors: Option<Vec<[u32; 4]>> = damage
+            .filter(|_| !list.layers.is_empty())
+            .map(|rects| rects.iter().filter_map(|r| scissor(*r, scale, size)).collect());
+        // In a partial frame, a layer nowhere near the damage is neither prepared nor
+        // drawn: each draw call costs, even where the scissor discards every pixel.
+        // The first layer always draws, since it starts with the background fill.
+        let touches: Vec<Vec<bool>> = match (&scissors, damage) {
+            (Some(_), Some(rects)) => list
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let bounds = layer_bounds(l);
+                    rects
+                        .iter()
+                        .map(|r| i == 0 || bounds.is_some_and(|b| !b.intersect(r).is_empty()))
+                        .collect()
+                })
+                .collect(),
+            _ => vec![vec![true]; list.layers.len()],
+        };
+        let used: Vec<bool> = touches.iter().map(|t| t.iter().any(|&x| x)).collect();
 
         // Quads for every layer go into one instance buffer; each layer draws a range.
         let mut instances = Vec::new();
         let mut ranges = Vec::with_capacity(list.layers.len());
+        if scissors.is_some() {
+            // A partial frame keeps the old contents, so the damage is first filled
+            // with the background, as a clear would: a quad over the whole target,
+            // which the scissors limit to the damage. It starts the first layer.
+            instances.push(QuadInstance {
+                rect: [0.0, 0.0, w as f32, h as f32],
+                color: clear.to_linear(),
+                border_color: clear.to_linear(),
+                params: [0.0; 4],
+                clip: phys(Rect::INFINITE, 1.0),
+            });
+        }
         for (i, layer) in list.layers.iter().enumerate() {
-            let start = instances.len() as u32;
+            let start = if i == 0 { 0 } else { instances.len() as u32 };
             let skip = usize::from(i == 0 && background.is_some());
             for q in &layer.quads[skip..] {
                 instances.push(QuadInstance {
@@ -420,6 +462,15 @@ impl Renderer {
         }
         let mut text_count = 0;
         for (i, layer) in list.layers.iter().enumerate() {
+            if !used[i] {
+                // Keep its shaped text cached for the next frame that draws it.
+                for t in &layer.texts {
+                    if let Some(c) = self.texts.get_mut(&(t.node, t.slot)) {
+                        c.used = true;
+                    }
+                }
+                continue;
+            }
             for t in &layer.texts {
                 self.shape(t);
             }
@@ -464,12 +515,16 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: r as f64,
-                            g: g as f64,
-                            b: b as f64,
-                            a: a as f64,
-                        }),
+                        load: if scissors.is_some() {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color {
+                                r: r as f64,
+                                g: g as f64,
+                                b: b as f64,
+                                a: a as f64,
+                            })
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -478,26 +533,34 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            for (i, range) in ranges.into_iter().enumerate() {
-                if !range.is_empty() {
-                    // glyphon binds its own pipeline, bind group and vertex buffer
-                    // when it draws a layer's text, so rebind ours for every layer.
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, &self.bind_group, &[]);
-                    pass.set_vertex_buffer(0, self.instances.slice(..));
-                    pass.draw(0..4, range);
-                }
-                if !image_ranges[i].is_empty() {
-                    pass.set_pipeline(&self.image_pipeline);
-                    pass.set_bind_group(0, &self.bind_group, &[]);
-                    pass.set_vertex_buffer(0, self.image_instances.slice(..));
-                    for (at, blob) in &image_ranges[i] {
-                        pass.set_bind_group(1, &self.images[blob].bind_group, &[]);
-                        pass.draw(0..4, *at..*at + 1);
+            // The whole frame once, or every layer once per damaged rectangle.
+            let passes = scissors.unwrap_or_else(|| vec![[0, 0, w, h]]);
+            for (n, [sx, sy, sw, sh]) in passes.into_iter().enumerate() {
+                pass.set_scissor_rect(sx, sy, sw, sh);
+                for (i, range) in ranges.iter().enumerate() {
+                    if !touches[i].get(n).copied().unwrap_or(true) {
+                        continue;
                     }
-                }
-                if let Err(e) = self.text_renderers[i].render(&self.atlas, &self.viewport, &mut pass) {
-                    log::error!("text render failed: {e}");
+                    if !range.is_empty() {
+                        // glyphon binds its own pipeline, bind group and vertex buffer
+                        // when it draws a layer's text, so rebind ours for every layer.
+                        pass.set_pipeline(&self.pipeline);
+                        pass.set_bind_group(0, &self.bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.instances.slice(..));
+                        pass.draw(0..4, range.clone());
+                    }
+                    if !image_ranges[i].is_empty() {
+                        pass.set_pipeline(&self.image_pipeline);
+                        pass.set_bind_group(0, &self.bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.image_instances.slice(..));
+                        for (at, blob) in &image_ranges[i] {
+                            pass.set_bind_group(1, &self.images[blob].bind_group, &[]);
+                            pass.draw(0..4, *at..*at + 1);
+                        }
+                    }
+                    if let Err(e) = self.text_renderers[i].render(&self.atlas, &self.viewport, &mut pass) {
+                        log::error!("text render failed: {e}");
+                    }
                 }
             }
         }
@@ -539,6 +602,30 @@ fn text_bounds(t: &TextItem) -> Rect {
     area.intersect(&t.clip)
 }
 
+/// Everything a layer can draw on (logical pixels), as damage tracking sees it.
+fn layer_bounds(l: &crate::scene::Layer) -> Option<Rect> {
+    let mut acc: Option<Rect> = None;
+    let mut add = |r: Rect| {
+        if !r.is_empty() {
+            acc = Some(acc.map_or(r, |a| a.union(&r)));
+        }
+    };
+    l.quads.iter().for_each(|q| add(q.rect.expand(2.0).intersect(&q.clip)));
+    l.texts.iter().for_each(|t| add(text_bounds(t).expand(2.0)));
+    l.images.iter().for_each(|i| add(i.rect.expand(2.0).intersect(&i.clip)));
+    acc
+}
+
+/// A damage rectangle (logical) as a scissor in whole physical pixels, rounded
+/// outwards and clipped to the target; `None` if nothing of it is on the target.
+fn scissor(r: Rect, scale: f32, (w, h): (u32, u32)) -> Option<[u32; 4]> {
+    let x0 = (r.x * scale).floor().clamp(0.0, w as f32) as u32;
+    let y0 = (r.y * scale).floor().clamp(0.0, h as f32) as u32;
+    let x1 = ((r.x + r.w) * scale).ceil().clamp(0.0, w as f32) as u32;
+    let y1 = ((r.y + r.h) * scale).ceil().clamp(0.0, h as f32) as u32;
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
 fn phys(r: Rect, scale: f32) -> [f32; 4] {
     [r.x * scale, r.y * scale, r.w * scale, r.h * scale]
 }
@@ -567,7 +654,7 @@ mod background_tests {
         QuadItem { rect, color, border_color: color, border_width: 0.0, radius: 0.0, clip: Rect::INFINITE }
     }
     fn list(quads: Vec<QuadItem>) -> DrawList {
-        DrawList { layers: vec![Layer { quads, texts: Vec::new(), images: Vec::new() }] }
+        DrawList { layers: vec![Layer { quads, ..Layer::default() }] }
     }
     const GREY: Rgba = Rgba([223, 229, 236, 255]);
     const SCREEN: Rect = Rect { x: 0.0, y: 0.0, w: 1720.0, h: 720.0 };

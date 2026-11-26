@@ -123,6 +123,8 @@ impl App {
             gpu.window.scale_factor() as f32,
             &list,
             Rgba::parse(demo::BACKGROUND).expect("valid color"),
+            // A window surface's buffers have no known age: redraw them whole.
+            None,
         );
         gpu.queue.submit(Some(encoder.finish()));
         gpu.window.pre_present_notify();

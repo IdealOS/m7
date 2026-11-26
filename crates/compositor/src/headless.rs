@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::render::{FrameStats, Renderer};
-use crate::scene::{DrawList, Rgba};
+use crate::scene::{DrawList, Rect, Rgba};
 
 pub struct Image {
     pub width: u32,
@@ -39,7 +39,7 @@ pub fn render(list: &DrawList, width: u32, height: u32, scale: f32) -> Result<Im
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
     let mut target = Offscreen::new(pw, ph, wgpu::TextureFormat::Rgba8UnormSrgb)?;
     let mut pixels = Vec::with_capacity((pw * ph * 4) as usize);
-    target.render(list, scale, Rgba::BLACK, |row| pixels.extend_from_slice(row))?;
+    target.render(list, scale, Rgba::BLACK, None, |row| pixels.extend_from_slice(row))?;
     Ok(Image { width: pw, height: ph, pixels })
 }
 
@@ -221,6 +221,8 @@ impl Offscreen {
 
     /// Render one frame straight into `view` (an imported scanout buffer of `size`)
     /// and wait until the GPU has finished, so the buffer can be shown. No readback.
+    /// `damage`: see [`Renderer::render`]; the buffer must hold the frame it was
+    /// worked out against.
     pub fn render_to(
         &mut self,
         view: &wgpu::TextureView,
@@ -228,11 +230,21 @@ impl Offscreen {
         list: &DrawList,
         scale: f32,
         clear: Rgba,
+        damage: Option<&[Rect]>,
     ) -> Result<FrameStats, String> {
         let started = Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let stats =
-            self.renderer.render(&self.device, &self.queue, &mut encoder, view, size, scale, list, clear);
+        let stats = self.renderer.render(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            view,
+            size,
+            scale,
+            list,
+            clear,
+            damage,
+        );
         let encoded = Instant::now();
         let index = self.queue.submit(Some(encoder.finish()));
         self.device
@@ -243,11 +255,14 @@ impl Offscreen {
     }
 
     /// Render one frame and hand each row of tightly packed pixels to `row`, top to bottom.
+    /// `damage`: see [`Renderer::render`]; the offscreen texture holds the last frame
+    /// rendered here, so damage worked out against that frame applies.
     pub fn render(
         &mut self,
         list: &DrawList,
         scale: f32,
         clear: Rgba,
+        damage: Option<&[Rect]>,
         mut row: impl FnMut(&[u8]),
     ) -> Result<FrameStats, String> {
         let (w, h) = (self.width, self.height);
@@ -262,6 +277,7 @@ impl Offscreen {
             scale,
             list,
             clear,
+            damage,
         );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -343,6 +359,53 @@ mod tests {
         assert_eq!(img.pixel(50, 30), [255, 0, 0, 255], "center is the fill");
         assert_eq!(img.pixel(2, 2), [0, 0, 0, 255], "outside is the clear color");
         assert_eq!(img.pixel(10, 10)[0], 0, "the rounded corner leaves the corner pixel clear");
+    }
+
+    /// Region damage must be invisible: redrawing only what changed, over the last
+    /// frame, gives exactly the pixels of drawing the new frame from scratch.
+    #[test]
+    fn a_partial_redraw_matches_a_full_one() {
+        use crate::damage::DamageTracker;
+        let (w, h) = (1200u32, 800u32);
+        let screen = (w as f32, h as f32);
+        let mut scene = Scene::new();
+        scene.apply_all(crate::demo::build(screen.0, screen.1, 4));
+        let mut target = match Offscreen::new(w, h, wgpu::TextureFormat::Rgba8UnormSrgb) {
+            Ok(t) => t,
+            Err(e) if e.starts_with("no GPU adapter") => return eprintln!("skipping: {e}"),
+            Err(e) => panic!("{e}"),
+        };
+        let mut tracker = DamageTracker::new(1);
+        let first = scene.draw_list();
+        assert_eq!(tracker.next_frame(&first, screen), None);
+        target.render(&first, 1.0, Rgba::BLACK, None, |_| {}).unwrap();
+        tracker.drew(0);
+
+        // Move the frontmost window (just under the top bar) and change the readout.
+        let top = scene.top_level();
+        let props = json!({"x": 600, "y": 400}).as_object().unwrap().clone();
+        scene.apply(SceneOp::Set { id: top[top.len() - 2], props });
+        scene.apply(crate::demo::hud("partial redraw"));
+        let second = scene.draw_list();
+        let damage = tracker.next_frame(&second, screen).expect("a partial redraw");
+        assert!(!damage.is_empty());
+        let region = tracker.region_for(0, screen).expect("a partial redraw");
+        let area: f32 = region.iter().map(Rect::area).sum();
+        assert!(area < 0.6 * screen.0 * screen.1, "the damage is part of the screen: {region:?}");
+        let mut partial = Vec::new();
+        target.render(&second, 1.0, Rgba::BLACK, Some(&region), |r| partial.extend_from_slice(r)).unwrap();
+
+        let full = render(&second, w, h, 1.0).unwrap();
+        let differ: Vec<usize> = (0..partial.len() / 4)
+            .filter(|&i| partial[i * 4..i * 4 + 4] != full.pixels[i * 4..i * 4 + 4])
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "{} pixels differ, first at ({}, {}); damage {region:?}",
+            differ.len(),
+            differ[0] % w as usize,
+            differ[0] / w as usize
+        );
     }
 
     fn render_or_skip(list: &DrawList) -> Option<Image> {

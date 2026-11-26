@@ -8,7 +8,10 @@
 //! With `--direct` it tries Spike B instead: the GPU renders straight into the scanout
 //! buffers, exported from the display as dma-bufs, with no readback or copy.
 //!
-//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--card /dev/dri/cardN]`
+//! With `--damage` it redraws only what changed each frame (the sliding window and the
+//! readout), as the compositor does.
+//!
+//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--damage] [--card /dev/dri/cardN]`
 //! prints a Markdown report. It needs DRM master: run it from a text console with no
 //! display server, as root or a member of the `video` group.
 
@@ -26,12 +29,21 @@ pub struct Options {
     pub card: Option<String>,
     /// Render straight into the scanout buffers (Spike B) instead of copying.
     pub direct: bool,
+    /// Redraw only what changed each frame (region damage), not the whole screen.
+    pub damage: bool,
 }
 
 impl Options {
     fn from_args() -> Result<Options, String> {
-        let mut o =
-            Options { frames: 300, windows: 20, hold: Duration::ZERO, buffers: 3, card: None, direct: false };
+        let mut o = Options {
+            frames: 300,
+            windows: 20,
+            hold: Duration::ZERO,
+            buffers: 3,
+            card: None,
+            direct: false,
+            damage: false,
+        };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -43,6 +55,7 @@ impl Options {
                 }
                 "--card" => o.card = Some(value()?),
                 "--direct" => o.direct = true,
+                "--damage" => o.damage = true,
                 "--buffers" => {
                     o.buffers = value()?.parse().map_err(|e| format!("--buffers: {e}"))?;
                     if !(2..=3).contains(&o.buffers) {
@@ -51,7 +64,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--card PATH]"
+                        "kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--damage] [--card PATH]"
                     );
                     std::process::exit(0);
                 }
@@ -73,6 +86,8 @@ pub struct Timings {
     pub copy: Vec<Duration>,
     pub flip_wait: Vec<Duration>,
     pub frame: Vec<Duration>,
+    /// The share of the screen redrawn each frame (1.0 for a full redraw).
+    pub damaged: Vec<f32>,
 }
 
 fn pct(v: &[Duration], p: f64) -> f64 {
@@ -107,6 +122,10 @@ impl Timings {
             row("Wait for page flip", &self.flip_wait),
             row("Whole frame", &self.frame),
             String::new(),
+            format!(
+                "Redrawn per frame: {:.1}% of the screen on average",
+                100.0 * self.damaged.iter().sum::<f32>() / self.damaged.len().max(1) as f32
+            ),
             format!(
                 "{} frames in {:.2} s = {:.1} fps",
                 self.frame.len(),

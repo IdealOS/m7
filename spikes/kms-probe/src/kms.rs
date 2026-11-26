@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use compositor::backend::kms::display::{Display, RENDER_FORMAT};
+use compositor::damage::DamageTracker;
 use compositor::headless::Offscreen;
 use compositor::scene::{Rgba, Scene};
 
@@ -54,7 +55,13 @@ pub fn run(o: &Options) -> Result<Vec<String>, String> {
             target.adapter.driver_info,
             gpu_setup.as_secs_f64() * 1000.0
         ),
-        format!("Scene: {} windows, {} nodes; {} scanout buffers", o.windows, scene.len(), o.buffers),
+        format!(
+            "Scene: {} windows, {} nodes; {} scanout buffers{}",
+            o.windows,
+            scene.len(),
+            o.buffers,
+            if o.damage { "; redrawing only what changed (region damage)" } else { "" }
+        ),
         format!(
             "Scanout: {}",
             if o.direct {
@@ -66,6 +73,8 @@ pub fn run(o: &Options) -> Result<Vec<String>, String> {
         String::new(),
     ];
 
+    // Buffers drawn into in turn: the scanout buffers, or the one offscreen texture.
+    let mut damage = DamageTracker::new(if o.direct { o.buffers } else { 1 });
     let mut t = Timings::default();
     let started = Instant::now();
     let mut hud = String::from("starting");
@@ -79,20 +88,31 @@ pub fn run(o: &Options) -> Result<Vec<String>, String> {
         animate(&mut scene, frame, &hud);
 
         let render_start = Instant::now();
+        let list = scene.draw_list();
+        let screen = (w as f32, h as f32);
+        let buffer = if o.direct { display.back_index() } else { 0 };
+        damage.next_frame(&list, screen);
+        let region = if o.damage { damage.region_for(buffer, screen) } else { None };
+        if let Some(r) = &region {
+            t.damaged.push(r.iter().map(|r| r.area()).sum::<f32>() / (screen.0 * screen.1));
+        } else {
+            t.damaged.push(1.0);
+        }
         if o.direct {
             // Straight into the back buffer; render_to returns once the GPU is done.
-            target.render_to(&scanout[display.back_index()], (w, h), &scene.draw_list(), 1.0, Rgba::BLACK)?;
+            target.render_to(&scanout[buffer], (w, h), &list, 1.0, Rgba::BLACK, region.as_deref())?;
             t.render.push(render_start.elapsed());
         } else {
             // Render and read back into a staging Vec, then copy into the mapped dumb
             // buffer, so the two costs show up separately.
             let mut rows: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
-            target.render(&scene.draw_list(), 1.0, Rgba::BLACK, |row| rows.extend_from_slice(row))?;
+            target.render(&list, 1.0, Rgba::BLACK, region.as_deref(), |row| rows.extend_from_slice(row))?;
             t.render.push(render_start.elapsed());
             let copy_start = Instant::now();
             display.copy_into_back(&rows)?;
             t.copy.push(copy_start.elapsed());
         }
+        damage.drew(buffer);
         t.encode.push(target.timing.encode);
         t.gpu.push(target.timing.gpu);
         t.read.push(target.timing.read);

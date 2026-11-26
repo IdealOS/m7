@@ -143,6 +143,11 @@ kms() {
 	echo
 	$RUN kms-probe --direct --buffers 3 --frames 300 2>&1
 	echo
+	# The same, redrawing only what changed each frame, as the compositor does.
+	echo "### kms-probe, direct scanout and region damage, 3 buffers"
+	echo
+	$RUN kms-probe --direct --damage --buffers 3 --frames 300 2>&1
+	echo
 	echo "### compositor --continuous, 10 s"
 	echo
 	echo "Redraws every frame; frame times are render, readback and copy. Input"

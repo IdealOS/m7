@@ -23,10 +23,16 @@
 //! console's keyboard is off and the console doesn't draw ([`console`]), and SIGTERM
 //! ends the frame loop normally so both come back ([`signals`]).
 //!
+//! Each frame redraws only what changed ([`crate::damage`]). Direct scanout cycles
+//! through several buffers, so the tracker keeps a short history and each buffer gets
+//! the damage of every frame since it was last drawn into.
+//!
 //! Still to come (milestone M1):
 //!
-//! - **Region damage:** today any change redraws the whole frame, which on the Pi 4 is
-//!   now most of a frame's cost (drawing 5 million pixels at 3440x1440).
+//! - **The fixed cost of a partial frame:** keeping the old pixels makes a tiled GPU
+//!   load and store every tile, about 13 ms at 3440x1440 on the Pi 4, however small the
+//!   damage. wgpu can't limit a render pass to the damage; drawing the damage into a
+//!   small texture and copying it into the scanout buffer would avoid it.
 //! - **Fences instead of waiting:** a direct frame blocks until the GPU finishes before
 //!   the flip; a fence the display waits on would let the next frame start sooner.
 //!

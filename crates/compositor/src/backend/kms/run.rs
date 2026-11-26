@@ -21,6 +21,7 @@ use super::input::Devices;
 use super::signals::Signals;
 use crate::backend::{Options, Scanout};
 use crate::bus;
+use crate::damage::DamageTracker;
 use crate::desktop::Desktop;
 use crate::headless::Offscreen;
 use crate::input::{Effect, Seat};
@@ -124,6 +125,9 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut next_hud = Instant::now();
     // Only the copy path uses this; it grows to a frame's size on the first frame.
     let mut rows: Vec<u8> = Vec::new();
+    // What changed since each buffer was drawn: the scanout buffers in turn, or on the
+    // copy path the one offscreen texture, which always holds the last frame.
+    let mut damage = DamageTracker::new(if scanout.is_some() { display.buffer_count() } else { 1 });
     let mut first = true;
 
     loop {
@@ -144,23 +148,36 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         // layout, which can change what's drawn.
         desktop.tick(Instant::now());
         desktop.relayout();
+        let mut drew = false;
         if desktop.scene.is_dirty() || opts.continuous {
             let started = Instant::now();
             let list = desktop.draw_list();
-            let stats = if let Some(views) = &scanout {
-                // Three buffers: the back one is never on screen or pending.
-                target.render_to(&views[display.back_index()], (w, h), &list, 1.0, background)?
-            } else {
-                rows.clear();
-                let stats = target.render(&list, 1.0, background, |r| rows.extend_from_slice(r))?;
-                display.copy_into_back(&rows)?;
-                stats
-            };
-            // Drawing, plus readback and copy on the copy path: a frame's cost.
-            timer.record(started.elapsed(), stats.quads, stats.texts);
-            display.flip()?;
+            let screen = (w as f32, h as f32);
+            let changed = damage.next_frame(&list, screen);
+            // A change that draws nothing different (an app re-setting a value) costs
+            // no frame. --continuous measures full redraws, so it always draws them.
+            if opts.continuous || !changed.as_ref().is_some_and(Vec::is_empty) {
+                let buffer = if scanout.is_some() { display.back_index() } else { 0 };
+                let region = if opts.continuous { None } else { damage.region_for(buffer, screen) };
+                let region = region.as_deref();
+                let stats = if let Some(views) = &scanout {
+                    // Three buffers: the back one is never on screen or pending.
+                    target.render_to(&views[buffer], (w, h), &list, 1.0, background, region)?
+                } else {
+                    rows.clear();
+                    let stats =
+                        target.render(&list, 1.0, background, region, |r| rows.extend_from_slice(r))?;
+                    display.copy_into_back(&rows)?;
+                    stats
+                };
+                damage.drew(buffer);
+                // Drawing, plus readback and copy on the copy path: a frame's cost.
+                timer.record(started.elapsed(), stats.quads, stats.texts);
+                display.flip()?;
+                drew = true;
+            }
             desktop.scene.clear_dirty();
-            if first {
+            if first && drew {
                 // tools/qemu-smoke.ts waits for this line before capturing the display.
                 log::info!("kms: first frame on screen");
                 first = false;

@@ -199,7 +199,11 @@ async function run(): Promise<void> {
   }
   // Before the guest script, so the compositor's "wm:" lines can't split its output.
   if (FIRST_FRAME.test(log)) await runInput();
-  serial.write(GUEST_SCRIPT.join("\n") + "\n");
+  // Type the script into a file, then run it. Typed straight into the shell, its
+  // lines arrive while earlier ones run, and the console echoes the typed-ahead text
+  // in the middle of their output ("ecrets string:802-SMOKE hostname idealos"), so
+  // results stop starting their lines. Nothing runs while a here-document is typed.
+  serial.write(`cat > /tmp/smoke.sh <<'SMOKE_EOF'\n${GUEST_SCRIPT.join("\n")}\nSMOKE_EOF\nsh /tmp/smoke.sh\n`);
   await waitFor(/^SMOKE end$/m);
   if (deploy) await runDeploy();
   if (report) await runReport();

@@ -113,6 +113,28 @@ impl Rect {
         let y1 = (self.y + self.h).min(o.y + o.h);
         Rect { x: x0, y: y0, w: (x1 - x0).max(0.0), h: (y1 - y0).max(0.0) }
     }
+
+    /// The smallest rectangle holding both.
+    pub fn union(&self, o: &Rect) -> Rect {
+        let x0 = self.x.min(o.x);
+        let y0 = self.y.min(o.y);
+        let x1 = (self.x + self.w).max(o.x + o.w);
+        let y1 = (self.y + self.h).max(o.y + o.h);
+        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+
+    pub fn area(&self) -> f32 {
+        self.w.max(0.0) * self.h.max(0.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
+
+    /// Grown by `by` on every side.
+    pub fn expand(&self, by: f32) -> Rect {
+        Rect { x: self.x - by, y: self.y - by, w: self.w + 2.0 * by, h: self.h + 2.0 * by }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,6 +183,10 @@ pub struct ImageItem {
 /// windows beneath it.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Layer {
+    /// Which layer this is from frame to frame: the root child it was drawn from, and
+    /// which part of it (a dialog starts a new part). Damage tracking matches layers by
+    /// it ([`crate::damage`]).
+    pub key: (NodeId, u32),
     pub quads: Vec<QuadItem>,
     pub texts: Vec<TextItem>,
     pub images: Vec<ImageItem>,
@@ -387,12 +413,13 @@ impl Scene {
     pub fn draw_list(&self) -> DrawList {
         let mut list = DrawList::default();
         for &child in self.top_level() {
-            let mut layer = Layer::default();
+            let mut layer = Layer { key: (child, 0), ..Layer::default() };
             self.walk(child, SCREEN, None, Rect::INFINITE, &mut |id, node, rect, clip| {
                 // A layer's text draws over all its quads, so a dialog, which must
                 // cover its window's text too, starts a layer of its own.
                 if node.kind == NodeKind::Dialog {
-                    list.layers.push(std::mem::take(&mut layer));
+                    let next = Layer { key: (child, layer.key.1 + 1), ..Layer::default() };
+                    list.layers.push(std::mem::replace(&mut layer, next));
                 }
                 crate::draw::draw(id, node, rect, clip, &mut layer)
             });
