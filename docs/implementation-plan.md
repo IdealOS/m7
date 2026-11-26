@@ -409,6 +409,32 @@ The Pi 3's GPU (VideoCore IV, Mesa's `vc4` driver) only does OpenGL ES 2.0. It h
 
 **Done when:** the Pi 3 draws the desktop at native 1080p at 30 fps or better while a window is dragged, with sharp text.
 
+### Screen and window effects
+
+Shaders applied to the whole screen (a warm night tint) or to particular windows (dim inactive windows, grey out one that isn't responding, frosted glass, open and minimize animations). Each window is already its own layer in the draw list (`Scene::draw_list`: one layer per child of the root), which is the seam both kinds of window effect use.
+
+Beyond the usual effects, one aim of IdealOS is to explore new uses of GPU effects in the window manager: showing what an app is allowed to do and is doing, not just decorating it. The compositor already knows enough for that without new plumbing: each window's app (`apps.rs`), that app's grants, live (it follows permd's table on `perm.grants`, so a revocation arrives within milliseconds), and each window's workspace (`wm.rs`).
+
+- [ ] **Night tint in the display hardware.** Set the CRTC's gamma table (and its colour matrix where the driver has one) from `backend/kms/display.rs`. It costs nothing per frame, changing it redraws nothing (so it can fade at sunset), and it covers the hardware cursor, which nothing in our renderer reaches. KMS only; on the Mac, Night Shift does this. Check what `vc4` offers (its reported gamma size) on the Pi 4.
+- [ ] **Window colour effects (level 1).** An `effect` on `Layer` (`scene.rs`), filled from a compositor-owned window prop, passed to `quad.wgsl` and `image.wgsl` as a colour matrix and opacity; text, one colour per run, gets the same matrix applied to its colour in `render.rs`. No extra passes or textures. Per-pixel colour only: no blur or movement, and opacity applies per element, so overlapping parts of a translucent window show through each other.
+- [ ] **Per-window shaders (level 2).** Render a window's layer into its own texture, then draw that texture into the frame through a shader chosen for the window: true whole-window opacity, blur behind, scaling and warping for animations, thumbnails in the window switcher. An unchanged window reuses its texture, a step toward drawing only what changed. About 8 MB of texture per 1080p-sized window and a compositing pass each: fine on the Pi 4's GPU, heavy on the Pi 3. Design it together with region damage and M13's external surfaces (Servo's tabs arrive as GPU buffers), which need windows as textures too.
+- [ ] **A setting for it.** A `Setting` document the Settings app edits and the compositor follows with a live query. A night tint on a schedule needs the clock set first: nothing sets the time yet.
+- [ ] **Who chooses.** The compositor, the window manager and the user choose effects. Apps may at most pick from a fixed set of system effects and never supply shader code: a shader would run in the trusted compositor and the GPU driver (on the Pi 3, compiled by lavapipe in the compositor's own process), outside the app sandbox, and a transparent or warped window could imitate another app or hide where clicks land.
+
+Ideas for effects that carry meaning:
+
+- [ ] **Tint by permission.** Collapse an app's grants into a few tiers a person reads at a glance: only its own data (no tint), reads shared documents, uses the network, full access to the device (`service:pty`, as the Terminal holds). Revoking a grant in Settings re-tints the window at once, which shows the revocation took.
+- [ ] **Signals go in trusted chrome.** The title bar and frame are drawn by the compositor, where apps can't draw, the same reason permission prompts can be trusted. A tint inside the content area is decoration only: an app could imitate it, or cancel it out with complementary colours.
+- [ ] **An edge glow, not a wash.** Multiplying a whole window's colours distorts photos and colour work; a soft glow around the window says the same thing. It's nearly free: the quad shader already computes each rounded rectangle's signed distance, so a glow is alpha falling off with distance outside the shape, one more instance per window and no extra pass, cheap even on the Pi 3.
+- [ ] **Not colour alone.** About 1 in 12 men has some colour-vision deficiency, so pair each colour with a pattern the shader draws as cheaply (diagonal hatching on the frame for full device access) or a badge in the title bar.
+- [ ] **A hue per workspace.** In each window's frame, the top bar's workspace buttons and the Alt+Tab switcher; a window moved to another workspace (Ctrl+Alt+Shift+arrow) sweeps smoothly to the new hue.
+- [ ] **Workspaces as security contexts.** A workspace could carry rules: a "banking" workspace that blocks pasting into other workspaces, or marks any app there that holds `network` more strongly. Its hue then shows both where you are and which rules apply. This needs the window manager and the permission system to work together, which IdealOS can do because the compositor sees both.
+- [ ] **Show data access as it happens.** As phones light a dot while the microphone is on, the compositor could pulse a glow on a window while its app reads documents: dbd sees every read and would publish access events ("Mail read 40 Contacts"). The event stream itself reveals what apps do, so only trusted services may subscribe.
+
+Where each lands: the frame tint and edge glow need only the existing quad shader and theme tokens (`draw.rs`, `theme.rs`), with tiers worked out from the grants table the compositor already follows; content tints come with level 1 window effects; the data-access glow needs a new dbd event stream and a rule for who may subscribe.
+
+**Done when:** a night tint fades in at a set time on the Pi, inactive windows can be dimmed, one per-window shader (blur behind a dialog, or an open animation) runs at full frame rate on the Pi 4, and windows show their permission tier and workspace in their frames.
+
 ## Testing strategy
 
 Most tests run on the Mac and in CI without hardware. QEMU covers boot and Linux-only paths, and a performance script on the Pi closes each milestone.
