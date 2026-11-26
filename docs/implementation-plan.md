@@ -341,7 +341,7 @@ Goal: a place to write that never loses anything. Documents are database records
 
 Compositor work first:
 
-- [ ] **Bound fields follow live changes.** Today a bound text field loads its text once, so a restored version, another window on the same document or an edit from elsewhere doesn't show. The field should follow its document with a live query.
+- [x] **Bound fields follow live changes.** A bound field follows its document with a live query (`$id` picks the one document), read as its app. Another writer's change shows with the caret kept on its character; changes that arrive while the field's own edits are in flight wait until db has answered them. The Style Editor's Reload button is gone.
 - [ ] **Long documents.** Text areas shape their whole text each time, which is fine for notes but slow for a long chapter: shape and lay out only what changed and what's visible.
 - [ ] **Styled runs in a text area** (bold, headings, colours), for Markdown shown as you type and later syntax highlighting. Not needed for the first version, which previews beside the text.
 

@@ -295,7 +295,8 @@ export interface TextProps extends Common {
   value?: Prop<string>;
   placeholder?: Prop<string>;
   /** Edit a text field of a document directly: typing goes straight to the
-   * database (it's collaborative text there), with no round trip to the app. */
+   * database (it's collaborative text there), with no round trip to the app.
+   * The field follows the document, so changes made elsewhere show too. */
   bind?: { doc: string; path: string };
   size?: Prop<number>;
   onChange?: (value: string) => void;

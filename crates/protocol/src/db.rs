@@ -526,7 +526,9 @@ pub struct Query {
     pub doc_type: String,
     /// Field paths mapped to a value to equal or an object of operators (`$eq`,
     /// `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),
-    /// plus `$and`, `$or` and `$not`. Empty matches every document of the type.
+    /// plus `$and`, `$or` and `$not`, and on the whole document `$id`,
+    /// `$createdBy`, `$linksTo` and `$linkedFrom`. Empty matches every document
+    /// of the type.
     #[serde(default, rename = "where", skip_serializing_if = "Map::is_empty")]
     pub filter: Map<String, Value>,
     /// Sort keys, most significant first. Ties keep creation order.

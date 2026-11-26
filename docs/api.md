@@ -75,7 +75,8 @@ the snapshot methods need the `storage` capability.
 "orderBy": [["date", "desc"]], "limit": 50}`. Filters use `$eq`, `$ne`, `$gt`,
 `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$exists`, `$and`, `$or`,
 `$not`, and for links `$linksTo` and `$linkedFrom`; `$createdBy` matches the app
-that made a document.
+that made a document, and `$id` one document by its id (to follow it with
+`watch`).
 
 **Links and blobs** live in document data: `{"$link": "<id>"}` and `{"$blob":
 "<sha-256>"}`. A blob must be stored before a document refers to it.
@@ -241,7 +242,11 @@ variable as `$accent` or `var(--accent)`; text takes `size` and `weight:
 "bold"`. Props starting with `_` belong to the compositor (focus, caret,
 selection, scroll, hover) and apps can't set them. A text widget can bind to a
 document field, `{"bind": {"doc": id, "path": "body"}}`, so typing goes straight
-to the database.
+to the database. The field follows its document with a live query, read as the
+app: another window, a restore or any other writer changes the shown text too,
+with the caret kept on its character. Changes that arrive while the field's own
+edits are on their way wait until db has taken them, so typing never jumps back.
+The app hears each change as `change`, as if typed.
 
 ### Style sheets
 
@@ -287,7 +292,8 @@ and the last good one stays. The permission prompt always keeps the built-in
 look. Three ways to edit:
 
 - The **Style Editor** app: its text area is bound to the document, with the
-  parse status and a preview beside it.
+  parse status and a preview beside it. Changes made the other two ways show
+  in it as they happen.
 - `osctl style get [system | app:ID | builtin]`, `set TARGET FILE` (`-` for
   standard input; it checks first), `check FILE` and `reset TARGET`.
 - From the Mac: `make style-watch HOST=localhost:2222 FILE=my.css

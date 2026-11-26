@@ -211,6 +211,16 @@ impl Compiler {
                     let who = self.bind(Sql::Text(who.clone()));
                     format!("(d.creator = {who})")
                 }
+                // The document with this id, to follow one document with a live query
+                // (a bound text field does).
+                "$id" => {
+                    self.term()?;
+                    let Value::String(id) = v else {
+                        return bad("$id takes a document id");
+                    };
+                    let id = self.bind(Sql::Text(id.clone()));
+                    format!("(d.id = {id})")
+                }
                 k if k.starts_with('$') => return bad(format!("unknown filter operator {k}")),
                 field => self.field(field, v)?,
             });

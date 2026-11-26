@@ -57,8 +57,6 @@ const name = (t: string) => (t === "system" ? "System" : (apps.find((a) => `app:
 await openWindow({ title: "Style Editor", width: 900, height: 600, style }, () => {
   const sheets = db.live({ type: TYPE, limit: 200 });
   const [target, setTarget] = signal("system");
-  // Bumped to make a fresh text area: a bound field loads its text once.
-  const [generation, setGeneration] = signal(0);
   const [status, setStatus] = signal("");
   const [ok, setOk] = signal(true);
   const [builtin, setBuiltin] = signal("");
@@ -94,25 +92,23 @@ await openWindow({ title: "Style Editor", width: 900, height: 600, style }, () =
         onClick: async () => {
           const d = current();
           if (d) await db.update(d.id, { css: "" });
-          setGeneration((g) => g + 1);
         },
       }),
-      // A bound field loads its text once: show changes made elsewhere (osctl
-      // style set, make style-watch) by making it again.
-      button({ label: "Reload", onClick: () => setGeneration((g) => g + 1) }),
       button({
         label: () => (builtin() ? "Hide built-in" : "Show built-in"),
         onClick: async () =>
           setBuiltin(builtin() ? "" : (await request<SystemStyleResult>("compositor", "system_style", null)).css),
       }),
     ),
+    // The text area follows its document, so changes made elsewhere (osctl
+    // style set, make style-watch, Reset) show in it as they happen.
     each(
       () => {
         const d = current();
-        return d ? [`${d.id}:${generation()}`] : [];
+        return d ? [d.id] : [];
       },
-      (k) => k,
-      (k) => textArea({ bind: { doc: k().split(":")[0], path: "css" }, class: "code", h: "fill" }),
+      (id) => id,
+      (id) => textArea({ bind: { doc: id(), path: "css" }, class: "code", h: "fill" }),
       { grow: 1 },
     ),
     label({ text: status, class: () => (ok() ? "ok" : "err"), size: 13 }),

@@ -84,6 +84,12 @@ pub enum Call {
     ScreenEnd {
         node: NodeId,
     },
+    /// A part of the live query following bound text field `node`'s document
+    /// (a [`protocol::db::WatchEvent`]), asked for with [`Out::Follow`].
+    Doc {
+        node: NodeId,
+        event: Value,
+    },
 }
 
 /// What to send over the bus.
@@ -103,7 +109,11 @@ pub enum Out {
     /// Attach terminal node `node` to its pty session (`params` for `attach`);
     /// frames come back as [`Call::Screen`].
     Attach { node: NodeId, params: Value },
-    /// Stop the attachment for terminal node `node`.
+    /// Follow bound text field `node`'s document with a live query (`params`
+    /// for `db watch`); its parts come back as [`Call::Doc`].
+    Follow { node: NodeId, params: Value },
+    /// Stop the attachment for terminal node `node`, or the live query for
+    /// bound text field `node`.
     Detach { node: NodeId },
 }
 
@@ -121,8 +131,17 @@ struct Cached {
 enum Pending {
     /// The document behind a bound text field.
     Bind(NodeId),
+    /// An edit to a bound text field's document.
+    Splice(NodeId),
     /// The installed apps, for the launcher menu.
     Launcher,
+}
+
+/// A bound text field following its document (see `Desktop::follows`).
+#[derive(Default)]
+struct Follow {
+    in_flight: u32,
+    held: Option<String>,
 }
 
 /// A pointer interaction in progress.
@@ -249,6 +268,11 @@ pub struct Desktop {
     pub workspace: u32,
     focus: Option<NodeId>,
     edits: HashMap<NodeId, Edit>,
+    /// Bound text fields following their documents, and for each, how many of
+    /// its edits db hasn't answered yet and the newest text that arrived
+    /// meanwhile. Text that arrives while edits are in flight can be older than
+    /// what's shown, so it waits until they're answered.
+    follows: HashMap<NodeId, Follow>,
     drag: Option<Drag>,
     /// The control the pointer is over, which shows its `:hover` style.
     hovered: Option<NodeId>,
@@ -322,6 +346,7 @@ impl Desktop {
             workspace: 1,
             focus: None,
             edits: HashMap::new(),
+            follows: HashMap::new(),
             drag: None,
             hovered: None,
             hovered_title: None,
@@ -1220,7 +1245,10 @@ impl Desktop {
                 let mut params =
                     json!({"id": doc, "path": path, "at": s.at, "delete": s.delete, "insert": s.insert});
                 self.act_for(node, &mut params);
-                self.request(None, "db", "splice", params);
+                self.request(Some(Pending::Splice(node)), "db", "splice", params);
+                if let Some(f) = self.follows.get_mut(&node) {
+                    f.in_flight += 1;
+                }
             }
         }
         self.show_caret(node);
@@ -1976,6 +2004,7 @@ impl Desktop {
                     self.forget_gone();
                 }
             }
+            Call::Doc { node, event } => self.doc_changed(node, event),
             Call::Reply { token, result } => self.reply(token, result),
             Call::Blob { hash, app, result } => self.blob_loaded(hash, app, result),
             Call::Request { id, from, method, params, stream } => {
@@ -1991,6 +2020,12 @@ impl Desktop {
             self.terms.keys().copied().filter(|n| self.scene.node(*n).is_none()).collect();
         for node in gone {
             self.terms.remove(&node);
+            self.outbox.push(Out::Detach { node });
+        }
+        let gone: Vec<NodeId> =
+            self.follows.keys().copied().filter(|n| self.scene.node(*n).is_none()).collect();
+        for node in gone {
+            self.follows.remove(&node);
             self.outbox.push(Out::Detach { node });
         }
         let scene = &self.scene;
@@ -2273,6 +2308,50 @@ impl Desktop {
         self.request(None, "pty", "write", params);
     }
 
+    /// A part of the live query following bound field `node`'s document.
+    fn doc_changed(&mut self, node: NodeId, event: Value) {
+        use protocol::db::{Doc, WatchEvent};
+        let doc: Option<Doc> = match serde_json::from_value::<WatchEvent>(event) {
+            Ok(WatchEvent::Initial { docs }) => docs.into_iter().next(),
+            Ok(WatchEvent::Diff { added, changed, .. }) => added.into_iter().chain(changed).next(),
+            // Deleted: leave the text as it was, to type into or copy from.
+            Err(_) => None,
+        };
+        let Some(doc) = doc else { return };
+        let Some(path) = self.prop(node, "bind").and_then(|b| b.get("path")).and_then(Value::as_str) else {
+            return;
+        };
+        let mut at = None::<&Value>;
+        for (i, key) in path.split('.').enumerate() {
+            at = if i == 0 { doc.data.get(key) } else { at.and_then(|v| v.get(key)) };
+        }
+        let text = at.and_then(Value::as_str).unwrap_or_default().to_owned();
+        let Some(f) = self.follows.get_mut(&node) else { return };
+        if f.in_flight > 0 {
+            f.held = Some(text);
+        } else {
+            self.take_bound_text(node, &text);
+        }
+    }
+
+    /// Show `text`, which bound field `node`'s document now holds, if it isn't
+    /// what's shown already (an echo of the field's own edits is), keeping the
+    /// caret and selection where they were, and tell the app.
+    fn take_bound_text(&mut self, node: NodeId, text: &str) {
+        if self.scene.node(node).is_none() || self.text_value(node) == text {
+            return;
+        }
+        self.set(node, json!({"_value": text}));
+        if let Some(e) = self.edits.get_mut(&node) {
+            e.follow(text);
+        }
+        self.apps.reported(node, text);
+        self.event(node, "change", json!(text));
+        if self.focus == Some(node) {
+            self.show_caret(node);
+        }
+    }
+
     /// If an app owns `node`, ask `db` to treat the request as that app's: the
     /// compositor reads and writes documents for an app only as the app may.
     fn act_for(&self, node: NodeId, params: &mut Value) {
@@ -2462,6 +2541,29 @@ impl Desktop {
                 }
                 if self.focus == Some(node) {
                     self.show_caret(node);
+                }
+                // From now on, follow the document: another window, a restore or
+                // any other writer changes the shown text too.
+                if let (Some(id), Some(doc_type)) =
+                    (doc.get("id").and_then(Value::as_str), doc.get("type").and_then(Value::as_str))
+                    && !self.follows.contains_key(&node)
+                {
+                    let mut params = json!({"type": doc_type, "where": {"$id": id}});
+                    self.act_for(node, &mut params);
+                    self.follows.insert(node, Follow::default());
+                    self.outbox.push(Out::Follow { node, params });
+                }
+            }
+            (Pending::Splice(node), result) => {
+                if let Err(e) = result {
+                    log::warn!("couldn't save a bound field's edit: {}: {}", e.code, e.message);
+                }
+                let Some(f) = self.follows.get_mut(&node) else { return };
+                f.in_flight = f.in_flight.saturating_sub(1);
+                if f.in_flight == 0
+                    && let Some(text) = f.held.take()
+                {
+                    self.take_bound_text(node, &text);
                 }
             }
             (Pending::Launcher, Ok(found)) => {
@@ -3013,14 +3115,13 @@ mod tests {
         let out = typed(&mut d, "!");
         let splice =
             out.iter().find(|o| matches!(o, Out::Request { method, .. } if method == "splice")).unwrap();
+        let Out::Request { to, params, .. } = splice else { unreachable!() };
         assert_eq!(
-            splice,
-            &Out::Request {
-                token: 0,
-                to: "db".into(),
-                method: "splice".into(),
-                params: json!({"id": "d1", "path": "body.text", "at": 5, "delete": 0, "insert": "!", "as": "org.example.test"})
-            },
+            (to.as_str(), params),
+            (
+                "db",
+                &json!({"id": "d1", "path": "body.text", "at": 5, "delete": 0, "insert": "!", "as": "org.example.test"})
+            ),
             "positions in characters, written as the app"
         );
         let out = key(&mut d, Key::Enter);
@@ -3028,6 +3129,78 @@ mod tests {
             out.iter().any(|o| matches!(o, Out::Request { params, .. } if params["insert"] == "\n")),
             "a newline"
         );
+    }
+
+    /// A bound field follows its document: another writer's change shows, with
+    /// the caret kept on its character; the field's own echoes, and anything that
+    /// arrives while its edits are in flight, wait until db has answered them.
+    #[test]
+    fn bound_text_fields_follow_their_document() {
+        let mut d = desk();
+        let out = d.call(request(7, "open_window", json!({"title": "Notes"}), true));
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let window = data["window"].as_u64().unwrap();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "text_area", "props": {"bind": {"doc": "d1", "path": "body.text"}, "w": 300, "h": 120}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let out = d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
+        let get = out.iter().find_map(|o| match o {
+            Out::Request { token, method, .. } if method == "get" => Some(*token),
+            _ => None,
+        });
+        let doc = |text: &str| json!({"id": "d1", "type": "Note", "created": 1, "updated": 2, "data": {"body": {"text": text}}});
+        let diff = |text: &str| json!({"kind": "diff", "added": [], "changed": [doc(text)], "removed": []});
+        let out = d.call(Call::Reply { token: get.unwrap(), result: Ok(doc("héllo")) });
+        let area = global(&d, window, 2);
+        assert_eq!(
+            out.iter().filter(|o| matches!(o, Out::Follow { .. })).collect::<Vec<_>>(),
+            [&Out::Follow {
+                node: area,
+                params: json!({"type": "Note", "where": {"$id": "d1"}, "as": "org.example.test"})
+            }],
+            "a live query for the one document, as the app"
+        );
+        // The first part is what get said: nothing to do.
+        let out =
+            d.call(Call::Doc { node: area, event: json!({"kind": "initial", "docs": [doc("héllo")]}) });
+        assert!(!out.iter().any(|o| matches!(o, Out::Part { .. })), "{out:?}");
+
+        // Another writer adds text before the caret: it shows, the caret moves along.
+        let at = center(&mut d, area);
+        click(&mut d, at);
+        key(&mut d, Key::End);
+        let out = d.call(Call::Doc { node: area, event: diff("well, héllo") });
+        assert_eq!(prop(&d, area, "_value"), "well, héllo");
+        assert_eq!(d.edits[&area].caret(), 11);
+        assert!(
+            out.iter().any(|o| matches!(o, Out::Part { data, .. } if data["event"] == "change" && data["value"] == "well, héllo")),
+            "the app hears of it: {out:?}"
+        );
+
+        // Typing sends a splice. Parts that arrive before db answers it (an
+        // older text, then the echo with a third writer's change folded in)
+        // leave the shown text alone until the answer comes.
+        let out = typed(&mut d, "!");
+        let splice = out.iter().find_map(|o| match o {
+            Out::Request { token, method, .. } if method == "splice" => Some(*token),
+            _ => None,
+        });
+        d.call(Call::Doc { node: area, event: diff("well, héllo") });
+        assert_eq!(prop(&d, area, "_value"), "well, héllo!", "an older text doesn't undo typing");
+        d.call(Call::Doc { node: area, event: diff("Oh well, héllo!") });
+        assert_eq!(prop(&d, area, "_value"), "well, héllo!", "held while the edit is in flight");
+        d.call(Call::Reply { token: splice.unwrap(), result: Ok(json!({})) });
+        assert_eq!(prop(&d, area, "_value"), "Oh well, héllo!", "then the newest text shows");
+        assert_eq!(d.edits[&area].caret(), 15);
+        // The field's own echo is no change at all.
+        let out = d.call(Call::Doc { node: area, event: diff("Oh well, héllo!") });
+        assert!(!out.iter().any(|o| matches!(o, Out::Part { .. })), "{out:?}");
+
+        // When the field goes, so does its live query.
+        let ops = json!([{"op": "destroy", "id": 2}]);
+        let out = d.call(request(9, "commit", json!({"window": window, "ops": ops}), false));
+        assert!(out.contains(&Out::Detach { node: area }), "{out:?}");
     }
 
     #[test]

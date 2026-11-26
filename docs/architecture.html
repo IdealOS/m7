@@ -419,7 +419,7 @@ const N = [
   { id: "c-widgets", parent: "compositor", group: "Interaction", name: "Widgets", sub: "draw.rs · textedit.rs", status: "built", ms: ["M5", "M7"],
     summary: "label, button, checkbox, toggle, slider, select, menu, text_field (with secret), text_area, image, scroll, vlist, split, toolbar, dialog and terminal.",
     points: ["State the compositor owns (focus, caret, selection, scroll) lives in _-prefixed props apps can't set", "Bound text fields edit a document field directly through dbd's splice"],
-    gaps: ["Bound fields load once: another writer's changes don't show until the field is made again", "Images are PNG only, at most 4096 px a side"] },
+    gaps: ["Images are PNG only, at most 4096 px a side"] },
   { id: "c-input", parent: "compositor", group: "Interaction", name: "Input, focus, clipboard", sub: "input.rs", status: "built", ms: ["M1", "M5"],
     summary: "Both backends feed one Seat, so mouse, tablet and keyboard drive the same code.",
     points: ["Tab order, focus rings, keyboard control of every widget", "The clipboard holds text and an optional document reference; reading it takes the clipboard grant"] },

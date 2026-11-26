@@ -133,6 +133,29 @@ pub fn connect_with(
                                 attached.retain(|_, t| !t.is_finished());
                                 Ok(())
                             }
+                            Out::Follow { node, params } => {
+                                let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
+                                let task = tokio::spawn(async move {
+                                    match bus.request_stream(protocol::db::SERVICE, "watch", params).await {
+                                        Ok(mut parts) => {
+                                            while let Some(Ok(event)) = parts.next().await {
+                                                if replies.send(Call::Doc { node, event }).is_err() {
+                                                    return;
+                                                }
+                                                woken();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!("bus: couldn't follow a bound field's document: {e}")
+                                        }
+                                    }
+                                });
+                                if let Some(old) = attached.insert(node, task) {
+                                    old.abort();
+                                }
+                                attached.retain(|_, t| !t.is_finished());
+                                Ok(())
+                            }
                             Out::Detach { node } => {
                                 // Dropping the stream (aborting its task) tells ptyd.
                                 if let Some(task) = attached.remove(&node) {

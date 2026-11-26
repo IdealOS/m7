@@ -83,6 +83,25 @@ impl Edit {
         self.anchor = None;
     }
 
+    /// Take `text`, changed elsewhere (another window, a restore), keeping the
+    /// caret and selection on the same characters where they survive. The
+    /// change is taken to be the stretch between the longest common prefix and
+    /// suffix: a position before it stays, one after it moves by the change in
+    /// length, and one inside it goes to the end of the new stretch.
+    pub fn follow(&mut self, text: &str) {
+        let old: Vec<char> = self.text.chars().collect();
+        let new: Vec<char> = text.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let room = old.len().min(new.len()) - prefix;
+        let suffix = old.iter().rev().zip(new.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+        let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+        let moved = |i: usize| moved_through(i, prefix, old_end, new_end);
+        let caret = moved(self.caret);
+        self.anchor = self.anchor.map(moved).filter(|&a| a != caret);
+        self.caret = caret;
+        self.text = text.to_owned();
+    }
+
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.len();
@@ -246,6 +265,18 @@ impl Edit {
     }
 }
 
+/// Where position `i` goes when the text between `prefix` and `old_end` is
+/// replaced by text ending at `new_end` (see [`Edit::follow`]).
+fn moved_through(i: usize, prefix: usize, old_end: usize, new_end: usize) -> usize {
+    if i <= prefix {
+        i
+    } else if i >= old_end {
+        i - old_end + new_end
+    } else {
+        new_end
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +359,37 @@ mod tests {
         e.move_caret(Move::To(1), false);
         e.transpose();
         assert_eq!((e.text(), e.caret()), ("ab", 2));
+    }
+
+    #[test]
+    fn following_a_change_elsewhere_keeps_the_caret_in_place() {
+        // Typed before the caret: it moves along with its character.
+        let mut e = Edit::new("hello world");
+        e.move_caret(Move::To(6), false);
+        e.follow("well, hello world");
+        assert_eq!((e.text(), e.caret()), ("well, hello world", 12));
+        // After the caret: it stays.
+        e.follow("well, hello world!");
+        assert_eq!(e.caret(), 12);
+        // Its own text deleted around it: to the end of what replaced it.
+        e.follow("well, hi!");
+        assert_eq!(e.caret(), 8);
+        // A selection keeps both ends; non-ASCII counts in characters.
+        let mut e = Edit::new("ça va bien");
+        e.move_caret(Move::To(3), false);
+        e.move_caret(Move::To(5), true);
+        e.follow("oui, ça va bien");
+        assert_eq!((e.selection(), e.selected_text()), (Some((8, 10)), "va".into()));
+        // Repeated letters: the prefix and suffix don't overlap.
+        let mut e = Edit::new("aaa");
+        e.follow("aa");
+        assert_eq!(e.caret(), 2);
+        // Text added right at the caret goes after it, as another writer's would.
+        e.follow("aaaa");
+        assert_eq!(e.caret(), 2);
+        // Unchanged is a no-op.
+        e.move_caret(Move::To(1), false);
+        e.follow("aaaa");
+        assert_eq!(e.caret(), 1);
     }
 }

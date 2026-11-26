@@ -723,6 +723,26 @@ fn live_queries_report_what_changed() {
     assert!(w.is_empty());
 }
 
+/// Following one document by id, as a bound text field does: its own changes
+/// arrive, a sibling's don't.
+#[test]
+fn a_live_query_can_follow_one_document() {
+    let mut s = Store::open_in_memory().unwrap();
+    let mut w = Watches::new(&s).unwrap();
+    let a = s.create("Note", &obj(json!({"text": "one"})), "t").unwrap();
+    let b = s.create("Note", &obj(json!({"text": "two"})), "t").unwrap();
+    let WatchEvent::Initial { docs } = w.add(&s, 1, query("Note", json!({"$id": a.id}))).unwrap() else {
+        panic!()
+    };
+    assert_eq!(ids(&docs), [a.id.as_str()]);
+    s.update(&b.id, &obj(json!({"text": "other"})), "t").unwrap();
+    assert!(w.refresh(&s).unwrap().is_empty(), "another document");
+    s.update(&a.id, &obj(json!({"text": "uno"})), "t").unwrap();
+    let parts = w.refresh(&s).unwrap();
+    let [(1, Ok(WatchEvent::Diff { changed, .. }))] = &parts[..] else { panic!("{parts:?}") };
+    assert_eq!(changed[0].data["text"], "uno");
+}
+
 #[test]
 fn live_queries_rerun_only_for_changed_types_and_refuse_bad_queries() {
     let mut s = Store::open_in_memory().unwrap();
@@ -1280,6 +1300,9 @@ fn creators_are_recorded_and_backfilled_by_the_migration() {
     s.update(&new.id, &obj(json!({"a": 3})), "someone.else").unwrap();
     assert_eq!(s.creator(&new.id).unwrap().as_deref(), Some("org.x.new"), "updates don't change it");
     let mine = s.query(&query("Note", json!({"$createdBy": "org.x.new"}))).unwrap();
+    // One document by its id, as a bound field follows it.
+    assert_eq!(ids(&s.query(&query("Note", json!({"$id": new.id}))).unwrap()), std::slice::from_ref(&new.id));
+    assert!(s.query(&query("Note", json!({"$id": 7}))).is_err());
     assert_eq!(ids(&mine), std::slice::from_ref(&new.id));
     assert!(s.query(&query("Note", json!({"$createdBy": 3}))).is_err());
     drop(s);
