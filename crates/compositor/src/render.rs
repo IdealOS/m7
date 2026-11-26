@@ -6,13 +6,15 @@
 //! backend and headless screenshots all share it.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Buffer, Cache, Color, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
+    Cache, Color, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use protocol::NodeId;
+
+use crate::paragraphs::Paragraphs;
 use wgpu::util::DeviceExt;
 
 use crate::scene::{DrawList, ImageItem, Rect, Rgba, TextItem};
@@ -48,11 +50,13 @@ struct GpuImage {
     used: bool,
 }
 
-/// A shaped text buffer, reused across frames until its inputs change.
+/// A text item's paragraphs, kept across frames: a new text reshapes only the
+/// paragraphs that changed, and only those that show are laid out.
 struct CachedText {
-    buffer: Buffer,
-    /// What it was shaped from: text, font, width and alignment.
-    key: (String, crate::style::Font, u32, bool),
+    paras: Paragraphs,
+    /// How far below the text's top what shows starts (the part above its clip,
+    /// as in a scrolled text area), where its buffer's rows start.
+    from: f32,
     used: bool,
 }
 
@@ -478,10 +482,11 @@ impl Renderer {
             text_count += layer.texts.len();
             let areas = layer.texts.iter().map(|t| {
                 let clip = phys(text_bounds(t), scale);
+                let cached = &self.texts[&(t.node, t.slot)];
                 TextArea {
-                    buffer: &self.texts[&(t.node, t.slot)].buffer,
+                    buffer: cached.paras.buffer(),
                     left: t.rect.x * scale,
-                    top: t.rect.y * scale,
+                    top: (t.rect.y + cached.from) * scale,
                     scale,
                     bounds: TextBounds {
                         left: clip[0].floor() as i32,
@@ -570,26 +575,36 @@ impl Renderer {
         FrameStats { quads: instances.len(), texts: text_count, layers: list.layers.len() }
     }
 
-    /// Shaping is the expensive part of text, so buffers are cached per node and
-    /// only reshaped when the string, size, width or weight changes. Shaping is in
-    /// logical pixels; glyphon applies the display scale at prepare time.
+    /// Shaping is the expensive part of text, so each text item keeps its
+    /// paragraphs: a changed string reshapes only the paragraphs that changed, a
+    /// new size, width, font or alignment all of them. Then only what shows is
+    /// laid out. Shaping is in logical pixels; glyphon applies the display scale
+    /// at prepare time.
     fn shape(&mut self, t: &TextItem) {
-        let key = (t.text.clone(), t.font.clone(), t.rect.w.to_bits(), t.center);
-        if let Some(c) = self.texts.get_mut(&(t.node, t.slot))
-            && c.key == key
-        {
-            c.used = true;
-            return;
-        }
-        let size = t.font.size;
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.3));
         let width = (t.rect.w > 0.0).then_some(t.rect.w);
-        buffer.set_size(width, None);
-        let attrs = crate::fonts::attrs(self.font_system.db(), &t.font);
         let align = t.center.then_some(glyphon::cosmic_text::Align::Center);
-        buffer.set_text(&t.text, &attrs, Shaping::Advanced, align);
-        buffer.shape_until_scroll(&mut self.font_system, false);
-        self.texts.insert((t.node, t.slot), CachedText { buffer, key, used: true });
+        let fonts = &mut self.font_system;
+        let fresh = |fonts: &mut FontSystem| CachedText {
+            paras: Paragraphs::new(fonts, &t.text, &t.font, width, align),
+            from: 0.0,
+            used: true,
+        };
+        let cached = match self.texts.entry((t.node, t.slot)) {
+            Entry::Occupied(e) if e.get().paras.fits(&t.font, width, align) => {
+                let c = e.into_mut();
+                c.paras.set_text(fonts, &t.text);
+                c
+            }
+            Entry::Occupied(mut e) => {
+                e.insert(fresh(fonts));
+                e.into_mut()
+            }
+            Entry::Vacant(e) => e.insert(fresh(fonts)),
+        };
+        cached.used = true;
+        let shown = text_bounds(t);
+        cached.from = (shown.y - t.rect.y).max(0.0);
+        cached.paras.show(fonts, cached.from, shown.h.max(0.0));
     }
 }
 
@@ -711,5 +726,41 @@ mod text_tests {
         // Wrapped text keeps to its own rect.
         let b = text_bounds(&item(Rect { x: 90.0, y: 579.0, w: 100.0, h: 19.0 }, field));
         assert_eq!(b, Rect { x: 90.0, y: 579.0, w: 100.0, h: 19.0 });
+    }
+
+    /// Drawn on the GPU when there is one (skipped without): a long text scrolled
+    /// to a paragraph looks exactly like the text from that paragraph on, drawn
+    /// unscrolled. So drawing from the top of what shows puts every row where a
+    /// whole-text layout would.
+    #[test]
+    fn a_scrolled_long_text_draws_what_shows_where_it_belongs() {
+        use crate::scene::{DrawList, Layer};
+        let paras: Vec<String> =
+            (0..400).map(|i| format!("Paragraph {i}, short enough not to wrap")).collect();
+        let row = crate::style::Font::default().size * 1.3;
+        let clip = Rect { x: 10.0, y: 10.0, w: 300.0, h: 200.0 };
+        let draw = |node: NodeId, text: String, scrolled: f32| {
+            let item = TextItem {
+                node,
+                text,
+                color: Rgba([255, 255, 255, 255]),
+                rect: Rect { x: 10.0, y: 10.0 - scrolled, w: 300.0, h: 200.0 + scrolled },
+                ..item(clip, clip)
+            };
+            let list = DrawList {
+                layers: vec![Layer { key: (1, 0), quads: vec![], texts: vec![item], images: vec![] }],
+            };
+            crate::headless::render(&list, 320, 220, 1.0)
+        };
+        let Ok(scrolled) = draw(1, paras.join("\n"), 250.0 * row) else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let from_there = draw(2, paras[250..].join("\n"), 0.0).unwrap();
+        let inked = scrolled.pixels.chunks(4).filter(|p| p[..3] != [0, 0, 0]).count();
+        assert!(inked > 1000, "text is drawn: {inked} pixels");
+        let differ =
+            scrolled.pixels.chunks(4).zip(from_there.pixels.chunks(4)).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "{differ} pixels differ");
     }
 }

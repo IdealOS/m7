@@ -591,8 +591,14 @@ impl Desktop {
                 }
                 NodeKind::Terminal => self.set_focus(Some(node)),
                 NodeKind::TextField | NodeKind::TextArea => {
-                    self.set_focus(Some(node));
+                    // Where the click is, before focusing: focusing a field puts
+                    // its caret at the end and scrolls there, which in a long text
+                    // would move what was clicked on.
                     let at = self.index_at(node, rect, x, y);
+                    let mut e = Edit::new(&self.text_value(node));
+                    e.move_caret(Move::To(at), false);
+                    self.edits.insert(node, e);
+                    self.set_focus(Some(node));
                     self.edit(node, |e| {
                         e.move_caret(Move::To(at), false);
                         None
@@ -1014,7 +1020,11 @@ impl Desktop {
                 let text =
                     p.get("_value").or(p.get("value")).and_then(Value::as_str).unwrap_or_default().to_owned();
                 let font = self.font_of(id);
-                self.layout.text_extent(&text, &font, Some((view.w - 2.0 * FIELD_PAD).max(1.0))).1 + 12.0
+                // Exact through a view past what shows, which covers a scroll step;
+                // estimated below that, so a long text isn't all laid out to scroll.
+                let through = num(p, "_scroll", 0.0) + 2.0 * view.h;
+                self.layout.text_height(id, &text, &font, Some((view.w - 2.0 * FIELD_PAD).max(1.0)), through)
+                    + 12.0
             }
             _ => 0.0,
         };
@@ -1264,10 +1274,10 @@ impl Desktop {
         let inner_w = (rect.w - 2.0 * FIELD_PAD).max(1.0);
         let width = multiline.then_some(inner_w);
         let shown = self.shown_text(node, e.text());
-        let (cx, cy, ch) = self.layout.caret_at(&shown, &font, width, e.caret());
+        let (cx, cy, ch) = self.layout.caret_at(node, &shown, &font, width, e.caret());
         let sel: Vec<Value> = e
             .selection()
-            .map(|(a, b)| self.layout.selection_rects(&shown, &font, width, a, b))
+            .map(|(a, b)| self.layout.selection_rects(node, &shown, &font, width, a, b))
             .unwrap_or_default()
             .into_iter()
             .map(|r| json!([r.x, r.y, r.w, r.h]))
@@ -1324,10 +1334,10 @@ impl Desktop {
         if multiline {
             let top = rect.y + 4.0 + 2.0 - num(p, "_scroll", 0.0);
             let width = (rect.w - 2.0 * FIELD_PAD).max(1.0);
-            self.layout.index_at(&text, &font, Some(width), x - inner_x, y - top)
+            self.layout.index_at(node, &text, &font, Some(width), x - inner_x, y - top)
         } else {
             let scrolled = num(p, "_scroll_x", 0.0);
-            self.layout.index_at(&text, &font, None, x - inner_x + scrolled, 1.0)
+            self.layout.index_at(node, &text, &font, None, x - inner_x + scrolled, 1.0)
         }
     }
 
@@ -1479,13 +1489,16 @@ impl Desktop {
             }),
             Key::Up | Key::Down if multiline => {
                 let Some(e) = self.edits.get(&node).cloned() else { return };
-                let rect =
-                    self.scene.layout_rect(node).unwrap_or(Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
+                // Wrapped as drawn: a text area outside a layout container has
+                // only its own rect.
+                let Some(rect) = self.scene.layout_rect(node).or_else(|| self.scene.local_rect(node)) else {
+                    return;
+                };
                 let font = self.font_of(node);
                 let width = Some((rect.w - 2.0 * FIELD_PAD).max(1.0));
-                let (cx, cy, ch) = self.layout.caret_at(e.text(), &font, width, e.caret());
+                let (cx, cy, ch) = self.layout.caret_at(node, e.text(), &font, width, e.caret());
                 let ty = if key == Key::Up { cy - ch / 2.0 } else { cy + ch * 1.5 };
-                let at = self.layout.index_at(e.text(), &font, width, cx, ty);
+                let at = self.layout.index_at(node, e.text(), &font, width, cx, ty);
                 self.edit(node, |e| {
                     e.move_caret(Move::To(at), extend);
                     None
@@ -2030,6 +2043,7 @@ impl Desktop {
         }
         let scene = &self.scene;
         self.edits.retain(|n, _| scene.node(*n).is_some());
+        self.layout.forget(|n| scene.node(n).is_none());
         if self.focus.is_some_and(|f| scene.node(f).is_none()) {
             self.focus = None;
         }
@@ -2789,6 +2803,47 @@ mod tests {
         key(&mut d, Key::Down);
         key(&mut d, Key::Down);
         assert_eq!(events(&key(&mut d, Key::Enter)), [(3, "choose".into(), json!("Close"))]);
+    }
+
+    /// A long text area placed by its props (outside a layout container): a click
+    /// puts the caret where it lands without scrolling, and Up and Down move by
+    /// rows wrapped as they're drawn.
+    #[test]
+    fn long_text_areas_keep_the_click_and_move_by_drawn_rows() {
+        let mut d = desk();
+        let para = "the quick brown fox jumps over the lazy dog, again and again and again";
+        let text = vec![para; 60].join("\n");
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "text_area", "props": {"x": 10, "y": 10, "w": 300, "h": 200, "value": text}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0}
+            ]),
+        );
+        let area = global(&d, w, 2);
+        let at = center(&mut d, area);
+        click(&mut d, at);
+        let caret = |d: &Desktop| {
+            let c = prop(d, area, "_caret");
+            (c[0].as_f64().unwrap() as f32, c[1].as_f64().unwrap() as f32, c[2].as_f64().unwrap() as f32)
+        };
+        let (_, y, row) = caret(&d);
+        assert_eq!(
+            prop(&d, area, "_scroll").as_f64().unwrap_or(0.0),
+            0.0,
+            "the click didn't scroll to the end"
+        );
+        assert!((y - (200.0 / 2.0 - 6.0)).abs() <= row, "the caret is on the row clicked: {y}");
+        // From the start, Down goes one drawn row down; Up comes back.
+        d.input(Input::Key { key: Key::Home, mods: Mods { ctrl: true, ..Mods::default() } });
+        assert_eq!(caret(&d).1, 0.0);
+        key(&mut d, Key::Down);
+        let (x, y, _) = caret(&d);
+        assert!((y - row).abs() < 1.0, "one row down: {y} (rows are {row})");
+        assert!(x < 60.0, "near the row's start: {x}");
+        key(&mut d, Key::Up);
+        assert_eq!(caret(&d).1, 0.0);
     }
 
     #[test]

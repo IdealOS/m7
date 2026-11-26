@@ -19,12 +19,14 @@
 //! and `vertical`.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use glyphon::{Buffer, FontSystem, Metrics, Shaping};
 use protocol::{NodeId, NodeKind, Props};
 use serde_json::Value;
 use taffy::prelude::*;
 
+use crate::paragraphs::Paragraphs;
 use crate::scene::{Rect, Scene, num};
 use crate::style::Font;
 
@@ -48,6 +50,8 @@ fn font_key(f: &Font) -> FontKey {
 pub struct Layout {
     fonts: FontSystem,
     measured: Measured,
+    /// Text widgets' paragraphs, for carets, selections and clicks.
+    paragraphs: HashMap<NodeId, Paragraphs>,
 }
 
 /// What a layout pass found, for the scene to keep.
@@ -61,7 +65,7 @@ pub struct Computed {
 
 impl Layout {
     pub fn new(fonts: FontSystem) -> Layout {
-        Layout { fonts, measured: HashMap::new() }
+        Layout { fonts, measured: HashMap::new(), paragraphs: HashMap::new() }
     }
 
     /// Lay out `scene` if anything layout depends on changed since last time.
@@ -510,33 +514,64 @@ impl Layout {
         (if w > 0.0 { w } else { size * 0.6 }, (size * 1.3).ceil())
     }
 
-    fn shaped(&mut self, text: &str, font: &Font, width: Option<f32>) -> Buffer {
-        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(font.size, font.size * 1.3));
-        buffer.set_size(width, None);
-        let attrs = crate::fonts::attrs(self.fonts.db(), font);
-        buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        buffer.shape_until_scroll(&mut self.fonts, false);
-        buffer
+    /// Text widget `node`'s paragraphs, holding `text` in `font` wrapped at
+    /// `width`: kept from the last call when they can be, so only what changed
+    /// is shaped again.
+    fn paragraphs(
+        &mut self,
+        node: NodeId,
+        text: &str,
+        font: &Font,
+        width: Option<f32>,
+    ) -> (&mut FontSystem, &mut Paragraphs) {
+        let fonts = &mut self.fonts;
+        let p = match self.paragraphs.entry(node) {
+            Entry::Occupied(e) if e.get().fits(font, width, None) => {
+                let p = e.into_mut();
+                p.set_text(fonts, text);
+                p
+            }
+            Entry::Occupied(mut e) => {
+                e.insert(Paragraphs::new(fonts, text, font, width, None));
+                e.into_mut()
+            }
+            Entry::Vacant(e) => e.insert(Paragraphs::new(fonts, text, font, width, None)),
+        };
+        (fonts, p)
     }
 
-    /// The caret for character `index` of `text`: (x, y, height), from the text's
-    /// top left. `width` wraps (a text area); `None` is one long line.
-    pub fn caret_at(&mut self, text: &str, font: &Font, width: Option<f32>, index: usize) -> (f32, f32, f32) {
+    /// Forget the paragraphs of text widgets `gone` says no longer exist.
+    pub fn forget(&mut self, gone: impl Fn(NodeId) -> bool) {
+        self.paragraphs.retain(|n, _| !gone(*n));
+    }
+
+    /// The caret for character `index` of `text` in text widget `node`: (x, y,
+    /// height), from the text's top left. `width` wraps (a text area); `None`
+    /// is one long line.
+    pub fn caret_at(
+        &mut self,
+        node: NodeId,
+        text: &str,
+        font: &Font,
+        width: Option<f32>,
+        index: usize,
+    ) -> (f32, f32, f32) {
         let (line, offset) = line_and_byte(text, index);
-        let buffer = self.shaped(text, font, width);
-        let mut last = (0.0, 0.0, (font.size * 1.3).ceil());
-        for run in buffer.layout_runs().filter(|r| r.line_i == line) {
+        let (fonts, p) = self.paragraphs(node, text, font, width);
+        let (top, rows) = p.rows(fonts, line, line);
+        let mut last = (0.0, top, (font.size * 1.3).ceil());
+        for run in rows {
             let end = run.glyphs.last().map_or(0, |g| g.end);
             for g in run.glyphs {
                 if offset <= g.start {
-                    return (g.x, run.line_top, run.line_height);
+                    return (g.x, top + run.line_top, run.line_height);
                 }
                 if offset < g.end {
                     // Inside a glyph cluster: its trailing edge.
-                    return (g.x + g.w, run.line_top, run.line_height);
+                    return (g.x + g.w, top + run.line_top, run.line_height);
                 }
             }
-            last = (run.glyphs.last().map_or(0.0, |g| g.x + g.w), run.line_top, run.line_height);
+            last = (run.glyphs.last().map_or(0.0, |g| g.x + g.w), top + run.line_top, run.line_height);
             if offset < end {
                 return last;
             }
@@ -544,10 +579,19 @@ impl Layout {
         last
     }
 
-    /// The character index nearest (`x`, `y`), measured from the text's top left.
-    pub fn index_at(&mut self, text: &str, font: &Font, width: Option<f32>, x: f32, y: f32) -> usize {
-        let buffer = self.shaped(text, font, width);
-        let Some(cursor) = buffer.hit(x.max(0.0), y.max(0.0)) else {
+    /// The character index nearest (`x`, `y`) in text widget `node`, measured
+    /// from the text's top left.
+    pub fn index_at(
+        &mut self,
+        node: NodeId,
+        text: &str,
+        font: &Font,
+        width: Option<f32>,
+        x: f32,
+        y: f32,
+    ) -> usize {
+        let (fonts, p) = self.paragraphs(node, text, font, width);
+        let Some(cursor) = p.hit(fonts, x.max(0.0), y.max(0.0)) else {
             return if y < 0.0 { 0 } else { text.chars().count() };
         };
         let mut chars = 0;
@@ -560,9 +604,12 @@ impl Layout {
         text.chars().count()
     }
 
-    /// The highlight rectangles for characters `a..b` of `text`, one per line run.
+    /// The highlight rectangles for characters `a..b` of `text` in text widget
+    /// `node`, one per row.
+    #[allow(clippy::too_many_arguments)]
     pub fn selection_rects(
         &mut self,
+        node: NodeId,
         text: &str,
         font: &Font,
         width: Option<f32>,
@@ -574,12 +621,10 @@ impl Layout {
         }
         let (la, oa) = line_and_byte(text, a);
         let (lb, ob) = line_and_byte(text, b);
-        let buffer = self.shaped(text, font, width);
+        let (fonts, p) = self.paragraphs(node, text, font, width);
+        let (top, rows) = p.rows(fonts, la, lb);
         let mut out = Vec::new();
-        for run in buffer.layout_runs() {
-            if run.line_i < la || run.line_i > lb {
-                continue;
-            }
+        for run in rows {
             let from = if run.line_i == la { oa } else { 0 };
             let to = if run.line_i == lb { ob } else { usize::MAX };
             let mut x0 = f32::MAX;
@@ -595,15 +640,25 @@ impl Layout {
                 x1 = x1.max(end + 4.0);
             }
             if x1 > x0 {
-                out.push(Rect { x: x0, y: run.line_top, w: x1 - x0, h: run.line_height });
+                out.push(Rect { x: x0, y: top + run.line_top, w: x1 - x0, h: run.line_height });
             }
         }
         out
     }
 
-    /// `text`'s size in `font`, wrapped at `width` if given.
-    pub fn text_extent(&mut self, text: &str, font: &Font, width: Option<f32>) -> (f32, f32) {
-        text_size(&mut self.fonts, &mut self.measured, text, font, width)
+    /// The height of `text` in text widget `node`, wrapped at `width`: exact
+    /// through `through` from its top, estimated below (see
+    /// [`Paragraphs::height_through`]).
+    pub fn text_height(
+        &mut self,
+        node: NodeId,
+        text: &str,
+        font: &Font,
+        width: Option<f32>,
+        through: f32,
+    ) -> f32 {
+        let (fonts, p) = self.paragraphs(node, text, font, width);
+        p.height_through(fonts, through).ceil().max((font.size * 1.3).ceil())
     }
 }
 
@@ -782,23 +837,23 @@ mod tests {
     #[test]
     fn carets_selections_and_clicks_line_up() {
         let mut l = Layout::new(crate::fonts::ui_only());
-        let (x0, y0, h) = l.caret_at("hello", &Font::default(), None, 0);
+        let (x0, y0, h) = l.caret_at(1, "hello", &Font::default(), None, 0);
         assert_eq!((x0, y0), (0.0, 0.0));
         assert!(h >= 18.0);
-        let (x5, _, _) = l.caret_at("hello", &Font::default(), None, 5);
-        let (x2, _, _) = l.caret_at("hello", &Font::default(), None, 2);
+        let (x5, _, _) = l.caret_at(1, "hello", &Font::default(), None, 5);
+        let (x2, _, _) = l.caret_at(1, "hello", &Font::default(), None, 2);
         assert!(0.0 < x2 && x2 < x5, "{x2} {x5}");
-        assert_eq!(l.index_at("hello", &Font::default(), None, x2 + 0.5, 5.0), 2);
-        assert_eq!(l.index_at("hello", &Font::default(), None, 500.0, 5.0), 5);
+        assert_eq!(l.index_at(1, "hello", &Font::default(), None, x2 + 0.5, 5.0), 2);
+        assert_eq!(l.index_at(1, "hello", &Font::default(), None, 500.0, 5.0), 5);
         // Two lines: the caret after the break is on the second line.
-        let (_, y, _) = l.caret_at("ab\ncd", &Font::default(), None, 3);
+        let (_, y, _) = l.caret_at(1, "ab\ncd", &Font::default(), None, 3);
         assert!(y > 10.0);
-        assert_eq!(l.index_at("ab\ncd", &Font::default(), None, 0.0, y + 2.0), 3);
-        let rects = l.selection_rects("ab\ncd", &Font::default(), None, 1, 4);
+        assert_eq!(l.index_at(1, "ab\ncd", &Font::default(), None, 0.0, y + 2.0), 3);
+        let rects = l.selection_rects(1, "ab\ncd", &Font::default(), None, 1, 4);
         assert_eq!(rects.len(), 2, "{rects:?}");
         // Multi-byte characters count as one.
-        let (xe, _, _) = l.caret_at("éé", &Font::default(), None, 1);
-        assert!(xe > 0.0 && xe < l.caret_at("éé", &Font::default(), None, 2).0);
+        let (xe, _, _) = l.caret_at(1, "éé", &Font::default(), None, 1);
+        assert!(xe > 0.0 && xe < l.caret_at(1, "éé", &Font::default(), None, 2).0);
         assert_eq!(line_and_byte("ab\ncd", 4), (1, 1));
         assert_eq!(line_and_byte("é", 1), (0, 2));
     }

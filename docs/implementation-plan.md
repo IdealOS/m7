@@ -342,7 +342,7 @@ Goal: a place to write that never loses anything. Documents are database records
 Compositor work first:
 
 - [x] **Bound fields follow live changes.** A bound field follows its document with a live query (`$id` picks the one document), read as its app. Another writer's change shows with the caret kept on its character; changes that arrive while the field's own edits are in flight wait until db has answered them. The Style Editor's Reload button is gone.
-- [ ] **Long documents.** Text areas shape their whole text each time, which is fine for notes but slow for a long chapter: shape and lay out only what changed and what's visible.
+- [x] **Long documents.** Text is shaped and laid out a paragraph at a time and kept between frames (`paragraphs.rs`): typing reshapes one paragraph, and only what's on screen and above it is laid out. On an M3, a 200 KB document went from 127 ms a keystroke to under half a millisecond (`make text-bench`). Two bugs this showed up are fixed: clicking into an unfocused long text area jumped to its end, and Up and Down in a text area outside a layout container moved by rows wrapped at a made-up width. Still to do: measure it on a Pi.
 - [ ] **Styled runs in a text area** (bold, headings, colours), for Markdown shown as you type and later syntax highlighting. Not needed for the first version, which previews beside the text.
 
 The editor:

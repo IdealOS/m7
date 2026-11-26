@@ -24,6 +24,7 @@ pub mod headless;
 pub mod image;
 pub mod input;
 pub mod layout;
+pub mod paragraphs;
 pub mod prompt;
 pub mod render;
 pub mod scene;

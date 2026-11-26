@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps app-host protocol tools-check style-watch
+.PHONY: hosted bench text-bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps app-host protocol tools-check style-watch
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -15,6 +15,9 @@ db:                ## Run the database service here, on a running `make bus` (da
 
 bus-bench:         ## Round trip and throughput through a running `make bus`
 	cargo run --release -p osctl -- bus bench
+
+text-bench:        ## A long document in a text area: time per keystroke, caret move and scroll, at 2 KB to 200 KB
+	cargo run --release -p compositor --bin text-bench
 
 db-bench:          ## The document store at 10,000 emails: writes, queries, live queries, snapshots, blobs
 	cargo run --release -p db --bin store-bench

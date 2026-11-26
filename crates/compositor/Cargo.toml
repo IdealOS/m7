@@ -4,6 +4,8 @@ description = "Scene-graph compositor: wgpu renderer, hosted (winit) and KMS bac
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# `cargo run -p compositor` runs the compositor; `--bin text-bench` the benchmark.
+default-run = "compositor"
 
 [features]
 default = ["hosted"]
