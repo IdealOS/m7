@@ -18,4 +18,7 @@ done
 case "$(readlink "$TARGET_DIR/sbin/modprobe")" in
 	*busybox*) echo "post-image: /sbin/modprobe is BusyBox's, which can't load xz modules"; exit 1 ;;
 esac
+# rpi-firmware copies config.txt only when that package builds, so a rebuild of an
+# existing output would keep an old one. Copy it every time.
+install -m 0644 "$BOARD_DIR/config.txt" "$BINARIES_DIR/rpi-firmware/config.txt"
 support/scripts/genimage.sh -c "$BOARD_DIR/genimage.cfg"
