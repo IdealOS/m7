@@ -409,6 +409,47 @@ The Pi 3's GPU (VideoCore IV, Mesa's `vc4` driver) only does OpenGL ES 2.0. It h
 
 **Done when:** the Pi 3 draws the desktop at native 1080p at 30 fps or better while a window is dragged, with sharp text.
 
+### Styles, fonts and transitions
+
+How things look, and how they move, without apps drawing anything themselves. Today's theme is a fixed set of constants (`theme.rs`) that apps name with `$accent`. Colour tokens are already looked up as each frame's draw list is built, so restyling is a table swap and region damage redraws what changed with no new code. Window textures are a later phase (see screen and window effects).
+
+**Style sheets: CSS-like, but simpler.** Colours and fonts only; layout stays in props.
+
+```css
+:root   { --accent: #3b82f6; --text: #1f2937; font-family: "Inter Variable", sans-serif; font-size: 14px; }
+button  { background: var(--control); color: var(--text); }
+button.primary { background: var(--accent); color: var(--accent-text); }
+button:pressed { background: var(--control-pressed); }
+.code   { font-family: "DejaVu Sans Mono", monospace; }
+@dark   { :root { --text: #e5e7eb; --surface: #111827; } }
+```
+
+- [ ] **Selectors:** a widget kind (`button`), a class (`.primary`, from a node's `class` prop), both (`button.primary`), each with at most one state (`:hover`, `:pressed`, `:focus`, `:disabled`, `:checked`), and `:root` for variables. No combinators, ids or attribute selectors, so a rule never depends on where a node sits. Kind beats nothing, class beats kind, both beat either, a state beats its plain rule; at a tie the later rule wins.
+- [ ] **Properties:** `color`, `background`, `border-color`, `caret-color`, `selection-color`, `placeholder-color`; `font-family` (a list ending in `sans-serif`, `serif` or `monospace`), `font-size`, `font-weight`, `font-style`. Variables are `--name` and `var(--name)`; today's `$accent` tokens become those variables, so existing apps keep working. Colour and font properties inherit down the node tree, as in CSS.
+- [ ] **One system style, overridable per app.** The system sheet ships in the image, with an `@dark` section (the one at-rule) that the user's light or dark choice turns on. An app may ship `style.css` in its bundle; it applies after the system sheet, to that app's windows only, so overriding `--accent` recolours its own widgets. A node's own colour props override both. App sheets never reach the frame, title bar or prompts: that chrome carries the trusted signals (permission tiers, workspace hues).
+- [ ] **Parsing in the compositor,** by a small hand-written parser for exactly this subset, reporting the line and column of a mistake to the app (`osctl app install` shows it). Resolved styles are cached per node and recomputed when a class, state or sheet changes, not every frame.
+- [ ] **Theme choice as a `Setting` document** the compositor follows with a live query: switching to dark restyles every window at once. Settings gets the light and dark choice.
+- [ ] **Clean up raw colours:** `#ffffff` on the accent in Settings and the browser becomes `--accent-text`, and Notes' `#4b5563` becomes `--muted`.
+
+**Fonts: several families, local only.**
+
+- [ ] Inter stays built in as `sans-serif`. The image adds a monospace and a serif family as font files on the root file system, and the compositor loads that directory at start. `font-family` names any installed family, falling back along its list to the generic one.
+- [ ] The terminal and code take `monospace` from the style instead of a fixed face.
+- [ ] No downloaded or app-bundled fonts yet. A font file is parsed inside the trusted compositor, so fonts an app ships need checking first (or a separate parsing process) before they're allowed.
+
+**Transitions: in the compositor only.** Apps set the end value; the compositor animates there, so motion never waits on an app's JavaScript or the bus.
+
+- [ ] **What animates in this phase:** position (`x`, `y`, and the window manager's window positions) and colours (any colour prop and style-resolved colour, interpolated in Oklab so fades look even, including alpha for fading single elements). Not size, scale or whole-window opacity: those need window textures.
+- [ ] **Declared, CSS-style:** a node's `transition` prop names props and durations in milliseconds (`{"x": 200, "color": 150}`), with an optional easing. Widget state colours (hover, pressed, focus) fade over a short system default.
+- [ ] **One animator,** advanced from `Desktop::tick` and timed by the display's page-flip timestamps rather than the wall clock. It writes current values into compositor-owned `_` props that layout and drawing already read, and a value changed mid-animation retargets from where it is. The damage tracker compares draw lists, so it redraws exactly what moved.
+- [ ] **Uses in the window manager:** windows slide when switching workspaces, windows glide when placed or snapped, and menus, the switcher and dialog backdrops fade in.
+- [ ] **A reduce-motion setting** that makes every transition an instant change.
+- [ ] **Later phase, with window textures:** fading or zooming whole windows as they open, close and minimize (a closing window fades from a saved copy of its last texture), animated resizing, and blur.
+
+At 3440x1440 the Pi 4 moves a window at about 35 fps (a drag's cost, mostly the fixed tile cost of a partial frame), and 1080p should reach 60. Short transitions, 150 to 200 ms, hide a lower frame rate well.
+
+**Done when:** switching to dark in Settings restyles every open app at once; an app overrides the accent colour and a font from its own `style.css`; the terminal's family comes from the style; switching workspaces slides the windows across, and hover and press colours fade, at full frame rate on the Pi 4 at 1080p.
+
 ### Screen and window effects
 
 Shaders applied to the whole screen (a warm night tint) or to particular windows (dim inactive windows, grey out one that isn't responding, frosted glass, open and minimize animations). Each window is already its own layer in the draw list (`Scene::draw_list`: one layer per child of the root), which is the seam both kinds of window effect use.
@@ -417,7 +458,7 @@ Beyond the usual effects, one aim of IdealOS is to explore new uses of GPU effec
 
 - [ ] **Night tint in the display hardware.** Set the CRTC's gamma table (and its colour matrix where the driver has one) from `backend/kms/display.rs`. It costs nothing per frame, changing it redraws nothing (so it can fade at sunset), and it covers the hardware cursor, which nothing in our renderer reaches. KMS only; on the Mac, Night Shift does this. Check what `vc4` offers (its reported gamma size) on the Pi 4.
 - [ ] **Window colour effects (level 1).** An `effect` on `Layer` (`scene.rs`), filled from a compositor-owned window prop, passed to `quad.wgsl` and `image.wgsl` as a colour matrix and opacity; text, one colour per run, gets the same matrix applied to its colour in `render.rs`. No extra passes or textures. Per-pixel colour only: no blur or movement, and opacity applies per element, so overlapping parts of a translucent window show through each other.
-- [ ] **Per-window shaders (level 2).** Render a window's layer into its own texture, then draw that texture into the frame through a shader chosen for the window: true whole-window opacity, blur behind, scaling and warping for animations, thumbnails in the window switcher. An unchanged window reuses its texture, a step toward drawing only what changed. About 8 MB of texture per 1080p-sized window and a compositing pass each: fine on the Pi 4's GPU, heavy on the Pi 3. Design it together with region damage and M13's external surfaces (Servo's tabs arrive as GPU buffers), which need windows as textures too.
+- [ ] **Per-window shaders (level 2), a later phase.** Render a window's layer into its own texture, then draw that texture into the frame through a shader chosen for the window: true whole-window opacity, blur behind, scaling and warping for animations, thumbnails in the window switcher. An unchanged window reuses its texture, a step toward drawing only what changed. About 8 MB of texture per 1080p-sized window and a compositing pass each: fine on the Pi 4's GPU, heavy on the Pi 3. Design it together with region damage and M13's external surfaces (Servo's tabs arrive as GPU buffers), which need windows as textures too.
 - [ ] **A setting for it.** A `Setting` document the Settings app edits and the compositor follows with a live query. A night tint on a schedule needs the clock set first: nothing sets the time yet.
 - [ ] **Who chooses.** The compositor, the window manager and the user choose effects. Apps may at most pick from a fixed set of system effects and never supply shader code: a shader would run in the trusted compositor and the GPU driver (on the Pi 3, compiled by lavapipe in the compositor's own process), outside the app sandbox, and a transparent or warped window could imitate another app or hide where clicks land.
 
