@@ -20,13 +20,13 @@
 
 use std::collections::HashMap;
 
-use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Weight};
+use glyphon::{Buffer, FontSystem, Metrics, Shaping};
 use protocol::{NodeId, NodeKind, Props};
 use serde_json::Value;
 use taffy::prelude::*;
 
 use crate::scene::{Rect, Scene, num};
-use crate::theme;
+use crate::style::Font;
 
 /// Width of a split view's divider.
 pub const DIVIDER: f32 = 6.0;
@@ -35,10 +35,19 @@ pub const DIVIDER: f32 = 6.0;
 #[derive(Clone, Copy)]
 struct Leaf(NodeId);
 
+/// A text's measured size, by (text, font, width limit).
+type Measured = HashMap<(String, FontKey, u32), (f32, f32)>;
+
+/// What a font is, for caching: families, size, weight, slant.
+type FontKey = (std::sync::Arc<[String]>, u32, u16, bool);
+
+fn font_key(f: &Font) -> FontKey {
+    (f.families.clone(), f.size.to_bits(), f.weight, f.italic)
+}
+
 pub struct Layout {
     fonts: FontSystem,
-    /// Text sizes by (text, size, bold, width limit).
-    measured: HashMap<(String, u32, bool, u32), (f32, f32)>,
+    measured: Measured,
 }
 
 /// What a layout pass found, for the scene to keep.
@@ -413,17 +422,16 @@ fn padding(v: Option<&Value>) -> Option<Rect4> {
 /// A leaf's size from its content, `width` limiting text (None for no limit).
 fn measure(
     fonts: &mut FontSystem,
-    cache: &mut HashMap<(String, u32, bool, u32), (f32, f32)>,
+    cache: &mut Measured,
     scene: &Scene,
     id: NodeId,
     width: Option<f32>,
 ) -> (f32, f32) {
     let Some(node) = scene.node(id) else { return (0.0, 0.0) };
     let p = &node.props;
-    let size = theme::size::clamp(num(p, "size", theme::size::BODY));
-    let bold = p.get("weight").and_then(Value::as_str) == Some("bold");
+    let font = crate::draw::text_font(&scene.style(id), p);
     let s = |key: &str| p.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
-    let mut text = |t: &str, width: Option<f32>| text_size(fonts, cache, t, size, bold, width);
+    let mut text = |t: &str, width: Option<f32>| text_size(fonts, cache, t, &font, width);
     let explicit = |key: &str| p.get(key).and_then(Value::as_f64).map(|v| v as f32);
     let (w, h) = match node.kind {
         NodeKind::Text | NodeKind::Label => text(&s("text"), width),
@@ -456,27 +464,24 @@ fn measure(
     (explicit("w").unwrap_or(w), explicit("h").unwrap_or(h))
 }
 
-/// The size `text` takes at `size`, wrapped at `width` if given, with the
+/// The size `text` takes in `font`, wrapped at `width` if given, with the
 /// renderer's metrics (line height 1.3 × size).
 pub fn text_size(
     fonts: &mut FontSystem,
-    cache: &mut HashMap<(String, u32, bool, u32), (f32, f32)>,
+    cache: &mut Measured,
     text: &str,
-    size: f32,
-    bold: bool,
+    font: &Font,
     width: Option<f32>,
 ) -> (f32, f32) {
-    let key = (text.to_owned(), size.to_bits(), bold, width.unwrap_or(-1.0).to_bits());
+    let key = (text.to_owned(), font_key(font), width.unwrap_or(-1.0).to_bits());
     if let Some(&found) = cache.get(&key) {
         return found;
     }
+    let size = font.size;
     let line = size * 1.3;
     let mut buffer = Buffer::new(fonts, Metrics::new(size, line));
     buffer.set_size(width, None);
-    let mut attrs = Attrs::new().family(Family::SansSerif);
-    if bold {
-        attrs = attrs.weight(Weight::SEMIBOLD);
-    }
+    let attrs = crate::fonts::attrs(fonts.db(), font);
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(fonts, false);
     let (mut w, mut lines) = (0.0_f32, 0);
@@ -492,31 +497,34 @@ pub fn text_size(
 /// Where text sits, for carets, selections and clicks: shaped with the layout
 /// fonts and the renderer's metrics, so it lines up with what's drawn.
 impl Layout {
-    /// A terminal cell's width and height at `size`: the monospace family's
+    /// A terminal cell's width and height in `font` (a monospace one): its
     /// advance, and the renderer's line height.
-    pub fn cell(&mut self, size: f32) -> (f32, f32) {
+    pub fn cell(&mut self, font: &Font) -> (f32, f32) {
+        let size = font.size;
         let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, size * 1.3));
         buffer.set_size(None, None);
-        buffer.set_text(&"M".repeat(20), &Attrs::new().family(Family::Monospace), Shaping::Advanced, None);
+        let attrs = crate::fonts::attrs(self.fonts.db(), font);
+        buffer.set_text(&"M".repeat(20), &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) / 20.0;
         (if w > 0.0 { w } else { size * 0.6 }, (size * 1.3).ceil())
     }
 
-    fn shaped(&mut self, text: &str, size: f32, width: Option<f32>) -> Buffer {
-        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, size * 1.3));
+    fn shaped(&mut self, text: &str, font: &Font, width: Option<f32>) -> Buffer {
+        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(font.size, font.size * 1.3));
         buffer.set_size(width, None);
-        buffer.set_text(text, &Attrs::new().family(Family::SansSerif), Shaping::Advanced, None);
+        let attrs = crate::fonts::attrs(self.fonts.db(), font);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         buffer
     }
 
     /// The caret for character `index` of `text`: (x, y, height), from the text's
     /// top left. `width` wraps (a text area); `None` is one long line.
-    pub fn caret_at(&mut self, text: &str, size: f32, width: Option<f32>, index: usize) -> (f32, f32, f32) {
+    pub fn caret_at(&mut self, text: &str, font: &Font, width: Option<f32>, index: usize) -> (f32, f32, f32) {
         let (line, offset) = line_and_byte(text, index);
-        let buffer = self.shaped(text, size, width);
-        let mut last = (0.0, 0.0, (size * 1.3).ceil());
+        let buffer = self.shaped(text, font, width);
+        let mut last = (0.0, 0.0, (font.size * 1.3).ceil());
         for run in buffer.layout_runs().filter(|r| r.line_i == line) {
             let end = run.glyphs.last().map_or(0, |g| g.end);
             for g in run.glyphs {
@@ -537,8 +545,8 @@ impl Layout {
     }
 
     /// The character index nearest (`x`, `y`), measured from the text's top left.
-    pub fn index_at(&mut self, text: &str, size: f32, width: Option<f32>, x: f32, y: f32) -> usize {
-        let buffer = self.shaped(text, size, width);
+    pub fn index_at(&mut self, text: &str, font: &Font, width: Option<f32>, x: f32, y: f32) -> usize {
+        let buffer = self.shaped(text, font, width);
         let Some(cursor) = buffer.hit(x.max(0.0), y.max(0.0)) else {
             return if y < 0.0 { 0 } else { text.chars().count() };
         };
@@ -556,7 +564,7 @@ impl Layout {
     pub fn selection_rects(
         &mut self,
         text: &str,
-        size: f32,
+        font: &Font,
         width: Option<f32>,
         a: usize,
         b: usize,
@@ -566,7 +574,7 @@ impl Layout {
         }
         let (la, oa) = line_and_byte(text, a);
         let (lb, ob) = line_and_byte(text, b);
-        let buffer = self.shaped(text, size, width);
+        let buffer = self.shaped(text, font, width);
         let mut out = Vec::new();
         for run in buffer.layout_runs() {
             if run.line_i < la || run.line_i > lb {
@@ -593,9 +601,9 @@ impl Layout {
         out
     }
 
-    /// `text`'s size at `size`, wrapped at `width` if given.
-    pub fn text_extent(&mut self, text: &str, size: f32, width: Option<f32>) -> (f32, f32) {
-        text_size(&mut self.fonts, &mut self.measured, text, size, false, width)
+    /// `text`'s size in `font`, wrapped at `width` if given.
+    pub fn text_extent(&mut self, text: &str, font: &Font, width: Option<f32>) -> (f32, f32) {
+        text_size(&mut self.fonts, &mut self.measured, text, font, width)
     }
 }
 
@@ -690,8 +698,8 @@ mod tests {
             {"op": "insert", "parent": 1, "child": 2, "index": 0},
             {"op": "insert", "parent": 1, "child": 3, "index": 1}
         ]));
-        assert_eq!(rect(&s, 2).h, (theme::size::MAX * 1.3).ceil());
-        assert_eq!(rect(&s, 3).h, (theme::size::MIN * 1.3).ceil());
+        assert_eq!(rect(&s, 2).h, (crate::theme::size::MAX * 1.3).ceil());
+        assert_eq!(rect(&s, 3).h, (crate::theme::size::MIN * 1.3).ceil());
     }
 
     #[test]
@@ -774,23 +782,23 @@ mod tests {
     #[test]
     fn carets_selections_and_clicks_line_up() {
         let mut l = Layout::new(crate::fonts::ui_only());
-        let (x0, y0, h) = l.caret_at("hello", 14.0, None, 0);
+        let (x0, y0, h) = l.caret_at("hello", &Font::default(), None, 0);
         assert_eq!((x0, y0), (0.0, 0.0));
         assert!(h >= 18.0);
-        let (x5, _, _) = l.caret_at("hello", 14.0, None, 5);
-        let (x2, _, _) = l.caret_at("hello", 14.0, None, 2);
+        let (x5, _, _) = l.caret_at("hello", &Font::default(), None, 5);
+        let (x2, _, _) = l.caret_at("hello", &Font::default(), None, 2);
         assert!(0.0 < x2 && x2 < x5, "{x2} {x5}");
-        assert_eq!(l.index_at("hello", 14.0, None, x2 + 0.5, 5.0), 2);
-        assert_eq!(l.index_at("hello", 14.0, None, 500.0, 5.0), 5);
+        assert_eq!(l.index_at("hello", &Font::default(), None, x2 + 0.5, 5.0), 2);
+        assert_eq!(l.index_at("hello", &Font::default(), None, 500.0, 5.0), 5);
         // Two lines: the caret after the break is on the second line.
-        let (_, y, _) = l.caret_at("ab\ncd", 14.0, None, 3);
+        let (_, y, _) = l.caret_at("ab\ncd", &Font::default(), None, 3);
         assert!(y > 10.0);
-        assert_eq!(l.index_at("ab\ncd", 14.0, None, 0.0, y + 2.0), 3);
-        let rects = l.selection_rects("ab\ncd", 14.0, None, 1, 4);
+        assert_eq!(l.index_at("ab\ncd", &Font::default(), None, 0.0, y + 2.0), 3);
+        let rects = l.selection_rects("ab\ncd", &Font::default(), None, 1, 4);
         assert_eq!(rects.len(), 2, "{rects:?}");
         // Multi-byte characters count as one.
-        let (xe, _, _) = l.caret_at("éé", 14.0, None, 1);
-        assert!(xe > 0.0 && xe < l.caret_at("éé", 14.0, None, 2).0);
+        let (xe, _, _) = l.caret_at("éé", &Font::default(), None, 1);
+        assert!(xe > 0.0 && xe < l.caret_at("éé", &Font::default(), None, 2).0);
         assert_eq!(line_and_byte("ab\ncd", 4), (1, 1));
         assert_eq!(line_and_byte("é", 1), (0, 2));
     }

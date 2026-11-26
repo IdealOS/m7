@@ -52,6 +52,8 @@ export function esbuildArgs(dir: string, sdk: string): string[] {
     // QuickJS (in app-host) supports ES2023.
     "--target=es2022",
     `--alias:@idealos/sdk=${sdk}`,
+    // `import style from "./style.css"` gives the sheet's text, for openWindow.
+    "--loader:.css=text",
     `--outfile=${join(dir, "dist", "app.js")}`,
     "--log-level=warning",
   ];

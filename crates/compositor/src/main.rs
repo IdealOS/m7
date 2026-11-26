@@ -67,6 +67,13 @@ fn main() -> ExitCode {
                 opts.render_height = RenderHeight::parse(&value("--render-height"))
                     .unwrap_or_else(|| usage("--render-height is auto, native or a number of rows"))
             }
+            "--theme" => {
+                opts.dark = match value("--theme").as_str() {
+                    "dark" => true,
+                    "light" => false,
+                    _ => usage("--theme is light or dark"),
+                }
+            }
             "--screenshot" => screenshot = Some(value("--screenshot").into()),
             "--serve-for" => {
                 serve_for = value("--serve-for").parse().unwrap_or_else(|_| usage("bad --serve-for"))
@@ -142,6 +149,7 @@ fn take_screenshot(
     steps: &[Step],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut desktop = Desktop::new(opts.width as f32, opts.height as f32);
+    desktop.scene.set_dark(opts.dark);
     desktop.scene.apply_all(demo::build(opts.width as f32, opts.height as f32, opts.windows));
     desktop.set_screen(opts.width as f32, opts.height as f32);
     if serve_for > 0.0 {
@@ -219,7 +227,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--theme light|dark] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

@@ -2,14 +2,21 @@
 //!
 //! Apps mutate it with [`SceneOp`]s; each frame the renderer asks for a flattened
 //! [`DrawList`]. Nodes are positioned with `x`/`y`/`w`/`h` props in logical
-//! pixels, except the children of a `vstack` or `hstack`, which the stack lays out
-//! in a row or column (`gap`, `padding`), sizing each from its own `w`/`h` or its
-//! content. That's enough for M4's apps; real layout (taffy) arrives in M5.
+//! pixels, except the children of containers, which [`crate::layout`] places.
+//!
+//! Each node also has a computed style ([`crate::style`]): the system style sheet,
+//! light or dark, and inside an app's windows the app's own sheet. Styles are
+//! computed top-down when something asks for them after a change, and kept until
+//! the next one; drawing, layout and text measuring all read the same ones.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use protocol::{NodeId, NodeKind, Props, SceneOp};
 use serde_json::Value;
+
+use crate::style::{NodeInfo, Scope, Sheet, Style};
 
 /// The implicit root every window is inserted under.
 pub const ROOT: NodeId = 0;
@@ -34,6 +41,28 @@ pub struct Scene {
     layout: HashMap<NodeId, Rect>,
     /// Scroll views' content sizes.
     content: HashMap<NodeId, (f32, f32)>,
+    styles: Styles,
+}
+
+/// The style sheets in force, and the styles computed from them.
+#[derive(Debug)]
+struct Styles {
+    system: Arc<Sheet>,
+    dark: bool,
+    /// The system sheet alone: everything outside apps' windows.
+    scope: Scope,
+    /// Apps' sheets, by the node they style (a window's content area), with the
+    /// scope each makes.
+    apps: HashMap<NodeId, (Arc<Sheet>, Scope)>,
+    /// Every node's computed style, until the next change.
+    computed: RefCell<Option<Arc<HashMap<NodeId, Style>>>>,
+}
+
+impl Styles {
+    fn new(system: Arc<Sheet>, dark: bool) -> Styles {
+        let scope = Scope::system(system.clone(), dark);
+        Styles { system, dark, scope, apps: HashMap::new(), computed: RefCell::new(None) }
+    }
 }
 
 /// Props that only change how a node looks, not the layout: setting just these
@@ -154,13 +183,11 @@ pub struct TextItem {
     /// a terminal, one per run of cells).
     pub slot: u32,
     pub text: String,
-    pub size: f32,
+    /// Its family, size, weight and slant, from the node's style and props.
+    pub font: crate::style::Font,
     pub color: Rgba,
-    pub bold: bool,
     /// Centered in `rect` horizontally (button labels), rather than left-aligned.
     pub center: bool,
-    /// In the monospace family (a terminal's cells), rather than the UI font.
-    pub mono: bool,
     pub rect: Rect,
     pub clip: Rect,
 }
@@ -210,7 +237,92 @@ impl Scene {
             ROOT,
             Node { kind: NodeKind::Group, props: Props::new(), children: Vec::new(), parent: None },
         );
-        Scene { nodes, dirty: true, layout_dirty: true, layout: HashMap::new(), content: HashMap::new() }
+        Scene {
+            nodes,
+            dirty: true,
+            layout_dirty: true,
+            layout: HashMap::new(),
+            content: HashMap::new(),
+            styles: Styles::new(Arc::new(Sheet::system()), false),
+        }
+    }
+
+    // --- Styles --------------------------------------------------------------------
+
+    /// Whether the dark theme is on.
+    pub fn dark(&self) -> bool {
+        self.styles.dark
+    }
+
+    /// Switch between the light and dark themes. Everything restyles at once.
+    pub fn set_dark(&mut self, dark: bool) {
+        if dark == self.styles.dark {
+            return;
+        }
+        let apps: Vec<(NodeId, Arc<Sheet>)> =
+            self.styles.apps.iter().map(|(id, (s, _))| (*id, s.clone())).collect();
+        self.styles = Styles::new(self.styles.system.clone(), dark);
+        for (id, sheet) in apps {
+            self.set_app_style(id, Some(sheet));
+        }
+        self.restyled();
+    }
+
+    /// Style node `id` (a window's content area) and everything in it with an app's
+    /// sheet as well as the system's, or (with `None`) the system's alone.
+    pub fn set_app_style(&mut self, id: NodeId, sheet: Option<Arc<Sheet>>) {
+        match sheet {
+            Some(sheet) => {
+                let scope = self.styles.scope.with_app(sheet.clone());
+                self.styles.apps.insert(id, (sheet, scope));
+            }
+            None => {
+                self.styles.apps.remove(&id);
+            }
+        }
+        self.restyled();
+    }
+
+    fn restyled(&mut self) {
+        self.styles.computed.replace(None);
+        self.dirty = true;
+        self.layout_dirty = true;
+    }
+
+    /// Every node's computed style (nodes in the tree under the root).
+    pub fn styles(&self) -> Arc<HashMap<NodeId, Style>> {
+        if let Some(s) = self.styles.computed.borrow().as_ref() {
+            return s.clone();
+        }
+        let mut out = HashMap::with_capacity(self.nodes.len());
+        let scope = &self.styles.scope;
+        let root = scope.root(None);
+        out.insert(ROOT, root.clone());
+        let mut stack: Vec<(NodeId, Style, &Scope)> = Vec::new();
+        for &c in self.nodes[&ROOT].children.iter().rev() {
+            stack.push((c, root.clone(), scope));
+        }
+        while let Some((id, parent, scope)) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else { continue };
+            let (scope, parent) = match self.styles.apps.get(&id) {
+                Some((_, app)) => (app, app.root(Some(&parent))),
+                None => (scope, parent),
+            };
+            let style = scope.compute(&parent, &NodeInfo::of(node.kind, &node.props));
+            for &c in node.children.iter().rev() {
+                stack.push((c, style.clone(), scope));
+            }
+            out.insert(id, style);
+        }
+        let out = Arc::new(out);
+        self.styles.computed.replace(Some(out.clone()));
+        out
+    }
+
+    /// Node `id`'s computed style (the root's, for a node outside the tree).
+    pub fn style(&self, id: NodeId) -> Style {
+        let all = self.styles();
+        all.get(&id).or_else(|| all.get(&ROOT)).cloned().expect("the root has a style")
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
@@ -311,6 +423,7 @@ impl Scene {
     /// a buggy app must never be able to crash the compositor.
     pub fn apply(&mut self, op: SceneOp) {
         self.dirty = true;
+        self.styles.computed.replace(None);
         if !matches!(&op, SceneOp::Set { props, .. } if props.keys().all(|k| VISUAL.contains(&k.as_str()))) {
             self.layout_dirty = true;
         }
@@ -375,6 +488,7 @@ impl Scene {
             return;
         }
         let Some(node) = self.nodes.remove(&id) else { return };
+        self.styles.apps.remove(&id);
         if let Some(parent) = node.parent
             && let Some(p) = self.nodes.get_mut(&parent)
         {
@@ -411,6 +525,8 @@ impl Scene {
     }
 
     pub fn draw_list(&self) -> DrawList {
+        let styles = self.styles();
+        let root = &styles[&ROOT];
         let mut list = DrawList::default();
         for &child in self.top_level() {
             let mut layer = Layer { key: (child, 0), ..Layer::default() };
@@ -421,7 +537,7 @@ impl Scene {
                     let next = Layer { key: (child, layer.key.1 + 1), ..Layer::default() };
                     list.layers.push(std::mem::replace(&mut layer, next));
                 }
-                crate::draw::draw(id, node, rect, clip, &mut layer)
+                crate::draw::draw(id, node, rect, clip, styles.get(&id).unwrap_or(root), &mut layer)
             });
             list.layers.push(layer);
         }
@@ -502,16 +618,10 @@ pub fn num(p: &Props, key: &str, default: f32) -> f32 {
     p.get(key).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(default)
 }
 
-pub fn color(p: &Props, key: &str, default: Rgba) -> Rgba {
-    p.get(key).and_then(Value::as_str).and_then(parse_color).unwrap_or(default)
-}
-
-/// A color prop: `#rrggbb`, `#rrggbbaa`, or a theme token such as `$accent`.
-pub fn parse_color(s: &str) -> Option<Rgba> {
-    match s.strip_prefix('$') {
-        Some(name) => Rgba::parse(crate::theme::token(name)?),
-        None => Rgba::parse(s),
-    }
+/// A colour prop's value, or `default`: `#rrggbb`, `#rrggbbaa`, or a variable of
+/// the node's style as `$accent` or `var(--accent)`.
+pub fn color(p: &Props, key: &str, style: &Style, default: Rgba) -> Rgba {
+    p.get(key).and_then(Value::as_str).and_then(|s| style.resolve(s)).unwrap_or(default)
 }
 
 fn rect_of(p: &Props) -> Rect {

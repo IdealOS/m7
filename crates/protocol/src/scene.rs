@@ -181,6 +181,11 @@ pub struct OpenWindowParams {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The app's style sheet: CSS-like rules for colours and fonts, applied inside
+    /// the window over the system's (see the compositor's `style` module). At most
+    /// 64 KiB; a sheet with a mistake fails `open_window`, saying where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 /// A part of `open_window`'s streamed answer.

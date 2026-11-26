@@ -21,6 +21,8 @@ pub struct Options {
     pub render_height: RenderHeight,
     /// How finished frames reach the KMS backend's scanout buffers.
     pub scanout: Scanout,
+    /// Start in the dark theme. The `appearance.theme` setting, once read, decides.
+    pub dark: bool,
 }
 
 impl Default for Options {
@@ -33,6 +35,7 @@ impl Default for Options {
             card: None,
             render_height: RenderHeight::Native,
             scanout: Scanout::Auto,
+            dark: false,
         }
     }
 }

@@ -12,6 +12,8 @@ pub const TOP_BAR: NodeId = 2;
 pub const HUD: NodeId = 3;
 const WINDOW_BASE: NodeId = 1000;
 
+/// The colour a frame is cleared to before anything draws. The desktop itself is
+/// drawn in the theme's `--desktop`, which the renderer folds into the clear.
 pub const BACKGROUND: &str = "#dfe5ec";
 const ACCENTS: [&str; 6] = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"];
 const APPS: [&str; 8] = ["Documents", "Mail", "Music", "Editor", "Terminal", "Chat", "Settings", "Browser"];
@@ -34,7 +36,7 @@ impl Builder {
 /// Build the demo scene for a screen of `w` by `h` logical pixels.
 pub fn build(w: f32, h: f32, windows: usize) -> Vec<SceneOp> {
     let mut b = Builder { ops: Vec::new() };
-    b.node(DESKTOP, ROOT, NodeKind::Rect, json!({"w": w, "h": h, "color": BACKGROUND}));
+    b.node(DESKTOP, ROOT, NodeKind::Rect, json!({"w": w, "h": h, "color": "$desktop"}));
 
     for i in 0..windows {
         add_window(&mut b, i, w, h);
@@ -42,19 +44,19 @@ pub fn build(w: f32, h: f32, windows: usize) -> Vec<SceneOp> {
 
     // The top bar goes last so it stays above every window.
     b.node(TOP_BAR, ROOT, NodeKind::Group, json!({"w": w, "h": 30}));
-    b.node(10, TOP_BAR, NodeKind::Rect, json!({"w": w, "h": 30, "color": "#ffffffe6"}));
-    b.node(11, TOP_BAR, NodeKind::Rect, json!({"y": 29, "w": w, "h": 1, "color": "#c7ced8"}));
+    b.node(10, TOP_BAR, NodeKind::Rect, json!({"w": w, "h": 30, "color": "$bar"}));
+    b.node(11, TOP_BAR, NodeKind::Rect, json!({"y": 29, "w": w, "h": 1, "color": "$border"}));
     b.node(
         12,
         TOP_BAR,
         NodeKind::Text,
-        json!({"x": 14, "y": 7, "w": 400, "h": 20, "text": "Phase 0 compositor", "size": 13, "weight": "bold", "color": "#1f2937"}),
+        json!({"x": 14, "y": 7, "w": 400, "h": 20, "text": "Phase 0 compositor", "size": 13, "weight": "bold", "color": "$text"}),
     );
     b.node(
         HUD,
         TOP_BAR,
         NodeKind::Text,
-        json!({"x": w - 330.0, "y": 7, "w": 316, "h": 20, "text": "", "size": 12, "color": "#4b5563"}),
+        json!({"x": w - 330.0, "y": 7, "w": 316, "h": 20, "text": "", "size": 12, "color": "$muted"}),
     );
     b.ops
 }
@@ -101,21 +103,21 @@ fn add_window(b: &mut Builder, i: usize, screen_w: f32, screen_h: f32) {
         id + 1,
         id,
         NodeKind::Rect,
-        json!({"w": ww, "h": wh, "radius": 10, "color": "#ffffff", "border_width": 1, "border_color": "#c3cad5"}),
+        json!({"w": ww, "h": wh, "radius": 10, "color": "$surface", "border_width": 1, "border_color": "$border"}),
     );
     b.node(
         id + 2,
         id,
         NodeKind::Rect,
-        json!({"x": 1, "y": 1, "w": ww - 2.0, "h": TITLE_BAR_HEIGHT - 1.0, "radius": 9, "color": "#f3f5f8"}),
+        json!({"x": 1, "y": 1, "w": ww - 2.0, "h": TITLE_BAR_HEIGHT - 1.0, "radius": 9, "color": "$surface-alt"}),
     );
     b.node(
         id + 3,
         id,
         NodeKind::Rect,
-        json!({"x": 1, "y": TITLE_BAR_HEIGHT - 12.0, "w": ww - 2.0, "h": 12, "color": "#f3f5f8"}),
+        json!({"x": 1, "y": TITLE_BAR_HEIGHT - 12.0, "w": ww - 2.0, "h": 12, "color": "$surface-alt"}),
     );
-    b.node(id + 4, id, NodeKind::Rect, json!({"y": TITLE_BAR_HEIGHT, "w": ww, "h": 1, "color": "#e2e6ec"}));
+    b.node(id + 4, id, NodeKind::Rect, json!({"y": TITLE_BAR_HEIGHT, "w": ww, "h": 1, "color": "$border"}));
     for (j, c) in ["#f87171", "#fbbf24", "#34d399"].iter().enumerate() {
         b.node(
             id + 5 + j as NodeId,
@@ -128,7 +130,7 @@ fn add_window(b: &mut Builder, i: usize, screen_w: f32, screen_h: f32) {
         id + 10,
         id,
         NodeKind::Text,
-        json!({"x": 74, "y": 9, "w": ww - 90.0, "h": 20, "text": format!("{app} — window {}", i + 1), "size": 13, "weight": "bold", "color": "#1f2937"}),
+        json!({"x": 74, "y": 9, "w": ww - 90.0, "h": 20, "text": format!("{app} — window {}", i + 1), "size": 13, "weight": "bold", "color": "$text"}),
     );
 
     // Body: an accent chip, a heading and a few lines of text.
@@ -142,13 +144,13 @@ fn add_window(b: &mut Builder, i: usize, screen_w: f32, screen_h: f32) {
         id + 21,
         id,
         NodeKind::Text,
-        json!({"x": 78, "y": 58, "w": ww - 98.0, "h": 22, "text": app, "size": 17, "weight": "bold", "color": "#111827"}),
+        json!({"x": 78, "y": 58, "w": ww - 98.0, "h": 22, "text": app, "size": 17, "weight": "bold", "color": "$text"}),
     );
     b.node(
         id + 22,
         id,
         NodeKind::Text,
-        json!({"x": 78, "y": 82, "w": ww - 98.0, "h": 18, "text": "Every record lives in the database.", "size": 12, "color": "#6b7280"}),
+        json!({"x": 78, "y": 82, "w": ww - 98.0, "h": 18, "text": "Every record lives in the database.", "size": 12, "color": "$muted"}),
     );
     let lines = [
         "Drag a window by its title bar.",
@@ -161,13 +163,13 @@ fn add_window(b: &mut Builder, i: usize, screen_w: f32, screen_h: f32) {
             id + 30 + j as NodeId,
             id,
             NodeKind::Text,
-            json!({"x": 20, "y": 122.0 + j as f32 * 26.0, "w": ww - 40.0, "h": 20, "text": line, "size": 13, "color": "#374151"}),
+            json!({"x": 20, "y": 122.0 + j as f32 * 26.0, "w": ww - 40.0, "h": 20, "text": line, "size": 13, "color": "$text"}),
         );
         b.node(
             id + 40 + j as NodeId,
             id,
             NodeKind::Rect,
-            json!({"x": 20, "y": 144.0 + j as f32 * 26.0, "w": ww - 40.0, "h": 1, "color": "#eef1f5"}),
+            json!({"x": 20, "y": 144.0 + j as f32 * 26.0, "w": ww - 40.0, "h": 1, "color": "$control"}),
         );
     }
 }

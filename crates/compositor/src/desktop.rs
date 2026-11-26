@@ -61,6 +61,10 @@ pub enum Call {
     },
     /// permd published a new grant table.
     Grants(GrantsResult),
+    /// The `appearance.theme` setting is now dark (or light).
+    Theme {
+        dark: bool,
+    },
     /// A screen frame for terminal node `node`, asked for with [`Out::Attach`].
     Screen {
         node: NodeId,
@@ -173,6 +177,8 @@ pub struct Desktop {
     focus: Option<NodeId>,
     edits: HashMap<NodeId, Edit>,
     drag: Option<Drag>,
+    /// The control the pointer is over, which shows its `:hover` style.
+    hovered: Option<NodeId>,
     /// Scroll views still moving after a drag, with their speed.
     coasting: Vec<(NodeId, f32)>,
     last_tick: Option<Instant>,
@@ -222,6 +228,7 @@ impl Desktop {
             focus: None,
             edits: HashMap::new(),
             drag: None,
+            hovered: None,
             coasting: Vec::new(),
             last_tick: None,
             menu: None,
@@ -359,6 +366,7 @@ impl Desktop {
             Input::Motion { .. } | Input::MotionTo { .. } => {
                 let effect = self.seat.handle(input, &mut self.scene, &mut self.wm);
                 self.motion();
+                self.hover();
                 effect
             }
             Input::Shortcut(_) => self.seat.handle(input, &mut self.scene, &mut self.wm),
@@ -498,6 +506,45 @@ impl Desktop {
         }
     }
 
+    /// Mark the control under the pointer as hovered (`_hover`), and the last one
+    /// not. While something is dragged, the hover stays where it was.
+    fn hover(&mut self) {
+        if self.drag.is_some() {
+            return;
+        }
+        let (x, y) = self.seat.cursor();
+        let control = |s: &Self, id: NodeId| {
+            matches!(
+                s.kind(id),
+                Some(
+                    NodeKind::Button
+                        | NodeKind::Checkbox
+                        | NodeKind::Toggle
+                        | NodeKind::Select
+                        | NodeKind::Menu
+                        | NodeKind::Slider
+                )
+            )
+        };
+        let root = self.wm.window_at(&self.scene, x, y).or_else(|| {
+            let bar = self.scene.screen_rects().get(&TOP_BAR).map(|r| r.0);
+            bar.is_some_and(|r| r.contains(x, y)).then_some(TOP_BAR)
+        });
+        let over = root.and_then(|r| self.scene.hit(r, x, y, |id| control(self, id)));
+        if over == self.hovered {
+            return;
+        }
+        if let Some(old) = self.hovered.take()
+            && self.scene.node(old).is_some()
+        {
+            self.set(old, json!({"_hover": Value::Null}));
+        }
+        if let Some(new) = over {
+            self.set(new, json!({"_hover": true}));
+        }
+        self.hovered = over;
+    }
+
     fn motion(&mut self) {
         let (x, y) = self.seat.cursor();
         let Some(drag) = self.drag.take() else { return };
@@ -575,8 +622,8 @@ impl Desktop {
                 let p = &self.scene.node(id).expect("exists").props;
                 let text =
                     p.get("_value").or(p.get("value")).and_then(Value::as_str).unwrap_or_default().to_owned();
-                let size = num(p, "size", theme::size::BODY);
-                self.layout.text_extent(&text, size, Some((view.w - 2.0 * FIELD_PAD).max(1.0))).1 + 12.0
+                let font = self.font_of(id);
+                self.layout.text_extent(&text, &font, Some((view.w - 2.0 * FIELD_PAD).max(1.0))).1 + 12.0
             }
             _ => 0.0,
         };
@@ -819,14 +866,14 @@ impl Desktop {
         let Some(e) = self.edits.get(&node).cloned() else { return };
         let Some(rect) = self.scene.layout_rect(node).or_else(|| self.scene.local_rect(node)) else { return };
         let multiline = self.kind(node) == Some(NodeKind::TextArea);
-        let size = num(&self.scene.node(node).expect("exists").props, "size", theme::size::BODY);
+        let font = self.font_of(node);
         let inner_w = (rect.w - 2.0 * FIELD_PAD).max(1.0);
         let width = multiline.then_some(inner_w);
         let shown = self.shown_text(node, e.text());
-        let (cx, cy, ch) = self.layout.caret_at(&shown, size, width, e.caret());
+        let (cx, cy, ch) = self.layout.caret_at(&shown, &font, width, e.caret());
         let sel: Vec<Value> = e
             .selection()
-            .map(|(a, b)| self.layout.selection_rects(&shown, size, width, a, b))
+            .map(|(a, b)| self.layout.selection_rects(&shown, &font, width, a, b))
             .unwrap_or_default()
             .into_iter()
             .map(|r| json!([r.x, r.y, r.w, r.h]))
@@ -857,6 +904,12 @@ impl Desktop {
         self.set(node, changes);
     }
 
+    /// The font node `node`'s text is drawn in, from its style and props.
+    fn font_of(&self, node: NodeId) -> crate::style::Font {
+        let props = self.scene.node(node).map(|n| &n.props);
+        crate::draw::text_font(&self.scene.style(node), props.unwrap_or(&Props::new()))
+    }
+
     /// A text widget's text as it's drawn and measured: one bullet per character
     /// in a `secret` field, so carets and clicks line up with what's shown.
     fn shown_text(&self, node: NodeId, text: &str) -> String {
@@ -870,17 +923,17 @@ impl Desktop {
     /// The character under (`x`, `y`) in text widget `node`, which is at `rect`.
     fn index_at(&mut self, node: NodeId, rect: Rect, x: f32, y: f32) -> usize {
         let text = self.shown_text(node, &self.text_value(node));
+        let font = self.font_of(node);
         let p = &self.scene.node(node).expect("exists").props;
-        let size = num(p, "size", theme::size::BODY);
         let multiline = self.kind(node) == Some(NodeKind::TextArea);
         let inner_x = rect.x + FIELD_PAD;
         if multiline {
             let top = rect.y + 4.0 + 2.0 - num(p, "_scroll", 0.0);
             let width = (rect.w - 2.0 * FIELD_PAD).max(1.0);
-            self.layout.index_at(&text, size, Some(width), x - inner_x, y - top)
+            self.layout.index_at(&text, &font, Some(width), x - inner_x, y - top)
         } else {
             let scrolled = num(p, "_scroll_x", 0.0);
-            self.layout.index_at(&text, size, None, x - inner_x + scrolled, 1.0)
+            self.layout.index_at(&text, &font, None, x - inner_x + scrolled, 1.0)
         }
     }
 
@@ -952,11 +1005,11 @@ impl Desktop {
                 let Some(e) = self.edits.get(&node).cloned() else { return };
                 let rect =
                     self.scene.layout_rect(node).unwrap_or(Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
-                let size = num(&self.scene.node(node).expect("exists").props, "size", theme::size::BODY);
+                let font = self.font_of(node);
                 let width = Some((rect.w - 2.0 * FIELD_PAD).max(1.0));
-                let (cx, cy, ch) = self.layout.caret_at(e.text(), size, width, e.caret());
+                let (cx, cy, ch) = self.layout.caret_at(e.text(), &font, width, e.caret());
                 let ty = if key == Key::Up { cy - ch / 2.0 } else { cy + ch * 1.5 };
-                let at = self.layout.index_at(e.text(), size, width, cx, ty);
+                let at = self.layout.index_at(e.text(), &font, width, cx, ty);
                 self.edit(node, |e| {
                     e.move_caret(Move::To(at), extend);
                     None
@@ -1145,12 +1198,12 @@ impl Desktop {
             create(
                 MENU + 1,
                 NodeKind::Rect,
-                json!({"w": rect.w, "h": rect.h, "color": theme::color::SURFACE, "radius": theme::radius::M, "border_color": theme::color::BORDER, "border_width": 1}),
+                json!({"w": rect.w, "h": rect.h, "color": "$surface", "radius": theme::radius::M, "border_color": "$border", "border_width": 1}),
             ),
             create(
                 MENU + 2,
                 NodeKind::Rect,
-                json!({"x": 4, "y": 4.0 + highlight as f32 * ROW, "w": rect.w - 8.0, "h": ROW, "color": theme::color::SELECTION, "radius": theme::radius::S}),
+                json!({"x": 4, "y": 4.0 + highlight as f32 * ROW, "w": rect.w - 8.0, "h": ROW, "color": "$selection", "radius": theme::radius::S}),
             ),
             insert(MENU, MENU + 1),
             insert(MENU, MENU + 2),
@@ -1158,7 +1211,7 @@ impl Desktop {
         ];
         for (i, label) in labels.iter().enumerate() {
             let id = MENU + 10 + i as NodeId;
-            ops.push(create(id, NodeKind::Text, json!({"x": 12, "y": 4.0 + i as f32 * ROW + 5.0, "w": rect.w - 24.0, "h": 18, "text": label, "size": 14, "color": theme::color::TEXT})));
+            ops.push(create(id, NodeKind::Text, json!({"x": 12, "y": 4.0 + i as f32 * ROW + 5.0, "w": rect.w - 24.0, "h": 18, "text": label, "size": 14, "color": "$text"})));
             ops.push(insert(MENU, id));
         }
         self.scene.apply_all(ops);
@@ -1274,7 +1327,7 @@ impl Desktop {
             create(
                 SWITCHER + 1,
                 NodeKind::Rect,
-                json!({"w": w, "h": h, "color": "#ffffffee", "radius": theme::radius::L, "border_color": theme::color::BORDER, "border_width": 1}),
+                json!({"w": w, "h": h, "color": "$surface", "radius": theme::radius::L, "border_color": "$border", "border_width": 1}),
             ),
             insert(SWITCHER, SWITCHER + 1),
             insert(ROOT, SWITCHER),
@@ -1282,11 +1335,11 @@ impl Desktop {
         for (i, (id, title)) in windows.iter().enumerate() {
             let y = 8.0 + i as f32 * ROW;
             if Some(*id) == raised {
-                ops.push(create(SWITCHER + 2, NodeKind::Rect, json!({"x": 8, "y": y, "w": w - 16.0, "h": ROW, "color": theme::color::SELECTION, "radius": theme::radius::S})));
+                ops.push(create(SWITCHER + 2, NodeKind::Rect, json!({"x": 8, "y": y, "w": w - 16.0, "h": ROW, "color": "$selection", "radius": theme::radius::S})));
                 ops.push(insert(SWITCHER, SWITCHER + 2));
             }
             let t = SWITCHER + 10 + i as NodeId;
-            ops.push(create(t, NodeKind::Text, json!({"x": 18, "y": y + 5.0, "w": w - 36.0, "h": 18, "text": title, "size": 14, "color": theme::color::TEXT})));
+            ops.push(create(t, NodeKind::Text, json!({"x": 18, "y": y + 5.0, "w": w - 36.0, "h": 18, "text": title, "size": 14, "color": "$text"})));
             ops.push(insert(SWITCHER, t));
         }
         self.scene.apply_all(ops);
@@ -1350,6 +1403,10 @@ impl Desktop {
                 }
             }
             Call::Grants(table) => self.take_grants(table),
+            Call::Theme { dark } => {
+                log::info!("desktop: {} theme", if dark { "dark" } else { "light" });
+                self.scene.set_dark(dark);
+            }
             Call::Screen { node, frame } => self.screen_frame(node, frame),
             Call::ScreenEnd { node } => {
                 if self.terms.remove(&node).is_some() && self.scene.node(node).is_some() {
@@ -1403,10 +1460,22 @@ impl Desktop {
             }
             method::OPEN_WINDOW => match parse::<OpenWindowParams>(params) {
                 Ok(p) => {
+                    // The app's own style sheet, if it sent one: a mistake fails the
+                    // request, so the app's author sees where it is.
+                    let sheet = match p.style.as_deref().map(crate::style::Sheet::parse) {
+                        Some(Err(e)) => return self.outbox.push(fail(format!("style: {e}"))),
+                        Some(Ok(sheet)) => Some(std::sync::Arc::new(sheet)),
+                        None => None,
+                    };
                     let screen = self.seat.bounds();
                     // One line per window; tools/smoke-checks.ts counts them.
                     log::info!("apps: opened a window for {from:?}: {:?}", p.title);
                     let reply = self.apps.open(&mut self.scene, from, id, &p, screen);
+                    if let (Some(sheet), protocol::WindowEvent::Opened { window, .. }) = (sheet, &reply.event)
+                        && let Some(content) = self.apps.content_of(*window)
+                    {
+                        self.scene.set_app_style(content, Some(sheet));
+                    }
                     self.restack();
                     self.send(Some(reply));
                 }
@@ -1546,8 +1615,8 @@ impl Desktop {
     /// Attach new terminal node `node` to the pty session it names, as its app.
     fn attach_terminal(&mut self, node: NodeId) {
         let Some(session) = self.prop(node, "pty").and_then(Value::as_str).map(str::to_owned) else { return };
-        let size = self.prop(node, "size").and_then(Value::as_f64).map_or(terminal::SIZE, |s| s as f32);
-        let cell = self.layout.cell(size);
+        let font = self.font_of(node);
+        let cell = self.layout.cell(&font);
         self.set(node, json!({"_cell": [cell.0, cell.1]}));
         let view = terminal::View::new(session, self.apps.app_of(node).map(str::to_owned));
         let params = view.params(json!({}));
@@ -2670,6 +2739,66 @@ mod tests {
             .contains("sender")
         );
     }
+
+    #[test]
+    fn styles_follow_the_theme_and_an_apps_own_sheet() {
+        use crate::scene::Rgba;
+        let hex = |h: &str| Rgba::parse(h).unwrap();
+        let mut d = desk();
+        let css = ":root { --accent: #ff0000 } label.big { color: var(--accent); font-size: 20px }";
+        let out = d.call(request(7, "open_window", json!({"title": "Styled", "style": css}), true));
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let WindowEvent::Opened { window, .. } = serde_json::from_value(data.clone()).unwrap() else {
+            panic!()
+        };
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "label", "props": {"text": "Hi", "class": "big"}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
+        let label = global(&d, window, 2);
+        let s = d.scene.style(label);
+        assert_eq!((s.color, s.font.size), (hex("#ff0000"), 20.0));
+        // The app's sheet stops at its content area: the frame keeps the system's.
+        let frame = d.apps.frame_of(window).unwrap();
+        assert_eq!(d.scene.style(frame).var("accent"), hex("#3b82f6"));
+        // A mistake fails open_window, saying where it is.
+        let out = d.call(request(
+            9,
+            "open_window",
+            json!({"title": "x", "style": "label {\n  colour: #fff }"}),
+            true,
+        ));
+        let [Out::Respond { result: Err(e), .. }] = &out[..] else { panic!("{out:?}") };
+        assert!(e.message.contains("line 2, column 3"), "{}", e.message);
+        // The dark theme restyles everything, the desktop included.
+        let desktop = |d: &mut Desktop| d.draw_list().layers[0].quads[0].color;
+        assert_eq!(desktop(&mut d), hex("#dfe5ec"));
+        d.call(Call::Theme { dark: true });
+        assert_eq!(desktop(&mut d), hex("#0b1220"));
+        assert_eq!(d.scene.style(label).color, hex("#ff0000"), "the app's own colour stays");
+    }
+
+    #[test]
+    fn the_control_under_the_pointer_shows_its_hover_style() {
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "button", "props": {"label": "Go", "x": 20, "y": 20, "w": 80, "h": 32}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let window = open(&mut d, 7, ops);
+        let button = global(&d, window, 2);
+        let at = center(&mut d, button);
+        let plain = d.scene.style(button).background;
+        d.input(Input::MotionTo { x: at.0, y: at.1 });
+        assert_eq!(d.scene.node(button).unwrap().props.get("_hover"), Some(&json!(true)));
+        let hovered = d.scene.style(button);
+        assert_eq!(hovered.background, Some(hovered.var("control-hover")));
+        assert_ne!(hovered.background, plain);
+        d.input(Input::MotionTo { x: 5.0, y: 790.0 });
+        assert_ne!(d.scene.node(button).unwrap().props.get("_hover"), Some(&json!(true)));
+        assert_eq!(d.scene.style(button).background, plain);
+    }
 }
 
 #[cfg(test)]
@@ -2747,7 +2876,10 @@ mod terminal_tests {
         assert_eq!(p["_cursor"], json!([0, 4]));
         let list = d.draw_list();
         let texts: Vec<_> = list.layers.iter().flat_map(|l| &l.texts).filter(|t| t.node == node).collect();
-        assert!(texts.iter().all(|t| t.mono), "drawn in the monospace family");
+        assert!(
+            texts.iter().all(|t| t.font.families.iter().any(|f| f == "monospace")),
+            "drawn in the monospace family"
+        );
         assert!(texts.iter().any(|t| t.text == "$ ls") && texts.iter().any(|t| t.text == "a"));
 
         // Clicking focuses it; keys go to the shell (Tab and Escape too), as bytes.

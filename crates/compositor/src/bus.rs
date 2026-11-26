@@ -75,6 +75,7 @@ pub fn connect_with(
                 let _ = ready_tx.send(Ok(()));
                 let Some(mut requests) = bus.take_requests() else { return };
                 tokio::spawn(follow_grants(bus.clone(), calls_tx.clone(), wake.clone()));
+                tokio::spawn(follow_theme(bus.clone(), calls_tx.clone(), wake.clone()));
                 let sender = bus.clone();
                 let replies = calls_tx.clone();
                 let woken = wake.clone();
@@ -233,6 +234,66 @@ async fn follow_grants(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn(
         {
             return;
         }
+    }
+}
+
+/// The setting that picks the theme: a `Setting` document with this key and the
+/// value `"dark"` or `"light"`. Settings writes it.
+pub const THEME_KEY: &str = "appearance.theme";
+
+/// Follow the theme setting with a live query, passing each change to the frame
+/// loop. Without the setting the theme stays as the compositor started (`--theme`).
+/// If dbd isn't there (yet, or any more), try again a little later.
+async fn follow_theme(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn() + Send + Sync>) {
+    use protocol::db::{Doc, WatchEvent};
+    let query = serde_json::json!({"type": "Setting", "where": {"key": THEME_KEY}});
+    let mut warned = false;
+    loop {
+        let mut stream = match bus.request_stream("db", "watch", query.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                if !warned {
+                    log::warn!("bus: cannot follow the theme setting yet: {e}");
+                    warned = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        // The setting's documents, by id (there should be one).
+        let mut docs: std::collections::HashMap<String, Doc> = std::collections::HashMap::new();
+        let mut last: Option<bool> = None;
+        while let Some(Ok(part)) = stream.next().await {
+            match serde_json::from_value::<WatchEvent>(part) {
+                Ok(WatchEvent::Initial { docs: all }) => {
+                    docs = all.into_iter().map(|d| (d.id.clone(), d)).collect()
+                }
+                Ok(WatchEvent::Diff { added, changed, removed, .. }) => {
+                    for id in removed {
+                        docs.remove(&id);
+                    }
+                    for d in added.into_iter().chain(changed) {
+                        docs.insert(d.id.clone(), d);
+                    }
+                }
+                Err(_) => continue,
+            }
+            // The most recently changed one decides.
+            let dark = docs
+                .values()
+                .max_by_key(|d| d.updated)
+                .map(|d| d.data.get("value") == Some(&serde_json::json!("dark")));
+            if let Some(dark) = dark
+                && last != Some(dark)
+            {
+                last = Some(dark);
+                if calls.send(Call::Theme { dark }).is_err() {
+                    return;
+                }
+                wake();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 

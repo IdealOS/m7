@@ -1,0 +1,90 @@
+/* The system style sheet: how widgets and the compositor's own chrome look.
+ * Apps can override parts of it for their own windows (see style.rs). Every
+ * colour the compositor draws with is a variable here, so the dark theme only
+ * redefines variables. */
+
+:root {
+  --desktop: #dfe5ec;
+  --surface: #ffffff;
+  --surface-alt: #f3f5f8;
+  --border: #b8c1cc;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --accent: #3b82f6;
+  --accent-text: #ffffff;
+  --control: #eef1f6;
+  --control-hover: #e4e8ef;
+  --control-pressed: #c9d2df;
+  --control-border: #aeb8c6;
+  --focus: #3b82f6;
+  --selection: #bfdbfe;
+  --danger: #ef4444;
+  --backdrop: #0f172a59;
+  --bar: #ffffffe6;
+  --scrim: #0f172ab3;
+  --scrollbar: #64748b80;
+  --terminal: #111827;
+  --terminal-text: #e5e7eb;
+  --terminal-cursor: #60a5fa;
+
+  color: var(--text);
+  accent-color: var(--accent);
+  font-family: "Inter Variable", sans-serif;
+  font-size: 14px;
+}
+
+button, select, menu {
+  background: var(--control);
+  border-color: var(--control-border);
+}
+button:hover, select:hover, menu:hover { background: var(--control-hover); }
+button:pressed, select:pressed, menu:pressed { background: var(--control-pressed); }
+
+checkbox { background: var(--surface); border-color: var(--control-border); }
+toggle, slider { background: var(--control-pressed); }
+
+text_field, text_area {
+  background: var(--surface);
+  border-color: var(--control-border);
+  caret-color: var(--text);
+  selection-color: var(--selection);
+  placeholder-color: var(--muted);
+}
+text_field:focus, text_area:focus { border-color: var(--focus); }
+
+toolbar { background: var(--surface-alt); }
+dialog { background: var(--surface); border-color: var(--control-border); }
+image { background: var(--surface-alt); border-color: var(--control-border); }
+split { border-color: var(--control); }
+
+terminal {
+  background: var(--terminal);
+  color: var(--terminal-text);
+  caret-color: var(--terminal-cursor);
+  font-family: "DejaVu Sans Mono", monospace;
+}
+
+@dark {
+  :root {
+    --desktop: #0b1220;
+    --surface: #1e293b;
+    --surface-alt: #172033;
+    --border: #334155;
+    --text: #e5e7eb;
+    --muted: #94a3b8;
+    --accent: #60a5fa;
+    --accent-text: #0b1220;
+    --control: #273449;
+    --control-hover: #2f3e57;
+    --control-pressed: #3b4b66;
+    --control-border: #475569;
+    --focus: #60a5fa;
+    --selection: #1e3a8a;
+    --danger: #f87171;
+    --backdrop: #00000080;
+    --bar: #111827e6;
+    --scrim: #000000b3;
+    --scrollbar: #94a3b880;
+    --terminal: #0b1220;
+  }
+}

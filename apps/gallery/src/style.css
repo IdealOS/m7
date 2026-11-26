@@ -1,0 +1,13 @@
+/* The gallery's own style, over the system's: a warmer accent, a primary button,
+ * and type in two more families. It applies inside the gallery's window only. */
+
+:root { --accent: #d9480f; }
+@dark { :root { --accent: #ff8a4c; } }
+
+.primary { background: var(--accent); color: var(--accent-text); }
+.primary:hover { background: #e8590c; }
+.primary:pressed { background: #b33c0b; }
+
+.serif { font-family: "DejaVu Serif", serif; font-size: 18px; }
+.code { font-family: "DejaVu Sans Mono", monospace; font-size: 13px; }
+.note { font-style: italic; color: var(--muted); }

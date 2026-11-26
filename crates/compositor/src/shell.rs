@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 
 use crate::demo::{HUD, TOP_BAR};
 use crate::scene::{ROOT, Rect, Scene};
-use crate::theme;
 
 /// How many workspaces there are.
 pub const WORKSPACES: u32 = 4;
@@ -54,7 +53,7 @@ pub fn install(scene: &mut Scene, w: f32, workspace: u32) {
             props: props(json!({"w": w, "h": BAR_HEIGHT})),
         });
         scene.apply(SceneOp::Insert { parent: ROOT, child: TOP_BAR, index: usize::MAX });
-        add(scene, 10, NodeKind::Rect, json!({"w": w, "h": BAR_HEIGHT, "color": theme::color::BAR}));
+        add(scene, 10, NodeKind::Rect, json!({"w": w, "h": BAR_HEIGHT, "color": "$bar"}));
     }
     if scene.node(TITLE).is_some() {
         scene.apply(SceneOp::Set { id: TITLE, props: props(json!({"hidden": true})) });
@@ -77,7 +76,7 @@ pub fn install(scene: &mut Scene, w: f32, workspace: u32) {
         scene,
         CLOCK,
         NodeKind::Text,
-        json!({"x": w - 62.0, "y": 7, "w": 54, "h": 18, "text": "", "size": 13, "weight": "bold", "color": theme::color::TEXT, "align": "center"}),
+        json!({"x": w - 62.0, "y": 7, "w": 54, "h": 18, "text": "", "size": 13, "weight": "bold", "color": "$text", "align": "center"}),
     );
     if scene.node(HUD).is_some() {
         scene.apply(SceneOp::Set { id: HUD, props: props(json!({"x": w - 390.0})) });
@@ -90,9 +89,9 @@ pub fn set_workspace(scene: &mut Scene, n: u32) {
     for i in 0..WORKSPACES {
         let current = i + 1 == n;
         let p = if current {
-            json!({"color": theme::color::ACCENT, "text_color": theme::color::ACCENT_TEXT})
+            json!({"color": "$accent", "text_color": "$accent-text"})
         } else {
-            json!({"color": theme::color::CONTROL, "text_color": theme::color::TEXT})
+            json!({"color": "$control", "text_color": "$text"})
         };
         scene.apply(SceneOp::Set { id: FIRST_WORKSPACE + i as NodeId, props: props(p) });
     }
@@ -155,8 +154,8 @@ mod tests {
         assert_eq!(press(&scene, 600.0, 15.0), None);
         assert_eq!(press(&scene, 20.0, 40.0), None, "below the bar");
         set_workspace(&mut scene, 3);
-        assert_eq!(scene.node(FIRST_WORKSPACE + 2).unwrap().props["color"], theme::color::ACCENT);
-        assert_eq!(scene.node(FIRST_WORKSPACE).unwrap().props["color"], theme::color::CONTROL);
+        assert_eq!(scene.node(FIRST_WORKSPACE + 2).unwrap().props["color"], "$accent");
+        assert_eq!(scene.node(FIRST_WORKSPACE).unwrap().props["color"], "$control");
         set_clock(&mut scene, "09:41");
         assert_eq!(scene.node(CLOCK).unwrap().props["text"], "09:41");
         let t = clock_text(std::time::SystemTime::now());

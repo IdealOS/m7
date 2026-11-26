@@ -31,10 +31,12 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     let bridge = bus::connect(move || {
         let _ = proxy.send_event(Wake);
     });
+    let mut desktop = Desktop::new(0.0, 0.0);
+    desktop.scene.set_dark(opts.dark);
     let mut app = App {
         opts,
         gpu: None,
-        desktop: Desktop::new(0.0, 0.0),
+        desktop,
         bridge,
         timer: FrameTimer::default(),
         modifiers: ModifiersState::empty(),

@@ -1612,6 +1612,13 @@
             "null"
           ]
         },
+        "style": {
+          "description": "The app's style sheet: CSS-like rules for colours and fonts, applied inside\nthe window over the system's (see the compositor's `style` module). At most\n64 KiB; a sheet with a mistake fails `open_window`, saying where.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "title": {
           "type": "string"
         },

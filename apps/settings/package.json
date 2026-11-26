@@ -13,7 +13,8 @@
       { "capability": "service:session" },
       { "capability": "permissions" },
       { "capability": "storage" },
-      { "type": "App", "access": ["read"] }
+      { "type": "App", "access": ["read"] },
+      { "type": "Setting", "access": ["read", "write", "create"], "filter": { "key": "appearance.theme" } }
     ]
   },
   "scripts": {

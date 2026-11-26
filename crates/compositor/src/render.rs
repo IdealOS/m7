@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Buffer, Cache, Color, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas,
+    TextBounds, TextRenderer, Viewport,
 };
 use protocol::NodeId;
 use wgpu::util::DeviceExt;
@@ -51,7 +51,8 @@ struct GpuImage {
 /// A shaped text buffer, reused across frames until its inputs change.
 struct CachedText {
     buffer: Buffer,
-    key: (String, u32, u32, bool, bool, bool),
+    /// What it was shaped from: text, font, width and alignment.
+    key: (String, crate::style::Font, u32, bool),
     used: bool,
 }
 
@@ -573,20 +574,18 @@ impl Renderer {
     /// only reshaped when the string, size, width or weight changes. Shaping is in
     /// logical pixels; glyphon applies the display scale at prepare time.
     fn shape(&mut self, t: &TextItem) {
-        let key = (t.text.clone(), t.size.to_bits(), t.rect.w.to_bits(), t.bold, t.center, t.mono);
+        let key = (t.text.clone(), t.font.clone(), t.rect.w.to_bits(), t.center);
         if let Some(c) = self.texts.get_mut(&(t.node, t.slot))
             && c.key == key
         {
             c.used = true;
             return;
         }
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(t.size, t.size * 1.3));
+        let size = t.font.size;
+        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.3));
         let width = (t.rect.w > 0.0).then_some(t.rect.w);
         buffer.set_size(width, None);
-        let mut attrs = Attrs::new().family(if t.mono { Family::Monospace } else { Family::SansSerif });
-        if t.bold {
-            attrs = attrs.weight(if t.mono { Weight::BOLD } else { Weight::SEMIBOLD });
-        }
+        let attrs = crate::fonts::attrs(self.font_system.db(), &t.font);
         let align = t.center.then_some(glyphon::cosmic_text::Align::Center);
         buffer.set_text(&t.text, &attrs, Shaping::Advanced, align);
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -694,10 +693,8 @@ mod text_tests {
             node: 1,
             slot: 0,
             text: "Grace".into(),
-            size: 14.0,
+            font: crate::style::Font::default(),
             color: Rgba::TRANSPARENT,
-            bold: false,
-            mono: false,
             center: false,
             rect,
             clip,

@@ -210,6 +210,11 @@ impl Apps {
         self.resize(scene, window, w, h)
     }
 
+    /// Window `window`'s content area, as a scene id.
+    pub fn content_of(&self, window: u64) -> Option<NodeId> {
+        self.windows.get(&window).map(|w| w.content)
+    }
+
     /// The content size of window `window`.
     pub fn size_of(&self, window: u64) -> Option<(u32, u32)> {
         self.windows.get(&window).map(|w| w.size)
@@ -273,17 +278,17 @@ impl Apps {
             create(
                 bg,
                 NodeKind::Rect,
-                json!({"w": fw, "h": h as f32 + TITLE_BAR_HEIGHT, "color": "#ffffff", "radius": 10, "border_color": "#b8c1cc", "border_width": 1}),
+                json!({"w": fw, "h": h as f32 + TITLE_BAR_HEIGHT, "color": "$surface", "radius": 10, "border_color": "$border", "border_width": 1}),
             ),
             create(
                 bar,
                 NodeKind::Rect,
-                json!({"w": fw, "h": TITLE_BAR_HEIGHT, "color": "#f3f5f8", "radius": 10}),
+                json!({"w": fw, "h": TITLE_BAR_HEIGHT, "color": "$surface-alt", "radius": 10}),
             ),
             create(
                 title,
                 NodeKind::Text,
-                json!({"x": 14, "y": 10, "w": (fw - 90.0).max(0.0), "h": 18, "text": params.title, "size": 13, "weight": "bold", "color": "#1f2937"}),
+                json!({"x": 14, "y": 10, "w": (fw - 90.0).max(0.0), "h": 18, "text": params.title, "size": 13, "weight": "bold", "color": "$text"}),
             ),
             create(
                 close,
@@ -584,7 +589,8 @@ mod tests {
     }
 
     fn open(apps: &mut Apps, scene: &mut Scene, owner: Sender, request: u64) -> u64 {
-        let params = OpenWindowParams { title: "Counter".into(), width: Some(300), height: Some(200) };
+        let params =
+            OpenWindowParams { title: "Counter".into(), width: Some(300), height: Some(200), style: None };
         match apps.open(scene, owner, request, &params, (1280.0, 800.0)).event {
             WindowEvent::Opened { window, width, height } => {
                 assert_eq!((width, height), (300, 200));
@@ -759,7 +765,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut apps = Apps::new();
         let spot = |apps: &mut Apps, scene: &mut Scene, n: u64| {
-            let p = OpenWindowParams { title: "w".into(), width: Some(300), height: Some(200) };
+            let p = OpenWindowParams { title: "w".into(), width: Some(300), height: Some(200), style: None };
             apps.open(scene, app(n), n, &p, (1000.0, 700.0));
             let w = apps.windows.values().max_by_key(|w| w.frame).unwrap();
             let r = scene.local_rect(w.frame).unwrap();

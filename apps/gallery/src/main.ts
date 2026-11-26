@@ -3,6 +3,7 @@
 // The text area is bound to a "Gallery scratchpad" note: typing goes straight to
 // the database, so it's still there after the app (or the device) restarts.
 
+import style from "./style.css";
 import {
   button,
   checkbox,
@@ -51,7 +52,7 @@ function section(title: string, ...children: UiNode[]): UiNode {
 const note = await scratchpad();
 const blob = await picture();
 
-await openWindow({ title: "Widget Gallery", width: 520, height: 620 }, () => {
+await openWindow({ title: "Widget Gallery", width: 520, height: 620, style }, () => {
   const [clicks, setClicks] = signal(0);
   const [wifi, setWifi] = signal(true);
   const [dark, setDark] = signal(false);
@@ -78,8 +79,14 @@ await openWindow({ title: "Widget Gallery", width: 520, height: 620 }, () => {
         hstack(
           { gap: 8 },
           button({ label: "Click me", onClick: () => setClicks((n) => n + 1) }),
-          button({ label: "Accent", color: "$accent", text_color: "$accent-text", onClick: () => setClicks((n) => n + 1) }),
+          button({ label: "Accent", class: "primary", onClick: () => setClicks((n) => n + 1) }),
         ),
+      ),
+      section(
+        "Style (the gallery's own style.css)",
+        label({ text: "A serif heading", class: "serif" }),
+        label({ text: "let x = 42; // monospace", class: "code" }),
+        label({ text: "An italic note, in the muted colour.", class: "note" }),
       ),
       section(
         "Checkbox and toggle",

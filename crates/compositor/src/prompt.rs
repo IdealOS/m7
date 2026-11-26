@@ -89,16 +89,16 @@ pub fn ops(p: &PromptParams, w: f32, h: f32, allow_focused: bool) -> (Vec<SceneO
     let (cx, cy) = (((w - CARD_W) / 2.0).max(0.0).round(), ((h - card_h) / 2.0).max(0.0).round());
     let mut ops = vec![
         create(PROMPT, NodeKind::Group, json!({"x": 0, "y": 0, "w": w, "h": h})),
-        create(PROMPT + 1, NodeKind::Rect, json!({"w": w, "h": h, "color": theme::color::SCRIM})),
+        create(PROMPT + 1, NodeKind::Rect, json!({"w": w, "h": h, "color": "$scrim"})),
         create(
             PROMPT + 2,
             NodeKind::Rect,
-            json!({"x": cx, "y": cy, "w": CARD_W, "h": card_h, "color": theme::color::SURFACE, "radius": theme::radius::M, "border_color": theme::color::ACCENT, "border_width": 2}),
+            json!({"x": cx, "y": cy, "w": CARD_W, "h": card_h, "color": "$surface", "radius": theme::radius::M, "border_color": "$accent", "border_width": 2}),
         ),
         create(
             PROMPT + 3,
             NodeKind::Rect,
-            json!({"x": cx, "y": cy, "w": CARD_W, "h": 6, "color": theme::color::ACCENT, "radius": theme::radius::M}),
+            json!({"x": cx, "y": cy, "w": CARD_W, "h": 6, "color": "$accent", "radius": theme::radius::M}),
         ),
         insert(ROOT, PROMPT),
     ];
@@ -112,17 +112,17 @@ pub fn ops(p: &PromptParams, w: f32, h: f32, allow_focused: bool) -> (Vec<SceneO
         ops.push(insert(PROMPT, next));
         next += 1;
     };
-    text(&mut ops, y, &format!("“{}” would like to", clip(&p.name, 40)), 18.0, theme::color::TEXT);
+    text(&mut ops, y, &format!("“{}” would like to", clip(&p.name, 40)), 18.0, "$text");
     y += 26.0;
-    text(&mut ops, y, &format!("App id {}", clip(&p.app, 60)), 13.0, theme::color::MUTED);
+    text(&mut ops, y, &format!("App id {}", clip(&p.app, 60)), 13.0, "$muted");
     y += 20.0 + 12.0;
     for a in &asks {
-        text(&mut ops, y, a, 15.0, theme::color::TEXT);
+        text(&mut ops, y, a, 15.0, "$text");
         y += LINE;
     }
     y += 8.0;
     if let Some(r) = &reason {
-        text(&mut ops, y, r, 13.0, theme::color::MUTED);
+        text(&mut ops, y, r, 13.0, "$muted");
         y += LINE * reason_lines;
     }
     y += 16.0;
@@ -131,12 +131,8 @@ pub fn ops(p: &PromptParams, w: f32, h: f32, allow_focused: bool) -> (Vec<SceneO
     for (r, label, primary, focused) in
         [(deny, "Don't allow", false, !allow_focused), (allow, "Allow", true, allow_focused)]
     {
-        let (fill, ink) = if primary {
-            (theme::color::ACCENT, theme::color::ACCENT_TEXT)
-        } else {
-            (theme::color::CONTROL, theme::color::TEXT)
-        };
-        let border = if focused { theme::color::FOCUS } else { theme::color::CONTROL_BORDER };
+        let (fill, ink) = if primary { ("$accent", "$accent-text") } else { ("$control", "$text") };
+        let border = if focused { "$focus" } else { "$control-border" };
         ops.push(create(next, NodeKind::Rect, json!({"x": r.x, "y": r.y, "w": r.w, "h": r.h, "color": fill, "radius": theme::radius::S, "border_color": border, "border_width": if focused { 3 } else { 1 }})));
         ops.push(insert(PROMPT, next));
         next += 1;

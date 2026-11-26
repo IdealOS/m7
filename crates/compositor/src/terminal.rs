@@ -17,10 +17,8 @@ use crate::input::{Key, Mods};
 pub const PAD: f32 = 6.0;
 /// The default type size of a terminal's cells.
 pub const SIZE: f32 = 14.0;
-/// The screen's colors (ptyd sends `None` for these).
-pub const FG: &str = "#e5e7eb";
-pub const BG: &str = "#111827";
-pub const CURSOR: &str = "#60a5fa";
+// The screen's own colours (where ptyd sends `None`) come from the style sheet's
+// `terminal` rule: `--terminal`, `--terminal-text` and `--terminal-cursor`.
 
 /// One terminal node's screen and session.
 #[derive(Debug, Clone, PartialEq)]

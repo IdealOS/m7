@@ -118,6 +118,7 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let background = Rgba::parse(demo::BACKGROUND).expect("valid color");
     let mut desktop = Desktop::new(w as f32, h as f32);
+    desktop.scene.set_dark(opts.dark);
     desktop.scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
     desktop.set_screen(w as f32, h as f32);
     let arrow = cursor::arrow();

@@ -318,11 +318,9 @@ mod tests {
             node: 7,
             slot: 0,
             text: s.into(),
-            size: 13.0,
+            font: crate::style::Font { size: 13.0, ..crate::style::Font::default() },
             color: GREY,
-            bold: false,
             center: false,
-            mono: false,
             rect: rect(300.0, 10.0, 200.0, 20.0),
             clip: Rect::INFINITE,
         };

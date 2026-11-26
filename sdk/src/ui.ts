@@ -142,6 +142,8 @@ export interface Common {
   max_w?: Prop<number>;
   max_h?: Prop<number>;
   hidden?: Prop<boolean>;
+  /** Style classes, separated by spaces, for the app's style sheet (`.primary`). */
+  class?: Prop<string>;
 }
 
 export interface StackProps extends Common {
@@ -448,6 +450,12 @@ export interface WindowOptions {
   /** Content size in logical pixels. */
   width?: number;
   height?: number;
+  /**
+   * The app's style sheet: CSS-like rules for colours and fonts, over the system's,
+   * inside this window. Import it from a file: `import style from "./style.css"`.
+   * A mistake in it fails openWindow, saying where.
+   */
+  style?: string;
   /** Called when the user clicks the close button; return false to keep the window. */
   onClose?: () => boolean | void;
 }
@@ -479,7 +487,7 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
     const cancel = stream<WindowEvent>(
       "compositor",
       "open_window",
-      { title: options.title, width: options.width, height: options.height },
+      { title: options.title, width: options.width, height: options.height, ...(options.style === undefined ? {} : { style: options.style }) },
       (event) => {
         if (event.kind === "opened") {
           const opened = new Win(event.window);

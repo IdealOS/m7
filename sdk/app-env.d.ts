@@ -13,3 +13,10 @@ declare function setInterval(fn: (...args: unknown[]) => void, ms?: number, ...a
 declare function clearTimeout(id: number): void;
 declare function clearInterval(id: number): void;
 declare function queueMicrotask(fn: () => void): void;
+
+// An app's style sheet, imported as its text (tools/build-app.ts bundles it so),
+// for openWindow({ style }).
+declare module "*.css" {
+  const text: string;
+  export default text;
+}

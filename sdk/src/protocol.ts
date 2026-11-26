@@ -611,6 +611,12 @@ export type OpenParams = { cols: number; rows: number };
 export type OpenWindowParams = {
   title: string;
   height?: number | null;
+  /**
+   * The app's style sheet: CSS-like rules for colours and fonts, applied inside
+   * the window over the system's (see the compositor's `style` module). At most
+   * 64 KiB; a sheet with a mistake fails `open_window`, saying where.
+   */
+  style?: string | null;
   /** Size of the content area in logical pixels (default 360 by 240). */
   width?: number | null;
 };

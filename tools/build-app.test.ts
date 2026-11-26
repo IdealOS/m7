@@ -29,4 +29,5 @@ test("esbuild bundles main.ts and the SDK into one ES module", () => {
   assert.ok(args.includes("--bundle") && args.includes("--format=esm"));
   assert.ok(args.includes("--alias:@idealos/sdk=/r/sdk/src/index.ts"));
   assert.ok(args.includes("--outfile=/r/apps/x/dist/app.js"));
+  assert.ok(args.includes("--loader:.css=text"), "style sheets import as text");
 });

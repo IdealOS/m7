@@ -23,7 +23,7 @@ const win = await openWindow({ title: "Notes", width: 340, height: 300 }, () => 
           );
         },
       }),
-      label({ text: () => (notes.ready() ? `${count()} shown` : "Loading…"), color: "#4b5563", h: 32 }),
+      label({ text: () => (notes.ready() ? `${count()} shown` : "Loading…"), color: "$muted", h: 32 }),
     ),
     each(
       notes,
