@@ -15,7 +15,7 @@
 // A window lasts as long as its `open_window` request: closing it cancels the
 // request, and the compositor removes the window when the app goes away.
 
-import { request, stream } from "./bus.ts";
+import { appId, request, stream } from "./bus.ts";
 import { logError, queueMicrotask } from "./env.ts";
 import type { NodeKind, SceneOp, WindowEvent } from "./protocol.ts";
 import { effect, onCleanup, root, signal, untrack } from "./signals.ts";
@@ -499,7 +499,7 @@ export function openWindow(options: WindowOptions, build: () => UiNode): Promise
     const cancel = stream<WindowEvent>(
       "compositor",
       "open_window",
-      { title: options.title, width: options.width, height: options.height, ...(options.style === undefined ? {} : { style: options.style }) },
+      { title: options.title, width: options.width, height: options.height, ...(options.style === undefined ? {} : { style: options.style }), ...(appId() === undefined ? {} : { app: appId() }) },
       (event) => {
         if (event.kind === "opened") {
           const opened = new Win(event.window);

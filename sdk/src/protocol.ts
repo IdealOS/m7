@@ -616,6 +616,12 @@ export type OpenParams = { cols: number; rows: number };
 /** Params of `open_window`. */
 export type OpenWindowParams = {
   title: string;
+  /**
+   * The app's id, as its app-host says. Used only when the broker gave the
+   * connection no app identity (an app run by hand on a Mac, with no session),
+   * to match the window to edits of that app's style sheet.
+   */
+  app?: string | null;
   height?: number | null;
   /**
    * The app's style sheet: CSS-like rules for colours and fonts, applied inside

@@ -15,6 +15,8 @@
   --control: #eef1f6;
   --control-hover: #e4e8ef;
   --control-pressed: #c9d2df;
+  --track: #c9d2df;
+  --track-hover: #b8c3d3;
   --control-border: #aeb8c6;
   --focus: #3b82f6;
   --selection: #bfdbfe;
@@ -23,6 +25,13 @@
   --bar: #ffffffe6;
   --scrim: #0f172ab3;
   --scrollbar: #64748b80;
+  --scrollbar-hover: #64748bb0;
+  --scrollbar-active: #475569e0;
+  --titlebar: #edf0f4;
+  --titlebar-active: #dde3eb;
+  --titlebar-hover: #d4dbe5;
+  --titlebar-pressed: #c8d0dc;
+  --divider-hover: #93a3b8;
   --terminal: #111827;
   --terminal-text: #e5e7eb;
   --terminal-cursor: #60a5fa;
@@ -41,7 +50,11 @@ button:hover, select:hover, menu:hover { background: var(--control-hover); }
 button:pressed, select:pressed, menu:pressed { background: var(--control-pressed); }
 
 checkbox { background: var(--surface); border-color: var(--control-border); }
-toggle, slider { background: var(--control-pressed); }
+/* A checked box and a toggle that's on show the accent, hovered or not. */
+checkbox:hover { background: var(--control-hover); }
+/* The track of a toggle that's off, and of a slider beyond its value. */
+toggle, slider { background: var(--track); }
+toggle:hover, slider:hover { background: var(--track-hover); }
 
 text_field, text_area {
   background: var(--surface);
@@ -53,9 +66,21 @@ text_field, text_area {
 text_field:focus, text_area:focus { border-color: var(--focus); }
 
 toolbar { background: var(--surface-alt); }
+
+/* Window title bars: the active window's (:focus) stands out; hover and pressed
+   (while dragging) show it can be moved. */
+.titlebar { background: var(--titlebar); }
+.titlebar:focus { background: var(--titlebar-active); }
+.titlebar:hover { background: var(--titlebar-hover); }
+.titlebar:pressed { background: var(--titlebar-pressed); }
+.titlebar-line { background: var(--border); }
+.window-title { color: var(--muted); }
+.window-title:focus { color: var(--text); }
 dialog { background: var(--surface); border-color: var(--control-border); }
 image { background: var(--surface-alt); border-color: var(--control-border); }
 split { border-color: var(--control); }
+/* Hovered only while the pointer is over the divider itself. */
+split:hover { border-color: var(--divider-hover); }
 
 terminal {
   background: var(--terminal);
@@ -77,6 +102,8 @@ terminal {
     --control: #273449;
     --control-hover: #2f3e57;
     --control-pressed: #3b4b66;
+    --track: #3b4b66;
+    --track-hover: #4a5b78;
     --control-border: #475569;
     --focus: #60a5fa;
     --selection: #1e3a8a;
@@ -85,6 +112,13 @@ terminal {
     --bar: #111827e6;
     --scrim: #000000b3;
     --scrollbar: #94a3b880;
+    --scrollbar-hover: #94a3b8b0;
+    --scrollbar-active: #cbd5e1e0;
+    --titlebar: #1a2433;
+    --titlebar-active: #253247;
+    --titlebar-hover: #2d3b52;
+    --titlebar-pressed: #35455f;
+    --divider-hover: #64748b;
     --terminal: #0b1220;
   }
 }

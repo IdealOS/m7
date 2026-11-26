@@ -122,6 +122,8 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     desktop.scene.apply_all(demo::build(w as f32, h as f32, opts.windows));
     desktop.set_screen(w as f32, h as f32);
     let arrow = cursor::arrow();
+    // The cursor image on screen; it changes to resize arrows at window edges.
+    let mut shown_cursor = cursor::Shape::Arrow;
     let mut timer = FrameTimer::default();
     let mut next_hud = Instant::now();
     // Only the copy path uses this; it grows to a frame's size on the first frame.
@@ -218,6 +220,14 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
                     b.send(outs);
                 }
                 report(&effect, &desktop.scene, &display, &desktop.seat)?;
+            }
+            let shape = desktop.cursor_shape();
+            if shape != shown_cursor && !first {
+                match display.show_cursor(&cursor::bitmap(shape)) {
+                    Ok(()) => display.move_cursor(desktop.seat.cursor().0, desktop.seat.cursor().1)?,
+                    Err(e) => log::warn!("kms: {e}; keeping the old pointer image"),
+                }
+                shown_cursor = shape;
             }
         }
         if ready.wake {

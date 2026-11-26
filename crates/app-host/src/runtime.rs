@@ -62,6 +62,13 @@ pub enum Exit {
 /// Run `source` (an ES module named `name`) against `bus` until it ends. Must be
 /// called inside a [`tokio::task::LocalSet`] on a current-thread runtime.
 pub async fn run(bus: Client, name: &str, source: &str) -> Result<Exit, String> {
+    run_app(bus, name, source, None).await
+}
+
+/// [`run`], telling the app which app it is (`__idealos.app`): the SDK passes it
+/// on when it opens a window, which matters only where the broker gave the
+/// connection no app identity (an app run by hand on a Mac, with no session).
+pub async fn run_app(bus: Client, name: &str, source: &str, app: Option<&str>) -> Result<Exit, String> {
     let js = |e: rquickjs::Error| e.to_string();
     let runtime = Runtime::new().map_err(js)?;
     runtime.set_memory_limit(MEMORY_LIMIT);
@@ -85,6 +92,10 @@ pub async fn run(bus: Client, name: &str, source: &str) -> Result<Exit, String> 
     let loaded = context.with(|ctx| -> Result<Result<(), String>, String> {
         install_host(&ctx, &host).map_err(js)?;
         ctx.eval::<(), _>(PRELUDE).catch(&ctx).map_err(|e| format!("prelude: {e}"))?;
+        if let Some(app) = app {
+            let api: rquickjs::Object = ctx.globals().get("__idealos").map_err(js)?;
+            api.set("app", app).map_err(js)?;
+        }
         Ok(match Module::evaluate(ctx.clone(), name, source).catch(&ctx) {
             Ok(promise) => {
                 ctx.globals().set("__loaded", promise).map_err(js)?;

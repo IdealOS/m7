@@ -111,6 +111,20 @@ impl Out<'_> {
     }
 }
 
+/// Where scroll view props `p` at `rect` draw their thumb, if the content is taller
+/// than the view: 4 pixels wide, 8 while hovered or dragged (`_thumb`).
+pub fn scroll_thumb(rect: Rect, p: &Props) -> Option<Rect> {
+    let content = num(p, "_content", 0.0);
+    if content <= rect.h + 0.5 {
+        return None;
+    }
+    let scrolled = num(p, "_scroll", 0.0);
+    let h = (rect.h * rect.h / content).max(24.0);
+    let y = rect.y + (rect.h - h) * (scrolled / (content - rect.h)).clamp(0.0, 1.0);
+    let w = if p.contains_key("_thumb") && !p["_thumb"].is_null() { 8.0 } else { 4.0 };
+    Some(Rect { x: rect.x + rect.w - w - 2.0, y, w, h })
+}
+
 /// One line of text at `size`, vertically centered in `rect`.
 fn line_in(rect: Rect, size: f32) -> Rect {
     let line = (size * 1.3).ceil();
@@ -374,14 +388,15 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, style: &Style, laye
                     num(p, "radius", 0.0),
                 );
             }
-            // A thin scrollbar when the content is taller than the view.
-            let content = num(p, "_content", 0.0);
-            if content > rect.h + 0.5 {
-                let scrolled = num(p, "_scroll", 0.0);
-                let h = (rect.h * rect.h / content).max(24.0);
-                let y = rect.y + (rect.h - h) * (scrolled / (content - rect.h)).clamp(0.0, 1.0);
-                let bar = Rect { x: rect.x + rect.w - 6.0, y, w: 4.0, h };
-                o.quad(bar, style.var("scrollbar"), Rgba::TRANSPARENT, 0.0, 2.0);
+            // A thin scrollbar when the content is taller than the view, wider and
+            // darker while hovered or dragged (`_thumb`).
+            if let Some(bar) = scroll_thumb(rect, p) {
+                let ink = match p.get("_thumb").and_then(Value::as_str) {
+                    Some("active") => style.var("scrollbar-active"),
+                    Some(_) => style.var("scrollbar-hover"),
+                    None => style.var("scrollbar"),
+                };
+                o.quad(bar, ink, Rgba::TRANSPARENT, 0.0, bar.w / 2.0);
             }
         }
         // Containers draw only what a style gives them: `.card { background: ... }`.

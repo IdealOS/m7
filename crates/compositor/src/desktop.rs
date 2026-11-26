@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::apps::{Apps, Reply};
+use crate::cursor::Shape;
 use crate::demo::TOP_BAR;
 use crate::draw::FIELD_PAD;
 use crate::input::{Effect, Input, Key, Mods, Seat, Shortcut};
@@ -137,12 +138,68 @@ enum Drag {
         last: f32,
         velocity: f32,
     },
+    /// Resizing an app window by `edges`, from where the pointer was (`from`), its
+    /// content size then, and where its frame was (left and top edges move it).
     Resize {
         window: u64,
+        frame: NodeId,
+        edges: Edges,
         from: (f32, f32),
         size: (u32, u32),
+        pos: (f32, f32),
         last: Option<Reply>,
     },
+    /// Dragging a scroll view's thumb, `grab` pixels below its top.
+    Thumb {
+        node: NodeId,
+        grab: f32,
+    },
+    /// The button that opened a menu or a select's list is still held: letting go
+    /// over an item chooses it, if the pointer moved.
+    Menu {
+        from: (f32, f32),
+    },
+}
+
+/// Which edges of a window a resize moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl Edges {
+    fn cursor(self) -> Shape {
+        match (self.left || self.right, self.top || self.bottom) {
+            (true, false) => Shape::ResizeEw,
+            (false, true) => Shape::ResizeNs,
+            _ if (self.left && self.top) || (self.right && self.bottom) => Shape::ResizeNwse,
+            _ => Shape::ResizeNesw,
+        }
+    }
+}
+
+/// How far inside and outside a window's edge the pointer can be and still resize
+/// it (mostly outside, so a scrollbar at the edge stays usable), and how far along
+/// an edge its corners reach.
+const EDGE_IN: f32 = 3.0;
+const EDGE_OUT: f32 = 5.0;
+const CORNER: f32 = 16.0;
+/// How far the pointer must move, holding the button that opened a list, before
+/// letting go chooses the item under it.
+const DRAG_TO_CHOOSE: f32 = 4.0;
+
+/// What the pointer is over, for hover states and the cursor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Over {
+    Nothing,
+    Edge(Edges),
+    Control(NodeId),
+    Divider(NodeId, bool),
+    Thumb(NodeId),
+    Title(u64),
 }
 
 /// An open popup menu.
@@ -179,8 +236,8 @@ const MOVE: Duration = Duration::from_millis(180);
 const SLIDE: f32 = 48.0;
 /// How far below its place a new window starts.
 const RISE: f32 = 16.0;
-/// The corner of an app window that resizes it.
-const GRIP: f32 = 14.0;
+/// How far in from a scroll view's right edge its scrollbar takes the pointer.
+const THUMB_ZONE: f32 = 12.0;
 
 pub struct Desktop {
     pub scene: Scene,
@@ -195,6 +252,21 @@ pub struct Desktop {
     drag: Option<Drag>,
     /// The control the pointer is over, which shows its `:hover` style.
     hovered: Option<NodeId>,
+    /// The app window whose title bar the pointer is over, and the one being
+    /// dragged by it.
+    hovered_title: Option<u64>,
+    pressed_title: Option<u64>,
+    /// The app window that's active (frontmost), whose title bar shows it.
+    active_window: Option<u64>,
+    /// The scroll view whose thumb is hovered or dragged.
+    thumb: Option<NodeId>,
+    /// The pointer image to show.
+    cursor: Shape,
+    /// What Ctrl-K last cut, for Ctrl-Y to put back (Emacs's kill ring, one deep).
+    kill_ring: String,
+    /// The pointer is a finger on a touchscreen, so dragging content scrolls it.
+    /// No backend reports touch input yet.
+    pub touch: bool,
     /// Each app window's content area: its app, and the sheet it opened with.
     window_styles: HashMap<NodeId, (Option<String>, Option<std::sync::Arc<crate::style::Sheet>>)>,
     /// Edits to apps' sheets (`StyleSheet` documents), by app id.
@@ -252,6 +324,13 @@ impl Desktop {
             edits: HashMap::new(),
             drag: None,
             hovered: None,
+            hovered_title: None,
+            pressed_title: None,
+            active_window: None,
+            thumb: None,
+            cursor: Shape::Arrow,
+            touch: false,
+            kill_ring: String::new(),
             window_styles: HashMap::new(),
             style_edits: HashMap::new(),
             coasting: Vec::new(),
@@ -364,6 +443,7 @@ impl Desktop {
 
     /// The scene, laid out, as a draw list, with images' pixels attached.
     pub fn draw_list(&mut self) -> crate::scene::DrawList {
+        self.mark_active();
         self.relayout();
         let mut list = self.scene.draw_list();
         for item in list.layers.iter_mut().flat_map(|l| l.images.iter_mut()) {
@@ -419,6 +499,25 @@ impl Desktop {
             }
             return Effect::default();
         }
+        // An app window's edges and corners resize it, just outside it included.
+        if let Some((frame, edges)) = self.edge_at(x, y)
+            && let Some(win) = self.apps.window_of(frame)
+            && let Some(size) = self.apps.size_of(win)
+            && let Some(r) = self.scene.local_rect(frame)
+        {
+            self.scene.raise(frame);
+            self.restack();
+            self.drag = Some(Drag::Resize {
+                window: win,
+                frame,
+                edges,
+                from: (x, y),
+                size,
+                pos: (r.x, r.y),
+                last: None,
+            });
+            return Effect::default();
+        }
         let Some(window) = self.wm.window_at(&self.scene, x, y) else {
             self.set_focus(None);
             return Effect::default();
@@ -443,16 +542,6 @@ impl Desktop {
             }
             return Effect::default();
         }
-        // The bottom-right corner resizes an app window.
-        if let Some(win) = self.apps.window_of(window)
-            && let Some(r) = self.scene.local_rect(window)
-            && x >= r.x + r.w - GRIP
-            && y >= r.y + r.h - GRIP
-            && let Some(size) = self.apps.size_of(win)
-        {
-            self.drag = Some(Drag::Resize { window: win, from: (x, y), size, last: None });
-            return Effect::default();
-        }
         let root = dialog.unwrap_or(window);
         if let Some((node, kind, rect)) = self.widget_at(root, x, y) {
             match kind {
@@ -468,10 +557,12 @@ impl Desktop {
                 NodeKind::Select => {
                     self.set_focus(Some(node));
                     self.open_select(node, rect);
+                    self.drag = Some(Drag::Menu { from: (x, y) });
                 }
                 NodeKind::Menu => {
                     self.set_focus(Some(node));
                     self.open_actions(node, rect);
+                    self.drag = Some(Drag::Menu { from: (x, y) });
                 }
                 NodeKind::Terminal => self.set_focus(Some(node)),
                 NodeKind::TextField | NodeKind::TextArea => {
@@ -486,7 +577,20 @@ impl Desktop {
                 NodeKind::Split => self.drag = Some(Drag::Split(node)),
                 NodeKind::Scroll | NodeKind::Vlist => {
                     self.coasting.retain(|(n, _)| *n != node);
-                    self.drag = Some(Drag::Scroll { node, last: y, velocity: 0.0 });
+                    let p = &self.scene.node(node).expect("exists").props;
+                    if x >= rect.x + rect.w - THUMB_ZONE
+                        && let Some(t) = crate::draw::scroll_thumb(rect, p)
+                    {
+                        // On the thumb, drag it; on the track beside it, jump there first.
+                        let grab = if (t.y..t.y + t.h).contains(&y) { y - t.y } else { t.h / 2.0 };
+                        self.set(node, json!({"_thumb": "active"}));
+                        self.thumb = Some(node);
+                        self.drag = Some(Drag::Thumb { node, grab });
+                        self.motion();
+                    } else if self.touch {
+                        // A finger drags content; a mouse selects and drags things instead.
+                        self.drag = Some(Drag::Scroll { node, last: y, velocity: 0.0 });
+                    }
                 }
                 _ => {}
             }
@@ -497,6 +601,11 @@ impl Desktop {
             return Effect::default();
         }
         self.set_focus(None);
+        // Pressing an app window's title bar starts dragging it: it shows pressed.
+        if let Some(win) = self.title_at(window, x, y) {
+            self.set_title(win, "pressed", json!(true));
+            self.pressed_title = Some(win);
+        }
         self.seat.handle(Input::Button { pressed: true }, &mut self.scene, &mut self.wm)
     }
 
@@ -509,6 +618,9 @@ impl Desktop {
 
     fn release(&mut self) -> Effect {
         let (x, y) = self.seat.cursor();
+        if let Some(win) = self.pressed_title.take() {
+            self.set_title(win, "pressed", Value::Null);
+        }
         if self.apps.pressing() {
             let reply = self.apps.release(&mut self.scene, x, y);
             self.send(reply);
@@ -524,6 +636,24 @@ impl Desktop {
             Some(Drag::Resize { last, .. }) => {
                 // The app hears the final size once, at the end of the drag.
                 self.send(last);
+                self.hover();
+                Effect::default()
+            }
+            Some(Drag::Thumb { node, .. }) => {
+                if self.scene.node(node).is_some() {
+                    self.set(node, json!({"_thumb": Value::Null}));
+                }
+                self.thumb = None;
+                self.hover();
+                Effect::default()
+            }
+            Some(Drag::Menu { from }) => {
+                // Held, dragged and let go over an item: that's the choice. A plain
+                // click leaves the list open for another click to choose.
+                let moved = (x - from.0).abs().max((y - from.1).abs()) > DRAG_TO_CHOOSE;
+                if moved && self.menu.as_ref().is_some_and(|m| m.rect.contains(x, y)) {
+                    self.menu_press(x, y);
+                }
                 Effect::default()
             }
             Some(_) => Effect::default(),
@@ -534,10 +664,93 @@ impl Desktop {
     /// Mark the control under the pointer as hovered (`_hover`), and the last one
     /// not. While something is dragged, the hover stays where it was.
     fn hover(&mut self) {
-        if self.drag.is_some() {
+        if self.drag.as_ref().is_some_and(|d| !matches!(d, Drag::Menu { .. })) {
             return;
         }
         let (x, y) = self.seat.cursor();
+        // With a menu or a select's list open, the item under the pointer is the
+        // highlighted one (the highlight glides there).
+        if let Some(m) = &mut self.menu {
+            let i = ((y - m.rect.y - 4.0) / ROW).floor();
+            if m.rect.contains(x, y) && i >= 0.0 && (i as usize) < m.values.len() && i as usize != m.highlight
+            {
+                m.highlight = i as usize;
+                self.set(MENU + 2, json!({"y": 4.0 + i * ROW}));
+            }
+            return;
+        }
+        let over = self.over(x, y);
+        self.cursor = match over {
+            Over::Edge(e) => e.cursor(),
+            Over::Divider(_, true) => Shape::ResizeNs,
+            Over::Divider(_, false) => Shape::ResizeEw,
+            _ => Shape::Arrow,
+        };
+        // A control or a divider: `_hover`.
+        let node = match over {
+            Over::Control(n) | Over::Divider(n, _) => Some(n),
+            _ => None,
+        };
+        if node != self.hovered {
+            if let Some(old) = self.hovered.take()
+                && self.scene.node(old).is_some()
+            {
+                self.set(old, json!({"_hover": Value::Null}));
+            }
+            if let Some(new) = node {
+                self.set(new, json!({"_hover": true}));
+            }
+            self.hovered = node;
+        }
+        // A title bar.
+        let title = match over {
+            Over::Title(w) => Some(w),
+            _ => None,
+        };
+        if title != self.hovered_title {
+            if let Some(old) = self.hovered_title.take() {
+                self.set_title(old, "_hover", Value::Null);
+            }
+            if let Some(new) = title {
+                self.set_title(new, "_hover", json!(true));
+            }
+            self.hovered_title = title;
+        }
+        // A scroll view's thumb.
+        let thumb = match over {
+            Over::Thumb(n) => Some(n),
+            _ => None,
+        };
+        if thumb != self.thumb {
+            if let Some(old) = self.thumb.take()
+                && self.scene.node(old).is_some()
+            {
+                self.set(old, json!({"_thumb": Value::Null}));
+            }
+            if let Some(new) = thumb {
+                self.set(new, json!({"_thumb": "hover"}));
+            }
+            self.thumb = thumb;
+        }
+    }
+
+    /// The pointer image to show now.
+    pub fn cursor_shape(&self) -> Shape {
+        match &self.drag {
+            Some(Drag::Resize { edges, .. }) => edges.cursor(),
+            Some(Drag::Split(n)) => {
+                if self.prop(*n, "vertical").and_then(Value::as_bool) == Some(true) {
+                    Shape::ResizeNs
+                } else {
+                    Shape::ResizeEw
+                }
+            }
+            _ => self.cursor,
+        }
+    }
+
+    /// What's under the pointer at (`x`, `y`), for hover states and the cursor.
+    fn over(&mut self, x: f32, y: f32) -> Over {
         let control = |s: &Self, id: NodeId| {
             matches!(
                 s.kind(id),
@@ -551,23 +764,113 @@ impl Desktop {
                 )
             )
         };
-        let root = self.wm.window_at(&self.scene, x, y).or_else(|| {
+        if let Some((_, edges)) = self.edge_at(x, y) {
+            return Over::Edge(edges);
+        }
+        let Some(window) = self.wm.window_at(&self.scene, x, y) else {
             let bar = self.scene.screen_rects().get(&TOP_BAR).map(|r| r.0);
-            bar.is_some_and(|r| r.contains(x, y)).then_some(TOP_BAR)
-        });
-        let over = root.and_then(|r| self.scene.hit(r, x, y, |id| control(self, id)));
-        if over == self.hovered {
+            if bar.is_some_and(|r| r.contains(x, y))
+                && let Some(n) = self.scene.hit(TOP_BAR, x, y, |id| control(self, id))
+            {
+                return Over::Control(n);
+            }
+            return Over::Nothing;
+        };
+        let root = self.dialog_in(window).unwrap_or(window);
+        if let Some(n) = self.scene.hit(window, x, y, |id| control(self, id)) {
+            return Over::Control(n);
+        }
+        for (id, rect, clip) in self.scene.paint_order(root).into_iter().rev() {
+            if !rect.intersect(&clip).contains(x, y) {
+                continue;
+            }
+            let p = &self.scene.node(id).expect("in the scene").props;
+            match self.kind(id) {
+                Some(NodeKind::Split) => {
+                    let at = num(p, "_divider", -1.0);
+                    let vertical = p.get("vertical").and_then(Value::as_bool) == Some(true);
+                    let (pos, start) = if vertical { (y, rect.y) } else { (x, rect.x) };
+                    if at >= 0.0 && pos >= start + at - 2.0 && pos <= start + at + DIVIDER + 2.0 {
+                        return Over::Divider(id, vertical);
+                    }
+                }
+                Some(NodeKind::Scroll | NodeKind::Vlist) if x >= rect.x + rect.w - THUMB_ZONE => {
+                    if let Some(t) = crate::draw::scroll_thumb(rect, p)
+                        && (t.y..t.y + t.h).contains(&y)
+                    {
+                        return Over::Thumb(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match self.title_at(window, x, y) {
+            Some(w) => Over::Title(w),
+            None => Over::Nothing,
+        }
+    }
+
+    /// The app window whose edge or corner the pointer at (`x`, `y`) would resize,
+    /// and which edges: the topmost window whose resize zone holds the point. A
+    /// window above it there covers it; a maximized window doesn't resize.
+    fn edge_at(&self, x: f32, y: f32) -> Option<(NodeId, Edges)> {
+        for &frame in self.scene.top_level().iter().rev() {
+            if !wm::is_window(&self.scene, frame) {
+                continue;
+            }
+            let Some(r) = self.scene.local_rect(frame) else { continue };
+            if !r.expand(EDGE_OUT).contains(x, y) {
+                continue;
+            }
+            let win = self.apps.window_of(frame)?;
+            if self.apps.is_maximized(win) {
+                return None;
+            }
+            // Distances inside the frame from each edge (negative: outside it).
+            let (l, rt, t, b) = (x - r.x, r.x + r.w - x, y - r.y, r.y + r.h - y);
+            let side = |d: f32| d < EDGE_IN;
+            let corner = |d: f32| d < CORNER;
+            let e = Edges {
+                left: side(l) || (corner(l) && (side(t) || side(b))),
+                right: side(rt) || (corner(rt) && (side(t) || side(b))),
+                top: side(t) || (corner(t) && (side(l) || side(rt))),
+                bottom: side(b) || (corner(b) && (side(l) || side(rt))),
+            };
+            return (e.left || e.right || e.top || e.bottom).then_some((frame, e));
+        }
+        None
+    }
+
+    /// The app window whose title bar is at (`x`, `y`) in frame `frame`.
+    fn title_at(&self, frame: NodeId, x: f32, y: f32) -> Option<u64> {
+        let win = self.apps.window_of(frame)?;
+        let r = self.scene.local_rect(frame)?;
+        (r.contains(x, y) && y < r.y + wm::TITLE_BAR_HEIGHT).then_some(win)
+    }
+
+    /// Set prop `key` on app window `window`'s title bar parts.
+    fn set_title(&mut self, window: u64, key: &str, value: Value) {
+        let Some(parts) = self.apps.title_parts(window) else { return };
+        for part in parts {
+            if self.scene.node(part).is_some() {
+                self.set(part, json!({ key: value.clone() }));
+            }
+        }
+    }
+
+    /// Show which app window is active (the frontmost): its title bar is `:focus`.
+    fn mark_active(&mut self) {
+        let active = self.top_window().and_then(|f| self.apps.window_of(f));
+        if active == self.active_window {
             return;
         }
-        if let Some(old) = self.hovered.take()
-            && self.scene.node(old).is_some()
-        {
-            self.set(old, json!({"_hover": Value::Null}));
+        if let Some(old) = self.active_window.take() {
+            self.set_title(old, "_active", Value::Null);
         }
-        if let Some(new) = over {
-            self.set(new, json!({"_hover": true}));
+        if let Some(new) = active {
+            self.set_title(new, "_active", json!(true));
         }
-        self.hovered = over;
+        self.active_window = active;
     }
 
     fn motion(&mut self) {
@@ -607,11 +910,49 @@ impl Desktop {
                 self.scroll_by(node, dy);
                 Drag::Scroll { node, last: y, velocity: dy * 60.0 }
             }
-            Drag::Resize { window, from, size, last } => {
-                let w = (size.0 as f32 + x - from.0).max(0.0) as u32;
-                let h = (size.1 as f32 + y - from.1).max(0.0) as u32;
+            Drag::Resize { window, frame, edges, from, size, pos, last } => {
+                let (dx, dy) = (x - from.0, y - from.1);
+                let grow = |near: bool, far: bool, d: f32| {
+                    if far {
+                        d
+                    } else if near {
+                        -d
+                    } else {
+                        0.0
+                    }
+                };
+                let w = (size.0 as f32 + grow(edges.left, edges.right, dx)).max(0.0) as u32;
+                let h = (size.1 as f32 + grow(edges.top, edges.bottom, dy)).max(0.0) as u32;
                 let reply = self.apps.resize(&mut self.scene, window, w, h).or(last);
-                Drag::Resize { window, from, size, last: reply }
+                // The left and top edges move the window by what it actually grew,
+                // so its other edges stay put even at the smallest size.
+                if (edges.left || edges.top)
+                    && let Some((aw, ah)) = self.apps.size_of(window)
+                {
+                    let nx = if edges.left { pos.0 + size.0 as f32 - aw as f32 } else { pos.0 };
+                    let ny = if edges.top { pos.1 + size.1 as f32 - ah as f32 } else { pos.1 };
+                    self.set(frame, json!({"x": nx, "y": ny}));
+                }
+                Drag::Resize { window, frame, edges, from, size, pos, last: reply }
+            }
+            Drag::Thumb { node, grab } => {
+                if let Some(r) = rects(self, node) {
+                    let p = &self.scene.node(node).expect("exists").props;
+                    let content = num(p, "_content", 0.0);
+                    if let Some(t) = crate::draw::scroll_thumb(r, p)
+                        && r.h > t.h
+                    {
+                        let at = ((y - grab - r.y) / (r.h - t.h)).clamp(0.0, 1.0) * (content - r.h);
+                        let now = num(p, "_scroll", 0.0);
+                        self.scroll_by(node, at - now);
+                    }
+                }
+                Drag::Thumb { node, grab }
+            }
+            Drag::Menu { from } => {
+                self.drag = Some(Drag::Menu { from });
+                self.hover();
+                return;
             }
         });
     }
@@ -965,64 +1306,146 @@ impl Desktop {
     fn text_key(&mut self, node: NodeId, key: Key, mods: Mods) {
         let multiline = self.kind(node) == Some(NodeKind::TextArea);
         let extend = mods.shift;
+        // Words: Option (Alt) as on a Mac, or Ctrl as on a PC.
         let word = mods.alt || (mods.ctrl && !mods.logo);
-        match key {
-            Key::Char(c) if mods.primary() => match c.to_ascii_lowercase() {
-                'a' => self.edit(node, |e| {
-                    e.select_all();
+        // Emacs keys, as macOS text fields take them: Ctrl and a letter, without
+        // Command. Ctrl-C, Ctrl-X and Ctrl-V stay copy, cut and paste.
+        if mods.ctrl
+            && !mods.logo
+            && !mods.alt
+            && let Key::Char(c) = key
+        {
+            let moved = |m: Move| {
+                move |e: &mut Edit| {
+                    e.move_caret(m, extend);
                     None
-                }),
-                // A secret field's text never goes on the clipboard.
-                'c' | 'x' if self.prop(node, "secret").and_then(Value::as_bool) == Some(true) => {}
-                'c' => {
-                    let text = self.edits.get(&node).map(Edit::selected_text).unwrap_or_default();
-                    if !text.is_empty() {
-                        self.clipboard = Clipboard { text, doc: None };
-                    }
                 }
-                'x' => {
-                    let mut cut = None;
+            };
+            match c.to_ascii_lowercase() {
+                'a' => return self.edit(node, moved(Move::LineStart)),
+                'e' => return self.edit(node, moved(Move::LineEnd)),
+                'f' => return self.edit(node, moved(Move::Right)),
+                'b' => return self.edit(node, moved(Move::Left)),
+                'n' => return self.text_key(node, Key::Down, Mods { shift: extend, ..Mods::default() }),
+                'p' => return self.text_key(node, Key::Up, Mods { shift: extend, ..Mods::default() }),
+                'd' => return self.edit(node, Edit::delete),
+                'h' => return self.edit(node, Edit::backspace),
+                'k' => {
+                    let mut killed = None;
                     self.edit(node, |e| {
-                        let (text, splice) = e.cut()?;
-                        cut = Some(text);
+                        let (text, splice) = e.kill_line()?;
+                        killed = Some(text);
                         Some(splice)
                     });
-                    if let Some(text) = cut {
-                        self.clipboard = Clipboard { text, doc: None };
+                    if let Some(text) = killed {
+                        self.kill_ring = text;
                     }
+                    return;
                 }
-                'v' => {
-                    let mut text = self.clipboard.text.clone();
-                    if !multiline {
-                        text = text.replace(['\n', '\r'], " ");
-                    }
+                'y' => {
+                    let text = self.kill_ring.clone();
                     if !text.is_empty() {
                         self.edit(node, |e| Some(e.insert(&text)));
                     }
+                    return;
                 }
+                't' => return self.edit(node, Edit::transpose),
                 _ => {}
-            },
+            }
+        }
+        match key {
+            // Command (Super on a PC keyboard) for the clipboard and select-all;
+            // Ctrl works for the clipboard too.
+            Key::Char(c) if mods.logo || (mods.ctrl && matches!(c.to_ascii_lowercase(), 'c' | 'x' | 'v')) => {
+                match c.to_ascii_lowercase() {
+                    'a' => self.edit(node, |e| {
+                        e.select_all();
+                        None
+                    }),
+                    // A secret field's text never goes on the clipboard.
+                    'c' | 'x' if self.prop(node, "secret").and_then(Value::as_bool) == Some(true) => {}
+                    'c' => {
+                        let text = self.edits.get(&node).map(Edit::selected_text).unwrap_or_default();
+                        if !text.is_empty() {
+                            self.clipboard = Clipboard { text, doc: None };
+                        }
+                    }
+                    'x' => {
+                        let mut cut = None;
+                        self.edit(node, |e| {
+                            let (text, splice) = e.cut()?;
+                            cut = Some(text);
+                            Some(splice)
+                        });
+                        if let Some(text) = cut {
+                            self.clipboard = Clipboard { text, doc: None };
+                        }
+                    }
+                    'v' => {
+                        let mut text = self.clipboard.text.clone();
+                        if !multiline {
+                            text = text.replace(['\n', '\r'], " ");
+                        }
+                        if !text.is_empty() {
+                            self.edit(node, |e| Some(e.insert(&text)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Ctrl with another letter types nothing (Option-letter types accents).
+            Key::Char(_) if mods.ctrl => {}
             Key::Char(c) => self.edit(node, |e| Some(e.insert(&c.to_string()))),
             Key::Enter if multiline => self.edit(node, |e| Some(e.insert("\n"))),
             Key::Enter => {
                 let text = self.text_value(node);
                 self.event(node, "submit", json!(text));
             }
+            // Command-Backspace deletes to the line's start; Option (or Ctrl) a word.
+            Key::Backspace if mods.logo => self.edit(node, |e| e.delete_to(Move::LineStart)),
+            Key::Backspace if word => self.edit(node, |e| e.delete_to(Move::WordLeft)),
             Key::Backspace => self.edit(node, Edit::backspace),
+            Key::Delete if mods.logo => self.edit(node, |e| e.delete_to(Move::LineEnd)),
+            Key::Delete if word => self.edit(node, |e| e.delete_to(Move::WordRight)),
             Key::Delete => self.edit(node, Edit::delete),
+            // Command-Left and -Right: the line's ends.
             Key::Left => self.edit(node, |e| {
-                e.move_caret(if word { Move::WordLeft } else { Move::Left }, extend);
+                let m = if mods.logo {
+                    Move::LineStart
+                } else if word {
+                    Move::WordLeft
+                } else {
+                    Move::Left
+                };
+                e.move_caret(m, extend);
                 None
             }),
             Key::Right => self.edit(node, |e| {
-                e.move_caret(if word { Move::WordRight } else { Move::Right }, extend);
+                let m = if mods.logo {
+                    Move::LineEnd
+                } else if word {
+                    Move::WordRight
+                } else {
+                    Move::Right
+                };
+                e.move_caret(m, extend);
                 None
             }),
+            // Home and End: the line's ends; with Ctrl or Command, the whole text's.
             Key::Home => self.edit(node, |e| {
-                e.move_caret(Move::Home, extend);
+                e.move_caret(if mods.primary() { Move::Home } else { Move::LineStart }, extend);
                 None
             }),
             Key::End => self.edit(node, |e| {
+                e.move_caret(if mods.primary() { Move::End } else { Move::LineEnd }, extend);
+                None
+            }),
+            // Command-Up and -Down: the start and end of the text.
+            Key::Up if mods.logo => self.edit(node, |e| {
+                e.move_caret(Move::Home, extend);
+                None
+            }),
+            Key::Down if mods.logo => self.edit(node, |e| {
                 e.move_caret(Move::End, extend);
                 None
             }),
@@ -1229,7 +1652,8 @@ impl Desktop {
             create(
                 MENU + 2,
                 NodeKind::Rect,
-                json!({"x": 4, "y": 4.0 + highlight as f32 * ROW, "w": rect.w - 8.0, "h": ROW, "color": "$selection", "radius": theme::radius::S}),
+                json!({"x": 4, "y": 4.0 + highlight as f32 * ROW, "w": rect.w - 8.0, "h": ROW, "color": "$selection", "radius": theme::radius::S,
+                       "transition": {"y": 80}}),
             ),
             insert(MENU, MENU + 1),
             insert(MENU, MENU + 2),
@@ -1600,9 +2024,12 @@ impl Desktop {
                         Some(Ok(sheet)) => Some(std::sync::Arc::new(sheet)),
                         None => None,
                     };
+                    // The broker's word on which app this is; an app can't claim to be
+                    // another. Only a connection with no app identity (a tool, or an
+                    // app run by hand on a Mac) is taken at its word, for styling.
                     let app_id = match &from {
                         Sender::App { app, .. } => Some(app.clone()),
-                        _ => None,
+                        _ => p.app.clone(),
                     };
                     let screen = self.seat.bounds();
                     // One line per window; tools/smoke-checks.ts counts them.
@@ -2364,6 +2791,8 @@ mod tests {
     #[test]
     fn scroll_views_scroll_with_the_wheel_and_coast_after_a_drag() {
         let mut d = desk();
+        // Dragging content scrolls it on a touchscreen only.
+        d.touch = true;
         let mut ops = vec![
             json!({"op": "create", "id": 2, "type": "scroll", "props": {"padding": 4}}),
             json!({"op": "insert", "parent": 1, "child": 2, "index": 0}),
@@ -2488,10 +2917,10 @@ mod tests {
         d.input(Input::Button { pressed: false });
         assert_eq!(events(&out), [(2, "change".into(), json!(0.25))]);
 
-        // Resize from the corner grip: the app hears the final size once.
+        // Resize from the bottom-right corner: the app hears the final size once.
         let frame = d.apps.frame_of(w).unwrap();
         let f = d.scene.local_rect(frame).unwrap();
-        let grip = (f.x + f.w - 4.0, f.y + f.h - 4.0);
+        let grip = (f.x + f.w - 1.0, f.y + f.h - 1.0);
         d.input(Input::MotionTo { x: grip.0, y: grip.1 });
         d.input(Input::Button { pressed: true });
         let moving = d.input(Input::MotionTo { x: grip.0 + 100.0, y: grip.1 + 50.0 }).1;
@@ -3173,6 +3602,280 @@ mod tests {
             panic!()
         };
         assert!(v["css"].as_str().unwrap().contains("--accent"));
+    }
+
+    #[test]
+    fn a_press_shows_at_once_and_letting_go_fades() {
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "button", "props": {"label": "Go", "x": 20, "y": 20, "w": 80, "h": 32}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0},
+            {"op": "listen", "id": 2, "events": ["click"]}
+        ]);
+        let window = open(&mut d, 7, ops);
+        let button = global(&d, window, 2);
+        let at = center(&mut d, button);
+        let t0 = Instant::now();
+        d.tick(t0);
+        d.input(Input::MotionTo { x: at.0, y: at.1 });
+        d.tick(t0 + crate::anim::STATE_FADE);
+        let hover = quad_of(&mut d, button).color;
+        d.input(Input::Button { pressed: true });
+        let pressed = d.scene.style(button).var("control-pressed");
+        assert_eq!(quad_of(&mut d, button).color, pressed, "no fade into a press");
+        d.input(Input::Button { pressed: false });
+        assert_eq!(quad_of(&mut d, button).color, pressed, "letting go starts from the pressed colour");
+        d.tick(t0 + crate::anim::STATE_FADE * 2);
+        assert_eq!(quad_of(&mut d, button).color, hover);
+        // Toggles and sliders draw their tracks in --track, not the pressed colour.
+        assert!(crate::style::SYSTEM.contains("toggle, slider { background: var(--track); }"));
+    }
+
+    #[test]
+    fn app_style_edits_find_windows_by_the_brokers_word_or_a_hosts_on_a_mac() {
+        use crate::scene::Rgba;
+        let red = Rgba::parse("#ff0000").unwrap();
+        let mut d = desk();
+        let open_as = |d: &mut Desktop, id: u64, from: Option<Sender>, app: &str| {
+            let params = json!({"title": "W", "app": app});
+            let out = d.call(Call::Request { id, from, method: "open_window".into(), params, stream: true });
+            let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+            let WindowEvent::Opened { window, .. } = serde_json::from_value(data.clone()).unwrap() else {
+                panic!()
+            };
+            d.apps.content_of(window).unwrap()
+        };
+        // An app run by hand on a Mac connects with no identity: its host's word counts.
+        let mac = open_as(&mut d, 1, Some(Sender::Conn(9)), "org.idealos.gallery");
+        // An app the broker knows can't claim to be another.
+        let liar = open_as(&mut d, 2, app(), "org.idealos.gallery");
+        d.call(Call::StyleSheets {
+            sheets: vec![("app:org.idealos.gallery".into(), ":root { --accent: #ff0000 }".into())],
+        });
+        assert_eq!(d.scene.style(mac).var("accent"), red);
+        assert_ne!(d.scene.style(liar).var("accent"), red);
+    }
+
+    #[test]
+    fn checkboxes_toggles_sliders_and_open_lists_follow_the_pointer() {
+        let mut d = desk();
+        let w = open(&mut d, 7, widgets());
+        let hovered = |d: &mut Desktop, n: NodeId| {
+            let at = center(d, n);
+            d.input(Input::MotionTo { x: at.0, y: at.1 });
+            let s = d.scene.style(n);
+            (s.background, s.clone())
+        };
+        let checkbox = global(&d, w, 3);
+        let (bg, s) = hovered(&mut d, checkbox);
+        assert_eq!(bg, Some(s.var("control-hover")), "checkbox");
+        for id in [4, 5] {
+            let node = global(&d, w, id);
+            let (bg, s) = hovered(&mut d, node);
+            assert_eq!(bg, Some(s.var("track-hover")), "toggle and slider: node {id}");
+        }
+        // Open the select: the item under the pointer is the highlighted one.
+        let select = global(&d, w, 6);
+        let at = center(&mut d, select);
+        click(&mut d, at);
+        let menu = d.scene.screen_rects()[&MENU].0;
+        let row_y = |d: &Desktop| d.scene.node(MENU + 2).unwrap().props["y"].as_f64().unwrap() as f32;
+        assert_eq!(row_y(&d), 4.0, "the chosen value, A, starts highlighted");
+        d.input(Input::MotionTo { x: menu.x + 20.0, y: menu.y + 4.0 + 2.5 * ROW });
+        assert_eq!(row_y(&d), 4.0 + 2.0 * ROW, "C, under the pointer");
+        // Choosing goes by the highlight, so a click there chooses C.
+        d.input(Input::Button { pressed: true });
+        d.input(Input::Button { pressed: false });
+        assert_eq!(d.scene.node(select).unwrap().props["value"], "C");
+    }
+
+    fn key_with(d: &mut Desktop, key: Key, mods: Mods) {
+        d.input(Input::Key { key, mods });
+    }
+
+    /// A window with a scroll view of 40 rows; returns it and the scroll view.
+    fn scrolling(d: &mut Desktop) -> (u64, NodeId) {
+        let mut ops = vec![
+            json!({"op": "create", "id": 2, "type": "scroll", "props": {"padding": 4}}),
+            json!({"op": "insert", "parent": 1, "child": 2, "index": 0}),
+        ];
+        for i in 0..40u64 {
+            ops.push(
+                json!({"op": "create", "id": 10 + i, "type": "label", "props": {"text": format!("Row {i}")}}),
+            );
+            ops.push(json!({"op": "insert", "parent": 2, "child": 10 + i, "index": i}));
+        }
+        let w = open(d, 7, Value::Array(ops));
+        let scroll = d.scene.parent(global(d, w, 10)).unwrap();
+        d.relayout();
+        (w, scroll)
+    }
+
+    #[test]
+    fn text_fields_take_emacs_and_mac_keys() {
+        let mut d = desk();
+        let w = open(&mut d, 7, widgets());
+        let field = global(&d, w, 7);
+        let at = center(&mut d, field);
+        click(&mut d, at);
+        for c in "hello world".chars() {
+            key(&mut d, Key::Char(c));
+        }
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let cmd = Mods { logo: true, ..Mods::default() };
+        let alt = Mods { alt: true, ..Mods::default() };
+        let caret = |d: &Desktop| d.edits[&field].caret();
+        key_with(&mut d, Key::Char('a'), ctrl);
+        assert_eq!(caret(&d), 0, "Ctrl-A: the line's start");
+        key_with(&mut d, Key::Char('e'), ctrl);
+        assert_eq!(caret(&d), 11, "Ctrl-E: its end");
+        key_with(&mut d, Key::Char('b'), ctrl);
+        key_with(&mut d, Key::Char('b'), ctrl);
+        key_with(&mut d, Key::Char('f'), ctrl);
+        assert_eq!(caret(&d), 10, "Ctrl-B, -B, -F");
+        key_with(&mut d, Key::Char('d'), ctrl);
+        assert_eq!(d.text_value(field), "hello worl", "Ctrl-D deletes forward");
+        key_with(&mut d, Key::Left, cmd);
+        assert_eq!(caret(&d), 0, "Command-Left");
+        key_with(&mut d, Key::Right, alt);
+        assert_eq!(caret(&d), 5, "Option-Right: a word");
+        key_with(&mut d, Key::Char('k'), ctrl);
+        assert_eq!(d.text_value(field), "hello", "Ctrl-K kills to the end");
+        key_with(&mut d, Key::Char('a'), ctrl);
+        key_with(&mut d, Key::Char('y'), ctrl);
+        assert_eq!(d.text_value(field), " worlhello", "Ctrl-Y yanks it back");
+        key_with(&mut d, Key::Backspace, alt);
+        assert_eq!(d.text_value(field), " hello", "Option-Backspace deletes the word before the caret");
+        // Command-A selects everything; Ctrl-C still copies.
+        key_with(&mut d, Key::Char('a'), cmd);
+        key_with(&mut d, Key::Char('c'), ctrl);
+        assert_eq!(d.clipboard.text, " hello");
+        key_with(&mut d, Key::Char('q'), ctrl);
+        assert_eq!(d.text_value(field), " hello", "other Ctrl letters type nothing");
+    }
+
+    #[test]
+    fn windows_resize_from_any_edge_with_the_matching_cursor() {
+        let mut d = desk();
+        let w = open(&mut d, 7, json!([]));
+        let frame = d.apps.frame_of(w).unwrap();
+        let f = d.scene.local_rect(frame).unwrap();
+        let size = d.apps.size_of(w).unwrap();
+        // The left edge: the cursor says so, and dragging moves the window too.
+        let at = (f.x + 2.0, f.y + f.h / 2.0);
+        d.input(Input::MotionTo { x: at.0, y: at.1 });
+        assert_eq!(d.cursor_shape(), Shape::ResizeEw);
+        d.input(Input::Button { pressed: true });
+        d.input(Input::MotionTo { x: at.0 - 50.0, y: at.1 });
+        d.input(Input::Button { pressed: false });
+        assert_eq!(d.apps.size_of(w).unwrap().0, size.0 + 50);
+        assert_eq!(d.scene.local_rect(frame).unwrap().x, f.x - 50.0, "the right edge stays put");
+        // Corners and the other edges show their cursors.
+        let f = d.scene.local_rect(frame).unwrap();
+        let shape_at = |d: &mut Desktop, x: f32, y: f32| {
+            d.input(Input::MotionTo { x, y });
+            d.cursor_shape()
+        };
+        assert_eq!(shape_at(&mut d, f.x + f.w - 2.0, f.y + f.h - 2.0), Shape::ResizeNwse);
+        assert_eq!(shape_at(&mut d, f.x + 2.0, f.y + f.h - 2.0), Shape::ResizeNesw);
+        assert_eq!(shape_at(&mut d, f.x + f.w / 2.0, f.y + f.h - 2.0), Shape::ResizeNs);
+        assert_eq!(shape_at(&mut d, f.x + f.w / 2.0, f.y + f.h / 2.0), Shape::Arrow);
+    }
+
+    #[test]
+    fn title_bars_show_hover_pressed_and_which_window_is_active() {
+        let mut d = desk();
+        let a = open(&mut d, 7, json!([]));
+        let b = open(&mut d, 8, json!([]));
+        d.draw_list();
+        let bar = |d: &Desktop, w: u64| d.apps.title_parts(w).unwrap()[0];
+        let has =
+            |d: &Desktop, n: NodeId, k: &str| d.scene.node(n).unwrap().props.get(k) == Some(&json!(true));
+        assert!(has(&d, bar(&d, b), "_active") && !has(&d, bar(&d, a), "_active"), "the frontmost is active");
+        let s = d.scene.style(bar(&d, b));
+        assert_eq!(s.background, Some(s.var("titlebar-active")));
+        assert_eq!(d.scene.style(bar(&d, a)).background, Some(s.var("titlebar")));
+        // Hover the active one's title bar, then press it to drag.
+        let f = d.scene.local_rect(d.apps.frame_of(b).unwrap()).unwrap();
+        d.input(Input::MotionTo { x: f.x + 60.0, y: f.y + 18.0 });
+        assert!(has(&d, bar(&d, b), "_hover"));
+        assert_eq!(d.scene.style(bar(&d, b)).background, Some(s.var("titlebar-hover")));
+        d.input(Input::Button { pressed: true });
+        assert_eq!(d.scene.style(bar(&d, b)).background, Some(s.var("titlebar-pressed")));
+        d.input(Input::Button { pressed: false });
+        assert!(!has(&d, bar(&d, b), "pressed"));
+    }
+
+    #[test]
+    fn holding_a_select_open_and_letting_go_on_an_item_chooses_it() {
+        let mut d = desk();
+        let w = open(&mut d, 7, widgets());
+        let select = global(&d, w, 6);
+        let at = center(&mut d, select);
+        // A click opens the list and leaves it open.
+        click(&mut d, at);
+        assert!(d.menu.is_some());
+        d.close_menu();
+        // Press, drag to the third item and let go: chosen.
+        d.input(Input::MotionTo { x: at.0, y: at.1 });
+        d.input(Input::Button { pressed: true });
+        let m = d.menu.as_ref().unwrap().rect;
+        d.input(Input::MotionTo { x: m.x + 20.0, y: m.y + 4.0 + 2.5 * ROW });
+        d.input(Input::Button { pressed: false });
+        assert!(d.menu.is_none());
+        assert_eq!(d.scene.node(select).unwrap().props["value"], "C");
+    }
+
+    #[test]
+    fn scroll_thumbs_drag_and_show_hover_while_mouse_drags_on_content_dont_scroll() {
+        let mut d = desk();
+        let (_, scroll) = scrolling(&mut d);
+        let (r, _) = d.scene.screen_rects()[&scroll];
+        // A mouse drag on the content leaves it where it is.
+        let mid = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        d.input(Input::MotionTo { x: mid.0, y: mid.1 });
+        d.input(Input::Button { pressed: true });
+        d.input(Input::MotionTo { x: mid.0, y: mid.1 - 100.0 });
+        d.input(Input::Button { pressed: false });
+        assert_eq!(prop(&d, scroll, "_scroll").as_f64().unwrap_or(0.0), 0.0);
+        // Over the thumb: it shows hover; dragging it to the bottom scrolls to the end.
+        let t = crate::draw::scroll_thumb(r, &d.scene.node(scroll).unwrap().props).unwrap();
+        d.input(Input::MotionTo { x: t.x + 2.0, y: t.y + 5.0 });
+        assert_eq!(prop(&d, scroll, "_thumb"), "hover");
+        d.input(Input::Button { pressed: true });
+        assert_eq!(prop(&d, scroll, "_thumb"), "active");
+        d.input(Input::MotionTo { x: t.x + 2.0, y: r.y + r.h + 50.0 });
+        d.input(Input::Button { pressed: false });
+        let extent = d.scroll_extent(scroll);
+        assert_eq!(prop(&d, scroll, "_scroll").as_f64().unwrap() as f32, extent);
+    }
+
+    #[test]
+    fn a_split_divider_shows_hover_and_a_resize_cursor() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "split", "props": {"ratio": 0.5}},
+                {"op": "create", "id": 3, "type": "vstack", "props": {}},
+                {"op": "create", "id": 4, "type": "vstack", "props": {}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0},
+                {"op": "insert", "parent": 2, "child": 4, "index": 1}
+            ]),
+        );
+        let split = global(&d, w, 2);
+        d.relayout();
+        let (r, _) = d.scene.screen_rects()[&split];
+        let divider = r.x + prop(&d, split, "_divider").as_f64().unwrap() as f32 + DIVIDER / 2.0;
+        d.input(Input::MotionTo { x: divider, y: r.y + 50.0 });
+        assert_eq!(d.cursor_shape(), Shape::ResizeEw);
+        let s = d.scene.style(split);
+        assert_eq!(s.border, Some(s.var("divider-hover")));
+        d.input(Input::MotionTo { x: r.x + 20.0, y: r.y + 50.0 });
+        assert_eq!(d.cursor_shape(), Shape::Arrow);
+        assert_eq!(d.scene.style(split).border, Some(s.var("control")));
     }
 }
 

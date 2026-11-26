@@ -111,6 +111,7 @@ const VISUAL: &[&str] = &[
     "_sel",
     "_scroll_x",
     "_hover",
+    "_thumb",
     "_active",
     "_content",
     "_divider",
@@ -407,10 +408,13 @@ impl Scene {
     /// Fade the colours that changed between each node's last style and its new
     /// one.
     fn fade_styles(&self, before: &HashMap<NodeId, Style>, after: &HashMap<NodeId, Style>) {
-        let duration = self.fade.replace(anim::STATE_FADE);
+        let fade = self.fade.replace(anim::STATE_FADE);
         let mut anim = self.anim.borrow_mut();
         for (id, new) in after {
             let Some(old) = before.get(id) else { continue };
+            // A press shows at once, as feedback should; letting go fades.
+            let pressed = self.nodes.get(id).and_then(|n| n.props.get("pressed")) == Some(&Value::Bool(true));
+            let duration = if pressed { std::time::Duration::ZERO } else { fade };
             let pairs = [
                 (StyleColor::Color, Some(old.color), Some(new.color)),
                 (StyleColor::Accent, Some(old.accent), Some(new.accent)),

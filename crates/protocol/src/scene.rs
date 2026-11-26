@@ -228,6 +228,11 @@ pub struct OpenWindowParams {
     /// 64 KiB; a sheet with a mistake fails `open_window`, saying where.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
+    /// The app's id, as its app-host says. Used only when the broker gave the
+    /// connection no app identity (an app run by hand on a Mac, with no session),
+    /// to match the window to edits of that app's style sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// A part of `open_window`'s streamed answer.

@@ -99,6 +99,9 @@ pub fn key_from_keysym(keysym: u32, utf32: u32) -> Option<Key> {
         0xff56 => Key::PageDown,
         _ => match char::from_u32(utf32) {
             Some(c) if !c.is_control() => Key::Char(c),
+            // With Ctrl held, xkb gives a control character (Ctrl-A is U+0001):
+            // the key is still the letter, for Ctrl-A and the like.
+            _ if (0x20..=0x7e).contains(&keysym) => Key::Char(char::from(keysym as u8)),
             _ => return None,
         },
     })
@@ -268,6 +271,8 @@ mod tests {
 
     #[test]
     fn keysyms_map_to_keys() {
+        // Ctrl-A: xkb gives U+0001, but the key is still `a`.
+        assert_eq!(key_from_keysym(0x61, 0x01), Some(Key::Char('a')));
         assert_eq!(key_from_keysym(0xff09, 0), Some(Key::Tab));
         assert_eq!(key_from_keysym(0xfe20, 0), Some(Key::Tab));
         assert_eq!(key_from_keysym(0xff51, 0), Some(Key::Left));

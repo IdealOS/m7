@@ -41,6 +41,7 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         timer: FrameTimer::default(),
         modifiers: ModifiersState::empty(),
         next_hud: Instant::now(),
+        cursor: crate::cursor::Shape::Arrow,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -65,6 +66,8 @@ struct App {
     timer: FrameTimer,
     modifiers: ModifiersState,
     next_hud: Instant,
+    /// The pointer image the window shows.
+    cursor: crate::cursor::Shape,
 }
 
 impl App {
@@ -79,6 +82,23 @@ impl App {
         let (_, outs) = self.desktop.input(input);
         if let Some(b) = &self.bridge {
             b.send(outs);
+        }
+        // The system cursor, in the shape the desktop wants (resize arrows at
+        // window edges and dividers).
+        let shape = self.desktop.cursor_shape();
+        if shape != self.cursor
+            && let Some(gpu) = &self.gpu
+        {
+            use crate::cursor::Shape;
+            use winit::window::CursorIcon;
+            gpu.window.set_cursor(match shape {
+                Shape::Arrow => CursorIcon::Default,
+                Shape::ResizeEw => CursorIcon::EwResize,
+                Shape::ResizeNs => CursorIcon::NsResize,
+                Shape::ResizeNwse => CursorIcon::NwseResize,
+                Shape::ResizeNesw => CursorIcon::NeswResize,
+            });
+            self.cursor = shape;
         }
         if self.desktop.scene.is_dirty()
             && let Some(gpu) = &self.gpu

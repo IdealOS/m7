@@ -43,8 +43,9 @@ struct Window {
     /// The frame (a root child) and the content area, as scene ids.
     frame: NodeId,
     content: NodeId,
-    /// The frame's own parts, which resizing moves.
-    parts: [NodeId; 5],
+    /// The frame's own parts, which resizing moves: background, title bar, its
+    /// filler (square bottom corners), the line under it, title, close, maximize.
+    parts: [NodeId; 7],
     /// The content area's size.
     size: (u32, u32),
     /// Where and how big it was before it was maximized.
@@ -180,11 +181,13 @@ impl Apps {
         }
         win.size = (w, h);
         let (fw, fh) = (w as f32, h as f32 + TITLE_BAR_HEIGHT);
-        let [bg, bar, title, close, max] = win.parts;
+        let [bg, bar, fill, line, title, close, max] = win.parts;
         scene.apply_all([
             set(win.frame, json!({"w": fw, "h": fh})),
             set(bg, json!({"w": fw, "h": fh})),
-            set(bar, json!({"w": fw})),
+            set(bar, json!({"w": fw - 2.0})),
+            set(fill, json!({"w": fw - 2.0})),
+            set(line, json!({"w": fw - 2.0})),
             set(title, json!({"w": (fw - 90.0).max(0.0)})),
             set(close, json!({"x": fw - 34.0})),
             set(max, json!({"x": fw - 62.0})),
@@ -208,6 +211,17 @@ impl Apps {
         };
         scene.apply(set(frame, json!({"x": x, "y": y})));
         self.resize(scene, window, w, h)
+    }
+
+    /// Whether window `window` is maximized.
+    pub fn is_maximized(&self, window: u64) -> bool {
+        self.windows.get(&window).is_some_and(|w| w.restore.is_some())
+    }
+
+    /// Window `window`'s title bar parts, which take its hover, pressed and active
+    /// states: the bar, its filler and the title.
+    pub fn title_parts(&self, window: u64) -> Option<[NodeId; 3]> {
+        self.windows.get(&window).map(|w| [w.parts[1], w.parts[2], w.parts[4]])
     }
 
     /// Window `window`'s content area, as a scene id.
@@ -266,7 +280,7 @@ impl Apps {
         let w = params.width.unwrap_or(DEFAULT_SIZE.0).clamp(80, 4096);
         let h = params.height.unwrap_or(DEFAULT_SIZE.1).clamp(40, 4096);
         let (x, y) = self.place(w as f32, h as f32 + TITLE_BAR_HEIGHT, screen);
-        let [frame, bg, bar, title, close, max, content] = std::array::from_fn(|_| self.alloc());
+        let [frame, bg, bar, fill, line, title, close, max, content] = std::array::from_fn(|_| self.alloc());
         let fw = w as f32;
         let ops = [
             create(
@@ -280,15 +294,28 @@ impl Apps {
                 NodeKind::Rect,
                 json!({"w": fw, "h": h as f32 + TITLE_BAR_HEIGHT, "color": "$surface", "radius": 10, "border_color": "$border", "border_width": 1}),
             ),
+            // The title bar, styled by the system sheet (`.titlebar`, with :hover,
+            // :pressed, and :focus while it's the active window): a rounded top,
+            // a filler squaring its bottom corners, and a line under it.
             create(
                 bar,
                 NodeKind::Rect,
-                json!({"w": fw, "h": TITLE_BAR_HEIGHT, "color": "$surface-alt", "radius": 10}),
+                json!({"x": 1, "y": 1, "w": fw - 2.0, "h": TITLE_BAR_HEIGHT - 1.0, "radius": 9, "class": "titlebar"}),
+            ),
+            create(
+                fill,
+                NodeKind::Rect,
+                json!({"x": 1, "y": TITLE_BAR_HEIGHT / 2.0, "w": fw - 2.0, "h": TITLE_BAR_HEIGHT / 2.0, "class": "titlebar"}),
+            ),
+            create(
+                line,
+                NodeKind::Rect,
+                json!({"x": 1, "y": TITLE_BAR_HEIGHT - 1.0, "w": fw - 2.0, "h": 1, "class": "titlebar-line"}),
             ),
             create(
                 title,
                 NodeKind::Text,
-                json!({"x": 14, "y": 10, "w": (fw - 90.0).max(0.0), "h": 18, "text": params.title, "size": 13, "weight": "bold", "color": "$text"}),
+                json!({"x": 14, "y": 10, "w": (fw - 90.0).max(0.0), "h": 18, "text": params.title, "size": 13, "weight": "bold", "class": "window-title"}),
             ),
             create(
                 close,
@@ -307,6 +334,8 @@ impl Apps {
             ),
             insert(frame, bg),
             insert(frame, bar),
+            insert(frame, fill),
+            insert(frame, line),
             insert(frame, title),
             insert(frame, close),
             insert(frame, max),
@@ -316,7 +345,7 @@ impl Apps {
         scene.apply_all(ops);
         self.targets.insert(close, Target::Close(window));
         self.targets.insert(max, Target::Max(window));
-        let parts = [bg, bar, title, close, max];
+        let parts = [bg, bar, fill, line, title, close, max];
         let win = Window {
             owner,
             request,
@@ -501,7 +530,7 @@ impl Apps {
 
     /// Window `window`'s close and maximize buttons.
     pub fn frame_buttons(&self, window: u64) -> Vec<NodeId> {
-        self.windows.get(&window).map(|w| vec![w.parts[3], w.parts[4]]).unwrap_or_default()
+        self.windows.get(&window).map(|w| vec![w.parts[5], w.parts[6]]).unwrap_or_default()
     }
 
     /// Whether `node` is a window's close or maximize button.
@@ -589,8 +618,13 @@ mod tests {
     }
 
     fn open(apps: &mut Apps, scene: &mut Scene, owner: Sender, request: u64) -> u64 {
-        let params =
-            OpenWindowParams { title: "Counter".into(), width: Some(300), height: Some(200), style: None };
+        let params = OpenWindowParams {
+            title: "Counter".into(),
+            width: Some(300),
+            height: Some(200),
+            style: None,
+            app: None,
+        };
         match apps.open(scene, owner, request, &params, (1280.0, 800.0)).event {
             WindowEvent::Opened { window, width, height } => {
                 assert_eq!((width, height), (300, 200));
@@ -689,7 +723,7 @@ mod tests {
         let before = scene.len();
         assert!(apps.close_request(&mut scene, 9));
         assert!(scene.node(frame).is_none());
-        assert_eq!(before - scene.len(), 7 + 3, "the frame's seven nodes and the app's three");
+        assert_eq!(before - scene.len(), 9 + 3, "the frame's nine nodes and the app's three");
         assert!(apps.is_empty() && apps.targets.is_empty() && apps.owners.is_empty());
         assert!(!apps.close_request(&mut scene, 9));
     }
@@ -765,7 +799,13 @@ mod tests {
         let mut scene = Scene::new();
         let mut apps = Apps::new();
         let spot = |apps: &mut Apps, scene: &mut Scene, n: u64| {
-            let p = OpenWindowParams { title: "w".into(), width: Some(300), height: Some(200), style: None };
+            let p = OpenWindowParams {
+                title: "w".into(),
+                width: Some(300),
+                height: Some(200),
+                style: None,
+                app: None,
+            };
             apps.open(scene, app(n), n, &p, (1000.0, 700.0));
             let w = apps.windows.values().max_by_key(|w| w.frame).unwrap();
             let r = scene.local_rect(w.frame).unwrap();

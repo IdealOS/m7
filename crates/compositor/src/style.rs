@@ -532,10 +532,13 @@ impl<'a> NodeInfo<'a> {
             .map(|c| c.split_whitespace().collect())
             .unwrap_or_default();
         let mut states = Vec::new();
+        // `_active` is a window title bar's while its window is the active one:
+        // `:focus` too, but without the focus ring a widget with `_focus` gets.
         for (key, state) in [
             ("_hover", State::Hover),
             ("pressed", State::Pressed),
             ("_focus", State::Focus),
+            ("_active", State::Focus),
             ("disabled", State::Disabled),
             ("checked", State::Checked),
         ] {

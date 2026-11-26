@@ -22,6 +22,13 @@ export interface Host {
     onEnd: (error?: RequestError) => void,
   ): () => void;
   exit(code?: number): void;
+  /** Which app this is, as app-host says. */
+  app?: string;
+}
+
+/** This app's id, if app-host said. */
+export function appId(): string | undefined {
+  return (globalThis as { __idealos?: Host }).__idealos?.app;
 }
 
 function host(): Host {

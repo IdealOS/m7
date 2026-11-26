@@ -1632,6 +1632,13 @@
     "OpenWindowParams": {
       "description": "Params of `open_window`.",
       "properties": {
+        "app": {
+          "description": "The app's id, as its app-host says. Used only when the broker gave the\nconnection no app identity (an app run by hand on a Mac, with no session),\nto match the window to edits of that app's style sheet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "height": {
           "format": "uint32",
           "minimum": 0,

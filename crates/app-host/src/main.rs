@@ -71,7 +71,8 @@ async fn run(mode: Mode) -> Result<ExitCode, String> {
         }
     };
     log::info!("app-host: running {name}");
-    Ok(match runtime::run(bus, &name, &source).await? {
+    let app = name.strip_suffix("/app.js").map(str::to_owned);
+    Ok(match runtime::run_app(bus, &name, &source, app.as_deref()).await? {
         Exit::Code(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Exit::Idle => ExitCode::SUCCESS,
         Exit::Failed(e) => {

@@ -30,8 +30,12 @@ pub enum Move {
     Right,
     WordLeft,
     WordRight,
+    /// The start and end of the whole text.
     Home,
     End,
+    /// The start and end of the caret's line (lines end at `\n`).
+    LineStart,
+    LineEnd,
     /// To a character index (a click, or up and down in a text area).
     To(usize),
 }
@@ -109,6 +113,20 @@ impl Edit {
             Move::Right => (self.caret + 1).min(len),
             Move::Home => 0,
             Move::End => len,
+            Move::LineStart => {
+                let mut i = self.caret;
+                while i > 0 && chars[i - 1] != '\n' {
+                    i -= 1;
+                }
+                i
+            }
+            Move::LineEnd => {
+                let mut i = self.caret;
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+                i
+            }
             Move::To(i) => i.min(len),
             Move::WordLeft => {
                 let mut i = self.caret;
@@ -173,6 +191,51 @@ impl Edit {
         }
     }
 
+    /// Delete from the caret to where `m` would move it (or the selection, if any).
+    pub fn delete_to(&mut self, m: Move) -> Option<Splice> {
+        if self.selection().is_none() {
+            let from = self.caret;
+            self.move_caret(m, false);
+            if self.caret == from {
+                return None;
+            }
+            self.anchor = Some(from);
+        }
+        Some(self.insert(""))
+    }
+
+    /// Emacs's Ctrl-K: delete to the end of the line, or the line break if the
+    /// caret is already there. Returns what went, to yank back.
+    pub fn kill_line(&mut self) -> Option<(String, Splice)> {
+        let from = self.caret;
+        self.move_caret(Move::LineEnd, false);
+        if self.caret == from {
+            self.move_caret(Move::Right, false);
+        }
+        if self.caret == from {
+            return None;
+        }
+        self.anchor = Some(from);
+        let killed = self.selected_text();
+        Some((killed, self.insert("")))
+    }
+
+    /// Emacs's Ctrl-T: swap the characters either side of the caret (the last two,
+    /// at the end of the text), leaving the caret after them.
+    pub fn transpose(&mut self) -> Option<Splice> {
+        let len = self.len();
+        if len < 2 || self.caret == 0 {
+            return None;
+        }
+        let at = if self.caret >= len { len - 2 } else { self.caret - 1 };
+        let chars: Vec<char> = self.text.chars().collect();
+        let swapped: String = [chars[at + 1], chars[at]].iter().collect();
+        self.caret = at;
+        self.anchor = Some(at + 2);
+        let s = self.insert(&swapped);
+        Some(s)
+    }
+
     /// Remove and return the selected text.
     pub fn cut(&mut self) -> Option<(String, Splice)> {
         let text = self.selected_text();
@@ -233,5 +296,37 @@ mod tests {
         assert_eq!(e.caret(), 7, "clamped to the end");
         e.set_text("ab");
         assert_eq!(e.caret(), 2);
+    }
+
+    #[test]
+    fn line_moves_kills_deletes_and_transposes() {
+        let mut e = Edit::new("one two\nthree four");
+        e.move_caret(Move::To(12), false); // in "three"
+        e.move_caret(Move::LineStart, false);
+        assert_eq!(e.caret(), 8);
+        e.move_caret(Move::LineEnd, false);
+        assert_eq!(e.caret(), 18);
+        e.move_caret(Move::To(4), false);
+        e.move_caret(Move::LineEnd, true);
+        assert_eq!(e.selected_text(), "two");
+        // Kill to the line's end, then the line break itself.
+        e.move_caret(Move::To(4), false);
+        assert_eq!(e.kill_line().unwrap().0, "two");
+        assert_eq!(e.kill_line().unwrap().0, "\n");
+        assert_eq!(e.text(), "one three four");
+        // Delete a word back, and to the line's start.
+        e.move_caret(Move::End, false);
+        e.delete_to(Move::WordLeft);
+        assert_eq!(e.text(), "one three ");
+        e.delete_to(Move::LineStart);
+        assert_eq!(e.text(), "");
+        assert!(e.delete_to(Move::LineStart).is_none());
+        // Transpose: the two characters either side, or the last two at the end.
+        let mut e = Edit::new("ab");
+        e.transpose();
+        assert_eq!((e.text(), e.caret()), ("ba", 2));
+        e.move_caret(Move::To(1), false);
+        e.transpose();
+        assert_eq!((e.text(), e.caret()), ("ab", 2));
     }
 }

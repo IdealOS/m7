@@ -308,7 +308,8 @@ rect({ x: () => (moved() ? 220 : 0), color: () => (moved() ? "#10b981" : "$accen
 - **What moves**: `x` and `y` (for nodes placed by them, not by a stack) and
   the colour props `color`, `text_color` and `border_color`, at most 5 seconds.
   The prop holds the end value at once; only what's drawn moves.
-- **Without asking**: style colours fade when a widget's state changes (120 ms)
+- **Without asking**: style colours fade when a widget's state changes (120 ms;
+  a press shows at once, and letting go fades)
   and when the theme switches (250 ms). Windows slide in on a workspace switch;
   new windows rise into place; menus and dialog backdrops fade in.
 - Colours move in Oklab. A value set again mid-way moves on from where it is.
@@ -319,9 +320,17 @@ rect({ x: () => (moved() ? 220 : 0), color: () => (moved() ? "#10b981" : "$accen
 
 The system's variables: `--desktop`, `--surface`, `--surface-alt`, `--border`,
 `--text`, `--muted`, `--accent`, `--accent-text`, `--control`,
-`--control-hover`, `--control-pressed`, `--control-border`, `--focus`,
+`--control-hover`, `--control-pressed` (a control held down), `--control-border`,
+`--track` (a toggle that's off, a slider beyond its value), `--track-hover`,
+`--titlebar`, `--titlebar-active`, `--titlebar-hover`, `--titlebar-pressed`,
+`--scrollbar-hover`, `--scrollbar-active`, `--divider-hover`, `--focus`,
 `--selection`, `--danger`, `--backdrop`, `--bar`, `--scrim`, `--scrollbar`,
 `--terminal`, `--terminal-text`, `--terminal-cursor`.
+
+Window title bars are styled by the classes `.titlebar` (the bar: `:focus` while
+its window is active, `:hover`, and `:pressed` while it's dragged), `.titlebar-line`
+(the line under it) and `.window-title` (`:focus` too), so edits to the system
+sheet can restyle them; an app's own sheet can't reach them.
 
 ## The app SDK
 
