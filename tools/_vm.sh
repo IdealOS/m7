@@ -2,6 +2,8 @@
 VM=idealos-build
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SSH_CONFIG="$HOME/.lima/$VM/ssh.config"
+# 2026.08 or newer: the 2026.02 LTS branch ships Rust 1.88, older than the workspace needs.
+BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.08.2}"
 
 vm_require() {
 	command -v limactl >/dev/null || { echo "Lima is not installed. Run: brew install lima"; exit 1; }

@@ -1,11 +1,21 @@
 # Raspberry Pi 4 (64-bit), booted by the Pi firmware from the SD card.
 BR2_aarch64=y
 BR2_cortex_a72=y
-BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
-# Kernel headers come from the kernel below, so Buildroot must be told its series;
-# otherwise it assumes 2.6 headers, falls back to uClibc and drops the Rust packages.
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
-BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# The cross-toolchain (GCC 15, glibc, Linux 6.12 headers) is built once and shared by
+# every board: tools/build-toolchain installs it in the build VM. Building it in each
+# board's tree cost ~7 GB apiece and much of a fresh build. Changing it means
+# rebuilding every board from scratch: tools/build-image BOARD clean all.
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
+BR2_TOOLCHAIN_EXTERNAL_PREINSTALLED=y
+BR2_TOOLCHAIN_EXTERNAL_PATH="$(HOME)/toolchains/idealos-aarch64"
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="aarch64-buildroot-linux-gnu"
+BR2_TOOLCHAIN_EXTERNAL_GCC_15=y
+BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y
+BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y
+BR2_TOOLCHAIN_EXTERNAL_CXX=y
+# glibc dropped Sun RPC (it lives in libtirpc now); Buildroot checks this claim.
+# BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_IDEALOS_PATH)/board/common/patches"
 
 BR2_TARGET_GENERIC_HOSTNAME="idealos"

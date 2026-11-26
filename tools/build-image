@@ -11,8 +11,6 @@ case "$BOARD" in
 	rpi4) DEFCONFIG=rpi4_idealos_defconfig ;;
 	*) echo "unknown board: $BOARD"; exit 2 ;;
 esac
-# 2026.08 or newer: the 2026.02 LTS branch ships Rust 1.88, older than the workspace needs.
-BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.08.2}"
 
 # Dev images let root log in over SSH with this key (tools/deploy-to-pi uses it).
 # The private half stays on this Mac; post-build.sh installs the public half.
@@ -27,6 +25,8 @@ cp "$KEY.pub" "$REPO/image/board/common/dev-key.pub"
 node "$REPO/tools/build-app.ts" "$REPO"/apps/*/
 
 vm_require
+# Every board builds with the shared cross-toolchain; make it first if it's missing.
+vm_run "[ -x ~/toolchains/idealos-aarch64/bin/aarch64-buildroot-linux-gnu-gcc ]" || "$REPO/tools/build-toolchain"
 vm_sync
 # Source downloads live outside the Buildroot tree so they survive version bumps.
 # idealos-userspace is a local package: Buildroot copies it once and never notices

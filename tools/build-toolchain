@@ -1,0 +1,40 @@
+#!/bin/sh
+# Build the cross-toolchain every board's image uses, once, in the idealos-build VM,
+# and install it at ~/toolchains/idealos-aarch64 (GCC 15, glibc, Linux 6.12 headers).
+# The board configs point at it as an external toolchain, so a board build doesn't
+# build GCC itself. Takes about half an hour; tools/build-image runs it when the
+# toolchain is missing.
+# Usage: tools/build-toolchain [--force]   (--force rebuilds an existing toolchain)
+#
+# Changing the toolchain means rebuilding every board from scratch (a board's build
+# tree records the compiler it was built with): `tools/build-image BOARD clean all`.
+set -eu
+. "$(dirname "$0")/_vm.sh"
+FORCE=0
+[ "${1:-}" = --force ] && FORCE=1
+vm_require
+vm_sync
+vm_run "set -e
+	cd ~
+	DEST=toolchains/idealos-aarch64
+	if [ -x \$DEST/bin/aarch64-buildroot-linux-gnu-gcc ] && [ $FORCE = 0 ]; then
+		echo \"Toolchain already in ~/\$DEST (--force rebuilds it)\"
+		exit 0
+	fi
+	export BR2_DL_DIR=\$HOME/br-dl
+	if [ ! -d buildroot-$BUILDROOT_VERSION ]; then
+		wget -q https://buildroot.org/downloads/buildroot-$BUILDROOT_VERSION.tar.gz
+		tar xf buildroot-$BUILDROOT_VERSION.tar.gz
+	fi
+	make -C buildroot-$BUILDROOT_VERSION O=\$HOME/out/toolchain BR2_EXTERNAL=\$HOME/idealos/image toolchain_aarch64_idealos_defconfig
+	make -C \$HOME/out/toolchain sdk
+	# The SDK rewrites its paths for wherever it lands (relocate-sdk.sh), so unpack
+	# it beside the old one, move it into place, then relocate it there.
+	rm -rf \$DEST.new && mkdir -p \$DEST.new
+	tar xzf out/toolchain/images/*_sdk-buildroot.tar.gz -C \$DEST.new --strip-components=1
+	rm -rf \$DEST && mv \$DEST.new \$DEST
+	\$DEST/relocate-sdk.sh
+	\$DEST/bin/aarch64-buildroot-linux-gnu-gcc --version | head -1
+	# The toolchain's build tree is what this saves the boards from keeping.
+	rm -rf out/toolchain
+	echo \"Toolchain in ~/\$DEST\""
