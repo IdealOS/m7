@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench text-bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps app-host protocol tools-check style-watch
+.PHONY: hosted bench text-bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps app-host protocol tools-check style-watch style-export
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -106,3 +106,6 @@ pi-state:          ## make pi-state HOST=192.168.1.50: services, power, network,
 
 pi-report:         ## make pi-report HOST=idealos.local: hardware report and Spike A-D numbers
 	tools/pi-report $(HOST) $(or $(PORT),22)
+
+style-export:      ## Write the system style into a gallery page to edit in a browser (EDITS=file OUT=file)
+	node tools/style-export.ts $(EDITS) -o $(or $(OUT),style.html)
