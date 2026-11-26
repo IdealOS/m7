@@ -1,0 +1,76 @@
+#!/bin/sh
+# The state of this device: the board, power and heat, memory and storage, the
+# services session runs (and any it gave up on), the network, the display, kernel
+# warnings and the end of session's log. Changes nothing. tools/pi-state runs this
+# checkout's copy over SSH; at the console, run it here.
+# Usage: system-state [LINES]   (lines of session's log, default 40)
+LINES="${1:-40}"
+LOG=/data/log/session.log
+section() { printf '\n## %s\n\n' "$1"; }
+# The newest stamped line in the log matching $1, without the stamp.
+last() { [ -f "$LOG" ] && grep -E "$1" "$LOG" | tail -1 | sed 's/^\[[^]]*\] //'; }
+
+section System
+printf 'board:   %s\n' "$(tr -d '\0' </proc/device-tree/model 2>/dev/null || uname -m)"
+printf 'kernel:  %s\n' "$(uname -r)"
+printf 'up:      %s\n' "$(uptime | sed 's/^ *//')"
+printf 'clock:   %s (wrong until something sets it: no network time yet)\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+[ -e /etc/idealos/dev-image ] && echo 'image:   dev (SSH, writable /opt/idealos overlay)'
+
+section 'Power and heat'
+f=/sys/devices/system/cpu/cpu0/cpufreq
+[ -d $f ] && printf 'cpu:     %s of %s MHz (%s)\n' "$(($(cat $f/scaling_cur_freq) / 1000))" "$(($(cat $f/scaling_max_freq) / 1000))" "$(cat $f/scaling_governor)"
+t=/sys/class/thermal/thermal_zone0/temp
+[ -r $t ] && printf 'temp:    %s °C\n' "$(($(cat $t) / 1000))"
+n=$(dmesg | grep -ci 'undervoltage detected')
+printf 'undervoltage: %s since boot%s\n' "$n" "$([ "$n" -gt 0 ] && dmesg | grep -i 'undervoltage detected' | tail -1 | sed 's/^\[ *\([0-9.]*\)\].*/, last at \1 s/')"
+
+section 'Memory and storage'
+free -m | sed -n '1,2p'
+df -h / /data 2>/dev/null
+
+section Services
+# session's children; apps are app-host processes.
+s=$(pidof session || true)
+if [ -z "$s" ]; then
+	echo 'session is not running'
+else
+	# start-session prefers /data/session.conf on dev images; it masks image updates.
+	conf=$(tr '\0' ' ' </proc/"$s"/cmdline | awk '{print $2}')
+	echo "config: $conf"
+	[ "$conf" = /data/session.conf ] && ! cmp -s /data/session.conf /etc/idealos/session.conf &&
+		echo "        (differs from the image's /etc/idealos/session.conf)"
+	echo
+	ps -o pid,ppid,stat,rss,args | awk -v s="$s" 'NR == 1 || $1 == s || $2 == s'
+	echo
+	top -b -n 1 | sed -n '/^ *PID/,$p' | head -6
+	echo
+	if [ -f "$LOG" ]; then
+		# Since session last started.
+		since=$(grep -n -- '--- session started' "$LOG" | tail -1 | cut -d: -f1)
+		tail -n +"${since:-1}" "$LOG" >/tmp/pi-state.$$
+		echo "since session started: $(grep -c 'session: started ' /tmp/pi-state.$$) starts, $(grep -c ' exited (' /tmp/pi-state.$$) exits"
+		grep -E 'not restarting it|cannot ' /tmp/pi-state.$$ | sed 's/^\[[^]]*\] /PROBLEM /' | tail -10
+		rm -f /tmp/pi-state.$$
+	fi
+fi
+
+section Network
+osctl bus call net status 2>&1 || true
+ip -o -4 addr | awk '{print $2, $4}'
+ip route | grep '^default' || echo 'no default route'
+
+section Display
+for c in /sys/class/drm/card*-*; do
+	[ -f "$c/status" ] || continue
+	printf '%s: %s %s\n' "${c##*/}" "$(cat "$c/status")" "$(head -1 "$c/modes" 2>/dev/null)"
+done
+k=$(last 'kms: .* @ [0-9]+ Hz')
+[ -n "$k" ] && echo "compositor: ${k#*kms: }"
+
+section 'Kernel warnings (dmesg)'
+# Leaving out the notice every staging driver prints when it loads.
+dmesg | grep -iE 'error|fail|warn|undervolt|timed out' | grep -v 'staging directory' | tail -15 || echo none
+
+section "Session log (last $LINES lines of $LOG)"
+if [ -f "$LOG" ]; then tail -n "$LINES" "$LOG"; else echo "no $LOG (this image predates the log, or /data isn't mounted)"; fi

@@ -53,6 +53,8 @@ const GOOD = [
   "SMOKE pty-open 1",
   "SMOKE m7-apps 3",
   "SMOKE wifi-preset ok",
+  "SMOKE session-log ok",
+  "SMOKE console-tty ok",
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.notes", conn: 10 }: "Notes"',
   "SMOKE end",

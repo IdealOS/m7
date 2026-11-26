@@ -6,15 +6,21 @@
 //! namespace unless it holds the `network` grant, Landlock and seccomp.
 //! `IDEALOS_NO_SANDBOX=1` turns sandboxes off, for debugging only.
 //!
-//! Config format, one service per line, with an optional `bus=` setting:
+//! Config format, one service per line, with optional `console` and `bus=` settings:
 //!
 //! ```text
-//! # name       restart   [bus=ROLE]          command...
-//! bus          always    bus=broker          /usr/bin/busd
-//! shell        always                        /bin/sh -l
-//! compositor   always    bus=system          /usr/bin/compositor --backend kms
-//! notes        always    bus=app:org.x.notes /usr/bin/app-host notes
+//! log          /data/log/session.log
+//! # name       restart   [console] [bus=ROLE]  command...
+//! bus          always    bus=broker            /usr/bin/busd
+//! shell        always    console               /bin/sh -l
+//! compositor   always    bus=system            /usr/bin/compositor --backend kms
+//! notes        always    bus=app:org.x.notes   /usr/bin/app-host notes
 //! ```
+//!
+//! `log PATH` keeps everything session and its services print in PATH as well as
+//! on the console (see `log.rs`). A `console` service writes to the console
+//! directly instead, as an interactive shell must. Without `log`, every service
+//! writes to the console directly.
 //!
 //! `bus=broker` marks the broker, which gets session's own connection and is
 //! started before the services that need it. `bus=system` and `bus=app:ID` services
@@ -45,6 +51,7 @@ macro_rules! say {
 }
 
 mod bus;
+mod log;
 mod sandbox;
 
 use std::os::unix::process::CommandExt;
@@ -90,8 +97,17 @@ enum Restart {
 struct ServiceSpec {
     name: String,
     restart: Restart,
+    /// Writes to the console itself, not through the log (an interactive shell).
+    console: bool,
     bus: bus::Role,
     argv: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Config {
+    /// Where to keep a copy of everything printed, if anywhere.
+    log: Option<std::path::PathBuf>,
+    services: Vec<ServiceSpec>,
 }
 
 struct Service {
@@ -211,6 +227,7 @@ fn apply_request(
                     let spec = ServiceSpec {
                         name: app.clone(),
                         restart: Restart::Always,
+                        console: false,
                         bus: bus::Role::App(app),
                         argv,
                     };
@@ -261,14 +278,25 @@ fn valid_app_id(id: &str) -> bool {
         && id.split('.').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
-fn parse_config(text: &str) -> Result<Vec<ServiceSpec>, String> {
+fn parse_config(text: &str) -> Result<Config, String> {
     let mut specs = Vec::new();
+    let mut log = None;
     for (n, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
         let mut words = line.split_whitespace();
+        if let Some(rest) = line.strip_prefix("log").filter(|r| r.starts_with(char::is_whitespace)) {
+            let path = rest.trim();
+            if !path.starts_with('/') || path.contains(char::is_whitespace) {
+                return Err(format!("line {}: expected `log /absolute/path`", n + 1));
+            }
+            if log.replace(std::path::PathBuf::from(path)).is_some() {
+                return Err(format!("line {}: only one log", n + 1));
+            }
+            continue;
+        }
         let (Some(name), Some(restart)) = (words.next(), words.next()) else {
             return Err(format!("line {}: expected `name restart command...`", n + 1));
         };
@@ -278,14 +306,18 @@ fn parse_config(text: &str) -> Result<Vec<ServiceSpec>, String> {
             other => return Err(format!("line {}: restart must be always or never, not {other}", n + 1)),
         };
         let mut words = words.peekable();
-        let role = match words.peek().and_then(|w| w.strip_prefix("bus=")) {
-            Some(role) => {
-                let role = bus::Role::parse(role).map_err(|e| format!("line {}: {e}", n + 1))?;
-                words.next();
-                role
+        let mut console = false;
+        let mut role = bus::Role::None;
+        loop {
+            match words.peek() {
+                Some(&"console") => console = true,
+                Some(w) if w.starts_with("bus=") => {
+                    role = bus::Role::parse(&w["bus=".len()..]).map_err(|e| format!("line {}: {e}", n + 1))?
+                }
+                _ => break,
             }
-            None => bus::Role::None,
-        };
+            words.next();
+        }
         let argv: Vec<String> = words.map(str::to_owned).collect();
         if argv.is_empty() {
             return Err(format!("line {}: missing command", n + 1));
@@ -296,9 +328,9 @@ fn parse_config(text: &str) -> Result<Vec<ServiceSpec>, String> {
         if role == bus::Role::Broker && specs.iter().any(|s: &ServiceSpec| s.bus == bus::Role::Broker) {
             return Err(format!("line {}: only one service can be bus=broker", n + 1));
         }
-        specs.push(ServiceSpec { name: name.to_owned(), restart, bus: role, argv });
+        specs.push(ServiceSpec { name: name.to_owned(), restart, console, bus: role, argv });
     }
-    Ok(specs)
+    Ok(Config { log, services: specs })
 }
 
 /// Next backoff after a crash: reset if the service had been healthy, else double.
@@ -309,7 +341,7 @@ fn next_backoff(current: Duration, ran_for: Duration) -> Duration {
 impl Service {
     /// Start the service, with its bus connection if it has one. Starting the
     /// broker replaces `link`.
-    fn start(&mut self, link: &mut Option<bus::Link>) {
+    fn start(&mut self, link: &mut Option<bus::Link>, log: Option<&log::Log>) {
         let mut new_link = None;
         let inherit = match &self.spec.bus {
             bus::Role::None => None,
@@ -337,6 +369,17 @@ impl Service {
         };
         let mut cmd = Command::new(&self.spec.argv[0]);
         cmd.args(&self.spec.argv[1..]);
+        // Everything else inherits session's stdout and stderr: the log's pipe.
+        if self.spec.console
+            && let Some(log) = log
+        {
+            match (log.console(), log.console()) {
+                (Ok(out), Ok(err)) => {
+                    cmd.stdout(out).stderr(err);
+                }
+                (Err(e), _) | (_, Err(e)) => say!("{}: no console of its own: {e}", self.spec.name),
+            }
+        }
         let sandbox = match &self.spec.bus {
             bus::Role::App(app) if std::env::var_os("IDEALOS_NO_SANDBOX").is_none() => {
                 let network = link.as_ref().is_some_and(|l| l.has_network(app));
@@ -470,9 +513,20 @@ fn main() {
         say!("cannot read {path}: {e}; falling back to a shell");
         "shell always /bin/sh -l\n".to_owned()
     });
-    let specs = parse_config(&text).unwrap_or_else(|e| {
+    let config = parse_config(&text).unwrap_or_else(|e| {
         say!("{path}: {e}");
         std::process::exit(1);
+    });
+    let specs = config.services;
+    let log = config.log.and_then(|path| match log::Log::start(&path) {
+        Ok(log) => {
+            say!("logging to {}", path.display());
+            Some(log)
+        }
+        Err(e) => {
+            say!("cannot log to {}: {e}; the console only", path.display());
+            None
+        }
     });
 
     install_sigterm_handler();
@@ -491,6 +545,9 @@ fn main() {
         if STOP.load(Ordering::Relaxed) {
             say!("SIGTERM, stopping services");
             stop_all(&mut services);
+            if let Some(log) = log {
+                log.finish();
+            }
             return;
         }
         if link.as_mut().is_some_and(|l| !l.poll()) {
@@ -549,7 +606,7 @@ fn main() {
                 // without the connection it needs.
                 && !(svc.spec.bus.adopted() && has_broker && link.is_none())
             {
-                svc.start(&mut link);
+                svc.start(&mut link, log.as_ref());
                 svc.launched = true;
             }
         }
@@ -571,7 +628,8 @@ mod tests {
         let specs = parse_config(
             "# comment\n\nshell always /bin/sh -l\ncompositor never /usr/bin/compositor --backend kms # trailing\n",
         )
-        .unwrap();
+        .unwrap()
+        .services;
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].argv, ["/bin/sh", "-l"]);
         assert_eq!(specs[1].restart, Restart::Never);
@@ -583,7 +641,8 @@ mod tests {
         let specs = parse_config(
             "bus always bus=broker /usr/bin/busd\nnotes always bus=app:org.x.notes app-host notes\nshell always /bin/sh\n",
         )
-        .unwrap();
+        .unwrap()
+        .services;
         assert_eq!(specs[0].bus, bus::Role::Broker);
         assert_eq!(specs[0].argv, ["/usr/bin/busd"]);
         assert_eq!(specs[1].bus, bus::Role::App("org.x.notes".into()));
@@ -592,6 +651,26 @@ mod tests {
         assert!(parse_config("x always bus=root /bin/x").is_err());
         assert!(parse_config("x always bus=system").is_err(), "a role is not a command");
         assert!(parse_config("a always bus=broker a\nb always bus=broker b").is_err());
+    }
+
+    #[test]
+    fn parses_the_log_and_console_services() {
+        let config = parse_config(
+            "log /data/log/session.log\nshell always console /bin/sh -l\nui always console bus=system /bin/ui\nbus always bus=broker /usr/bin/busd\n",
+        )
+        .unwrap();
+        assert_eq!(config.log, Some("/data/log/session.log".into()));
+        let s = &config.services;
+        assert!(s[0].console && s[0].bus == bus::Role::None);
+        assert_eq!(s[0].argv, ["/bin/sh", "-l"]);
+        assert!(s[1].console && s[1].bus == bus::Role::System);
+        assert!(!s[2].console);
+        assert_eq!(parse_config("shell always /bin/sh").unwrap().log, None);
+        // A service may still be called log-something.
+        assert_eq!(parse_config("logger always /bin/logger").unwrap().services[0].name, "logger");
+        assert!(parse_config("log data/session.log").is_err(), "relative path");
+        assert!(parse_config("log").is_err());
+        assert!(parse_config("log /a\nlog /b").is_err());
     }
 
     #[test]
@@ -678,7 +757,7 @@ mod tests {
     }
 
     fn service(name: &str) -> Service {
-        let spec = parse_config(&format!("{name} always /bin/false")).unwrap().remove(0);
+        let spec = parse_config(&format!("{name} always /bin/false")).unwrap().services.remove(0);
         Service::new(spec, Instant::now())
     }
 

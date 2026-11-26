@@ -1,0 +1,29 @@
+#!/bin/sh
+# Print the state of a running dev image over SSH: the board, power and heat, memory
+# and storage, the services session runs (and any it gave up on), the network, the
+# display, kernel warnings and the end of session's log. Changes nothing on the device.
+# Usage: tools/pi-state HOST [PORT] [--log N]   (N lines of session's log, default 40)
+#   Pi:   tools/pi-state 192.168.1.50   (its address: Settings → Network)
+#   QEMU: tools/pi-state localhost 2222
+# The whole log is /data/log/session.log (and session.log.1) on the device.
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+HOST="${1:?usage: tools/pi-state HOST [PORT] [--log N]}"
+PORT=22
+LINES=40
+shift
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--log) LINES="${2:?--log needs a number}"; shift ;;
+		*[!0-9]* | "") echo "unknown argument $1"; exit 2 ;;
+		*) PORT="$1" ;;
+	esac
+	shift
+done
+case "$LINES" in *[!0-9]* | "") echo "--log needs a number"; exit 2 ;; esac
+. "$REPO/tools/_device.sh"
+
+SCRIPT="$REPO/image/board/common/rootfs-overlay/usr/libexec/idealos/system-state"
+# Copy the script over first, so nothing it runs can read the rest of it from stdin.
+# This checkout's copy, so a change needs no reflash.
+remote "cat > /tmp/system-state && sh /tmp/system-state $LINES" <"$SCRIPT"

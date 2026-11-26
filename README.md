@@ -60,6 +60,7 @@ tools/flash-sd /dev/diskN rpi3 MyWifi   # ...and preset that network without ask
 tools/sd-wifi /dev/diskN [SSID [PASSWORD]]   # preset Wi-Fi on a flashed card: the Pi joins it on its next boot
 make deploy HOST=192.168.1.50           # rebuild and push binaries and apps to a running dev image
 make deploy HOST=localhost PORT=2222   # ...or to QEMU
+make pi-state HOST=192.168.1.50         # what's running, power, network, display, kernel warnings, session's log
 make pi-report HOST=192.168.1.50        # hardware report + Spike A-D numbers -> image/output/reports
 ```
 
@@ -89,6 +90,20 @@ cards and connectors, Vulkan drivers and input devices, then stops the desktop t
 kms-probe with two and three buffers (Spikes A/B), runs the compositor flat out for
 10 s, runs both benchmarks (Spikes C and D), and restores the desktop. A copy stays
 on the device in `/data/reports`.
+
+To see what a running device is doing, run `make pi-state`, or `system-state` at its
+console (`/usr/libexec/idealos`). It changes nothing. It shows:
+
+- the board, CPU clock, temperature and any undervoltage;
+- memory and storage;
+- session's services, and any it gave up on;
+- the network and the display;
+- kernel warnings;
+- the end of session's log.
+
+That log, `/data/log/session.log`, holds everything session and its services print,
+stamped with seconds since boot like `dmesg`. It moves to `session.log.1` at 1 MiB.
+The console shell writes to the screen directly.
 
 ## Layout
 
@@ -126,7 +141,7 @@ docs/               feature list, implementation plan, screenshots
 | Window manager v0: raise on click, drag by title bar, Alt+Tab | Done, tested. Both backends feed one `Seat`, so mouse, tablet and keyboard drive the same code. |
 | Damage tracking | Frame-level only: an idle scene draws nothing. Region damage is still to do. |
 | Headless render to PNG | Done (screenshots, future golden-image tests) |
-| `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. Gives up on a service that fails 5 times in a row without running a minute (a missing driver won't fix itself, and the restarts would bury the console shell); `launch` retries an app, and restarting session retries everything. |
+| `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. Gives up on a service that fails 5 times in a row without running a minute (a missing driver won't fix itself, and the restarts would bury the console shell); `launch` retries an app, and restarting session retries everything. With `log PATH` in `session.conf`, everything session and its services print also goes to that file, stamped with the time since boot (the image: `/data/log/session.log`, readable by root only, capped at two 1 MiB files); `console` services, such as the console shell, keep the terminal. Tested end to end on macOS and on a Pi 3B+. |
 | Bundled UI font | Done: Inter (variable, SIL OFL) is built into the compositor as the sans-serif face on every target; system fonts are only fallbacks for other scripts. |
 | Images, transforms beyond translation | Not started. |
 | KMS backend | **Output and input work** (M1): `compositor --backend kms` draws the scene with three page-flipped dumb buffers (Spike A's copy path), redraws only when the scene changes, and takes keyboard and pointer input through libinput and xkbcommon. The pointer is a hardware cursor, so moving it costs no redraw (checked by eye in QEMU's window; screendumps leave it out). It picks the first DRM card with a connected display (on a Pi 4, `vc4`, not `v3d`). While it runs, the text console's keyboard and drawing are off, so keys don't also reach the console (on the Pi, a root shell); it exits cleanly on SIGTERM and gives them back. Mesa's shader cache lives on `/data/cache`. Not yet: the zero-copy Pi path (Spike B). |

@@ -73,6 +73,10 @@ export const GUEST_SCRIPT = [
   // NetworkManager loads, with the name and password intact: spaces and a backslash
   // need escaping in a keyfile. QEMU has no Wi-Fi device, but the profile still loads.
   String.raw`printf 'ssid= Smoke\\Net \npassword=pass word\\1\n' >/tmp/w.txt; /usr/libexec/idealos/import-wifi /tmp/w.txt /etc/NetworkManager/system-connections >/dev/null; D="dbus-send --system --print-reply --dest=org.freedesktop.NetworkManager"; S=/org/freedesktop/NetworkManager/Settings; $D $S org.freedesktop.NetworkManager.Settings.ReloadConnections >/dev/null; w=none; for c in $($D $S org.freedesktop.NetworkManager.Settings.ListConnections | grep -o "$S/[0-9]*"); do $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSettings | grep -qF ' Smoke\Net ' && w=found && $D $c org.freedesktop.NetworkManager.Settings.Connection.GetSecrets string:802-11-wireless-security | grep -qF 'pass word\1' && w=ok; done; echo SMOKE wifi-preset $w`,
+  // session keeps what it and the services print in /data/log/session.log (for
+  // reading over SSH), stamped like dmesg; the console shell keeps the terminal.
+  String.raw`grep -q "^\[ *[0-9]*\.[0-9]*\] session: started compositor" /data/log/session.log && grep -q "^\[.*\] .*kms: first frame on screen" /data/log/session.log && echo SMOKE session-log ok`,
+  "[ -t 1 ] && [ -t 2 ] && echo SMOKE console-tty ok",
   "echo SMOKE end",
 ];
 
@@ -174,6 +178,8 @@ export function evaluate(log: string): Check[] {
     fact("pty-open", "1", "ptyd opened a shell session"),
     fact("m7-apps", "3", "Settings, Documents and Terminal are installed"),
     fact("wifi-preset", "ok", "NetworkManager loaded a Wi-Fi preset with its name and password intact"),
+    fact("session-log", "ok", "session kept the services' output in /data/log/session.log, stamped"),
+    fact("console-tty", "ok", "the console shell writes to the terminal, not the log"),
     {
       name: "the apps opened their windows under their own ids",
       ok: ["org.idealos.counter", "org.idealos.notes"].every((id) =>
