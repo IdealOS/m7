@@ -61,6 +61,10 @@ const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A service that stays up this long is considered healthy again.
 const HEALTHY_AFTER: Duration = Duration::from_secs(60);
+/// Stop restarting a service that fails this many times in a row without becoming
+/// healthy: a missing driver or a bad binary won't fix itself, and the restarts'
+/// output would bury the console shell needed to find out why.
+const GIVE_UP_AFTER: u32 = 5;
 /// How long services get to exit after SIGTERM before they are killed.
 /// Interactive shells ignore SIGTERM, so the shell always takes this long.
 const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -102,6 +106,11 @@ struct Service {
     relaunch: bool,
     /// Forget it once it exits (a stopped app).
     removed: bool,
+    /// Failures in a row since it was last healthy.
+    failures: u32,
+    /// Failed `GIVE_UP_AFTER` times in a row: not restarted until a `launch`
+    /// request or a new session.
+    given_up: bool,
 }
 
 impl Service {
@@ -115,6 +124,8 @@ impl Service {
             next_start: now,
             relaunch: false,
             removed: false,
+            failures: 0,
+            given_up: false,
         }
     }
 }
@@ -185,6 +196,8 @@ fn apply_request(
                     let svc = &mut services[i];
                     svc.backoff = Duration::ZERO;
                     svc.next_start = now;
+                    svc.failures = 0;
+                    svc.given_up = false;
                     if svc.child.is_some() {
                         svc.relaunch = true;
                         (Ok(Value::Null), Action::Terminate(i))
@@ -394,7 +407,19 @@ impl Service {
         }
     }
 
+    /// After a failure (`ran_for` is how long it was up): schedule the next start
+    /// with backoff, or give up once it has failed `GIVE_UP_AFTER` times in a row.
     fn schedule_restart(&mut self, ran_for: Duration) {
+        self.failures = if ran_for >= HEALTHY_AFTER { 1 } else { self.failures + 1 };
+        if self.failures >= GIVE_UP_AFTER {
+            self.given_up = true;
+            say!(
+                "{} failed {} times in a row; not restarting it. To try again: kill $(pidof session)",
+                self.spec.name,
+                self.failures
+            );
+            return;
+        }
         self.backoff = next_backoff(self.backoff, ran_for);
         self.next_start = Instant::now() + self.backoff;
     }
@@ -518,6 +543,7 @@ fn main() {
                 }
             } else if Instant::now() >= svc.next_start
                 && !svc.removed
+                && !svc.given_up
                 && (svc.spec.restart == Restart::Always || !svc.launched)
                 // A bus service waits while the broker is down, rather than start
                 // without the connection it needs.
@@ -649,5 +675,53 @@ mod tests {
         }
         assert_eq!(b, MAX_BACKOFF);
         assert_eq!(next_backoff(b, HEALTHY_AFTER), MIN_BACKOFF);
+    }
+
+    fn service(name: &str) -> Service {
+        let spec = parse_config(&format!("{name} always /bin/false")).unwrap().remove(0);
+        Service::new(spec, Instant::now())
+    }
+
+    #[test]
+    fn gives_up_after_repeated_quick_failures() {
+        // A compositor with no display device fails at once, every time.
+        let mut svc = service("compositor");
+        for n in 1..GIVE_UP_AFTER {
+            svc.schedule_restart(Duration::from_millis(50));
+            assert!(!svc.given_up, "still retrying after {n} failures");
+        }
+        svc.schedule_restart(Duration::from_millis(50));
+        assert!(svc.given_up);
+    }
+
+    #[test]
+    fn a_healthy_run_resets_the_failure_count() {
+        let mut svc = service("compositor");
+        for _ in 1..GIVE_UP_AFTER {
+            svc.schedule_restart(Duration::from_millis(50));
+        }
+        // Up for a while, then a crash: the first failure of a new streak.
+        svc.schedule_restart(HEALTHY_AFTER);
+        assert_eq!(svc.failures, 1);
+        assert!(!svc.given_up);
+    }
+
+    #[test]
+    fn launch_restarts_an_app_session_gave_up_on() {
+        let now = Instant::now();
+        let mut services = Vec::new();
+        let host = vec!["app-host".to_string()];
+        let launch = serde_json::json!({"app": "org.idealos.notes"});
+        let (r, _) = apply_request(&mut services, tool().as_ref(), "launch", launch.clone(), &host, now);
+        assert!(r.is_ok());
+        for _ in 0..GIVE_UP_AFTER {
+            services[0].schedule_restart(Duration::from_millis(50));
+        }
+        assert!(services[0].given_up);
+        let (r, a) = apply_request(&mut services, tool().as_ref(), "launch", launch, &host, now);
+        assert_eq!((r, a), (Ok(Value::Null), Action::None));
+        assert!(!services[0].given_up);
+        assert_eq!(services[0].failures, 0);
+        assert_eq!(services[0].next_start, now);
     }
 }
