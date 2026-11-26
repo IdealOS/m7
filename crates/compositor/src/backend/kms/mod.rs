@@ -1,9 +1,17 @@
 //! KMS backend: full-screen output straight to DRM/KMS, for the device images.
 //!
-//! This is the copy path that Spike A proved in QEMU: wgpu renders the scene into an
-//! offscreen texture ([`crate::headless::Offscreen`]), the pixels are read back and
-//! copied into one of three KMS dumb buffers, and that buffer is page-flipped on
-//! vblank. It works with any Vulkan driver, lavapipe included.
+//! Frames reach the display one of two ways (`--scanout`, see
+//! [`crate::backend::Scanout`]), into one of three KMS dumb buffers that are
+//! page-flipped on vblank:
+//!
+//! - **Direct (Spike B):** each dumb buffer is exported as a dma-buf and imported into
+//!   the GPU as a linear texture ([`crate::headless::Offscreen::import_dmabuf`]), and
+//!   the frame is drawn straight into it. No readback, no copy. On a Pi 4 (V3DV) at
+//!   3440x1440 a frame went from 125 ms to 57 ms. The default wherever the GPU's driver
+//!   can import dma-bufs.
+//! - **Copy (Spike A):** wgpu renders into an offscreen texture, the pixels are read
+//!   back and copied into the dumb buffer. Works with any Vulkan driver, lavapipe
+//!   included (QEMU, the Pi 3), whose frames are in ordinary memory anyway.
 //!
 //! It can also render fewer rows than the display mode and have the display's primary
 //! plane scale the frame up, in the display hardware (`--render-height`; see
@@ -17,9 +25,10 @@
 //!
 //! Still to come (milestone M1):
 //!
-//! - **Zero-copy scanout on the Pi (Spike B):** V3DV renders into a texture exported as
-//!   a dmabuf and imported as the KMS framebuffer, with no readback or copy.
-//! - **Region damage:** today any change redraws and copies the whole frame.
+//! - **Region damage:** today any change redraws the whole frame, which on the Pi 4 is
+//!   now most of a frame's cost (drawing 5 million pixels at 3440x1440).
+//! - **Fences instead of waiting:** a direct frame blocks until the GPU finishes before
+//!   the flip; a fence the display waits on would let the next frame start sooner.
 //!
 //! [`display`] is shared with `spikes/kms-probe`, which measures the same path.
 

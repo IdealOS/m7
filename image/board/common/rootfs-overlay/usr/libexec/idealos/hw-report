@@ -137,6 +137,12 @@ kms() {
 		$RUN kms-probe --buffers "$buffers" --frames 300 2>&1
 		echo
 	done
+	# Spike B: the GPU renders straight into the scanout buffers. Where it can't (a
+	# CPU renderer, or no dma-buf import), the probe says why in one line.
+	echo "### kms-probe, direct scanout, 3 buffers"
+	echo
+	$RUN kms-probe --direct --buffers 3 --frames 300 2>&1
+	echo
 	echo "### compositor --continuous, 10 s"
 	echo
 	echo "Redraws every frame; frame times are render, readback and copy. Input"

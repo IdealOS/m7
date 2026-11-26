@@ -13,6 +13,11 @@
 //!                                    # steps too, spread over the time in order
 //! compositor --backend kms           # device backend (Linux, feature "kms")
 //! compositor --backend kms --card /dev/dri/card1
+//! compositor --backend kms --scanout copy
+//!                                    # how frames reach the display: "direct" renders
+//!                                    # into the display's buffers (no copy), "copy"
+//!                                    # reads them back and copies; "auto" (the
+//!                                    # default) is direct where the GPU can
 //! compositor --backend kms --render-height 720
 //!                                    # render at most 720 rows and let the display
 //!                                    # scale them up (text gets fuzzy); "auto"
@@ -23,7 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use compositor::backend::{Options, RenderHeight};
+use compositor::backend::{Options, RenderHeight, Scanout};
 use compositor::desktop::Desktop;
 use compositor::input::{Input, Key, Mods};
 use compositor::{bus, demo, headless};
@@ -54,6 +59,10 @@ fn main() -> ExitCode {
             "--scale" => scale = value("--scale").parse().unwrap_or_else(|_| usage("bad --scale")),
             "--continuous" => opts.continuous = true,
             "--card" => opts.card = Some(value("--card")),
+            "--scanout" => {
+                opts.scanout = Scanout::parse(&value("--scanout"))
+                    .unwrap_or_else(|| usage("--scanout is auto, copy or direct"))
+            }
             "--render-height" => {
                 opts.render_height = RenderHeight::parse(&value("--render-height"))
                     .unwrap_or_else(|| usage("--render-height is auto, native or a number of rows"))
@@ -210,7 +219,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

@@ -11,7 +11,7 @@
 //! primary plane then scales them up to fill the screen, in the display hardware.
 
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use crate::cursor::Bitmap;
@@ -266,6 +266,31 @@ impl Display {
 
     pub fn buffer_count(&self) -> usize {
         self.buffers.len()
+    }
+
+    /// The buffer the next frame goes into, as an index into [`Display::export_buffers`].
+    /// With two buffers, wait for any pending flip first ([`Display::wait_for_flip`]):
+    /// until then the back buffer is still on screen.
+    pub fn back_index(&self) -> usize {
+        self.back
+    }
+
+    /// Each scanout buffer as a dma-buf, with its row pitch in bytes, in buffer order,
+    /// so the GPU can render into them directly (direct scanout) instead of the CPU
+    /// copying frames in. The buffers stay this display's: they're shown with
+    /// [`Display::flip`] as usual. Call after [`Display::scale_from`], which replaces them.
+    pub fn export_buffers(&self) -> Result<Vec<(OwnedFd, u32)>, String> {
+        self.buffers
+            .iter()
+            .map(|b| {
+                let flags = (libc::O_CLOEXEC | libc::O_RDWR) as u32;
+                let fd = self
+                    .card
+                    .buffer_to_prime_fd(b.buffer.handle(), flags)
+                    .map_err(|e| format!("export scanout buffer as a dma-buf: {e}"))?;
+                Ok((fd, b.buffer.pitch()))
+            })
+            .collect()
     }
 
     /// Copy tightly packed rows (`width * 4` bytes each, [`RENDER_FORMAT`]) into the

@@ -19,7 +19,7 @@ use super::console::{self, Console};
 use super::display::{Display, RENDER_FORMAT};
 use super::input::Devices;
 use super::signals::Signals;
-use crate::backend::Options;
+use crate::backend::{Options, Scanout};
 use crate::bus;
 use crate::desktop::Desktop;
 use crate::headless::Offscreen;
@@ -47,10 +47,31 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let (w, h) = display.size();
+    // Direct scanout: the GPU renders straight into the display's buffers, shared as
+    // dma-bufs, with no readback or copy. Not for a CPU renderer, whose frames are in
+    // ordinary memory anyway, and only where the driver can import the buffers.
+    let mut scanout = None;
+    if opts.scanout == Scanout::Direct || (opts.scanout == Scanout::Auto && !cpu) {
+        let imported = display.export_buffers().and_then(|bufs| {
+            bufs.into_iter()
+                .map(|(fd, pitch)| target.import_dmabuf(fd, w, h, pitch))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        match imported {
+            Ok(views) => {
+                // The offscreen texture and readback buffer go unused.
+                target.resize(1, 1);
+                scanout = Some(views);
+            }
+            Err(e) if opts.scanout == Scanout::Direct => return Err(format!("direct scanout: {e}").into()),
+            Err(e) => log::warn!("kms: direct scanout unavailable ({e}); copying frames instead"),
+        }
+    }
+    let path = if scanout.is_some() { "direct" } else { "copy" };
     // tools/smoke-checks.ts reads the frame size from "at WxH @".
     let scaled = if (w, h) == mode { String::new() } else { format!(", scaled up to {}x{}", mode.0, mode.1) };
     log::info!(
-        "kms: {} on {} at {w}x{h} @ {} Hz{scaled}; adapter {} ({:?})",
+        "kms: {} on {} at {w}x{h} @ {} Hz{scaled}; {path} scanout; adapter {} ({:?})",
         display.driver(),
         display.output_name(),
         display.refresh_hz(),
@@ -101,7 +122,8 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     let arrow = cursor::arrow();
     let mut timer = FrameTimer::default();
     let mut next_hud = Instant::now();
-    let mut rows: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
+    // Only the copy path uses this; it grows to a frame's size on the first frame.
+    let mut rows: Vec<u8> = Vec::new();
     let mut first = true;
 
     loop {
@@ -124,11 +146,17 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
         desktop.relayout();
         if desktop.scene.is_dirty() || opts.continuous {
             let started = Instant::now();
-            rows.clear();
-            let stats =
-                target.render(&desktop.draw_list(), 1.0, background, |r| rows.extend_from_slice(r))?;
-            display.copy_into_back(&rows)?;
-            // Render, readback and copy: the CPU-side cost of a frame on this path.
+            let list = desktop.draw_list();
+            let stats = if let Some(views) = &scanout {
+                // Three buffers: the back one is never on screen or pending.
+                target.render_to(&views[display.back_index()], (w, h), &list, 1.0, background)?
+            } else {
+                rows.clear();
+                let stats = target.render(&list, 1.0, background, |r| rows.extend_from_slice(r))?;
+                display.copy_into_back(&rows)?;
+                stats
+            };
+            // Drawing, plus readback and copy on the copy path: a frame's cost.
             timer.record(started.elapsed(), stats.quads, stats.texts);
             display.flip()?;
             desktop.scene.clear_dirty();

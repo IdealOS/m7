@@ -4,6 +4,7 @@
 //! golden-image tests described in the plan's testing strategy.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::render::{FrameStats, Renderer};
 use crate::scene::{DrawList, Rgba};
@@ -49,6 +50,10 @@ pub fn render(list: &DrawList, width: u32, height: u32, scale: f32) -> Result<Im
 /// `Bgra8UnormSrgb` for that: its byte order is DRM's `XRGB8888` on little-endian.
 pub struct Offscreen {
     pub adapter: wgpu::AdapterInfo,
+    /// Where the last [`Offscreen::render`] or [`Offscreen::render_to`] spent its time.
+    pub timing: FrameTiming,
+    /// The device can import dma-bufs, so it can render into scanout buffers.
+    pub dmabuf_import: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     texture: wgpu::Texture,
@@ -58,6 +63,18 @@ pub struct Offscreen {
     width: u32,
     height: u32,
     padded_row: u32,
+}
+
+/// The three parts of one offscreen frame on the copy path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameTiming {
+    /// The CPU recording the frame's GPU commands, text shaping included.
+    pub encode: Duration,
+    /// From submitting them until the GPU has drawn the frame, copied it into the
+    /// readback buffer, and the buffer is mapped.
+    pub gpu: Duration,
+    /// The CPU reading the mapped buffer, row by row, into the caller.
+    pub read: Duration,
 }
 
 impl Offscreen {
@@ -76,6 +93,9 @@ impl Offscreen {
             .map_err(|e| format!("no GPU adapter: {e}"))?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
+                // Rendering straight into KMS scanout buffers (direct scanout) needs
+                // dma-buf import; ask for it wherever the driver has it.
+                required_features: adapter.features() & wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF,
                 // lavapipe, V3DV and virgl all need the conservative limits.
                 required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
@@ -86,6 +106,8 @@ impl Offscreen {
         let renderer = Renderer::new(&device, &queue, format);
         Ok(Offscreen {
             adapter: adapter.get_info(),
+            timing: FrameTiming::default(),
+            dmabuf_import: device.features().contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF),
             device,
             queue,
             texture,
@@ -137,6 +159,89 @@ impl Offscreen {
         (texture, view, readback, padded_row)
     }
 
+    /// Wrap a dma-buf, such as a KMS scanout buffer, as a texture to render into. The
+    /// buffer is linear (no tiling), `stride` bytes per row, in this target's format.
+    /// The texture view keeps the buffer imported for as long as it lives.
+    #[cfg(target_os = "linux")]
+    pub fn import_dmabuf(
+        &self,
+        fd: std::os::fd::OwnedFd,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> Result<wgpu::TextureView, String> {
+        use wgpu::hal;
+        if !self.dmabuf_import {
+            return Err("this GPU's driver can't import dma-bufs (VK_EXT_external_memory_dma_buf)".into());
+        }
+        /// DRM_FORMAT_MOD_LINEAR: rows one after another, as dumb buffers are.
+        const LINEAR: u64 = 0;
+        let format = self.texture.format();
+        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let hal_desc = hal::TextureDescriptor {
+            label: Some("scanout"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUses::COLOR_TARGET,
+            memory_flags: hal::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        };
+        // SAFETY: the device was opened with VULKAN_EXTERNAL_MEMORY_DMA_BUF (checked
+        // above), and the fd is a single-plane linear buffer of `stride` bytes per row,
+        // big enough for `width` x `height` pixels of `format`.
+        let hal_texture = unsafe {
+            let device = self.device.as_hal::<hal::api::Vulkan>().ok_or("not a Vulkan device")?;
+            device.texture_from_dmabuf_fd(fd, &hal_desc, LINEAR, u64::from(stride), 0)
+        }
+        .map_err(|e| format!("import dma-buf as a {width}x{height} {format:?} texture: {e}"))?;
+        let desc = wgpu::TextureDescriptor {
+            label: Some("scanout"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        };
+        // SAFETY: `hal_texture` came from this device and matches `desc`; its
+        // contents are undefined, which UNINITIALIZED states.
+        let texture = unsafe {
+            self.device.create_texture_from_hal::<hal::api::Vulkan>(
+                hal_texture,
+                &desc,
+                wgpu::TextureUses::UNINITIALIZED,
+            )
+        };
+        Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+    }
+
+    /// Render one frame straight into `view` (an imported scanout buffer of `size`)
+    /// and wait until the GPU has finished, so the buffer can be shown. No readback.
+    pub fn render_to(
+        &mut self,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
+        list: &DrawList,
+        scale: f32,
+        clear: Rgba,
+    ) -> Result<FrameStats, String> {
+        let started = Instant::now();
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let stats =
+            self.renderer.render(&self.device, &self.queue, &mut encoder, view, size, scale, list, clear);
+        let encoded = Instant::now();
+        let index = self.queue.submit(Some(encoder.finish()));
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
+            .map_err(|e| format!("poll: {e}"))?;
+        self.timing = FrameTiming { encode: encoded - started, gpu: encoded.elapsed(), read: Duration::ZERO };
+        Ok(stats)
+    }
+
     /// Render one frame and hand each row of tightly packed pixels to `row`, top to bottom.
     pub fn render(
         &mut self,
@@ -146,6 +251,7 @@ impl Offscreen {
         mut row: impl FnMut(&[u8]),
     ) -> Result<FrameStats, String> {
         let (w, h) = (self.width, self.height);
+        let started = Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         let stats = self.renderer.render(
             &self.device,
@@ -174,6 +280,7 @@ impl Offscreen {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        let encoded = Instant::now();
         self.queue.submit(Some(encoder.finish()));
 
         let slice = self.readback.slice(..);
@@ -185,6 +292,7 @@ impl Offscreen {
             .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .map_err(|e| format!("poll: {e}"))?;
         rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("map: {e}"))?;
+        let drawn = Instant::now();
         {
             let data = slice.get_mapped_range().map_err(|e| format!("map range: {e:?}"))?;
             for r in data.chunks(self.padded_row as usize) {
@@ -192,6 +300,7 @@ impl Offscreen {
             }
         }
         self.readback.unmap();
+        self.timing = FrameTiming { encode: encoded - started, gpu: drawn - encoded, read: drawn.elapsed() };
         Ok(stats)
     }
 }

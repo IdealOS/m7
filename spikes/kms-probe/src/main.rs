@@ -5,7 +5,10 @@
 //! which are page-flipped on vblank. It works with any Vulkan driver, lavapipe
 //! included. The zero-copy dmabuf path for V3DV (Spike B) comes after this baseline.
 //!
-//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--card /dev/dri/cardN]`
+//! With `--direct` it tries Spike B instead: the GPU renders straight into the scanout
+//! buffers, exported from the display as dma-bufs, with no readback or copy.
+//!
+//! `kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--card /dev/dri/cardN]`
 //! prints a Markdown report. It needs DRM master: run it from a text console with no
 //! display server, as root or a member of the `video` group.
 
@@ -21,11 +24,14 @@ pub struct Options {
     pub buffers: usize,
     /// `None` picks the first card with a connected display.
     pub card: Option<String>,
+    /// Render straight into the scanout buffers (Spike B) instead of copying.
+    pub direct: bool,
 }
 
 impl Options {
     fn from_args() -> Result<Options, String> {
-        let mut o = Options { frames: 300, windows: 20, hold: Duration::ZERO, buffers: 3, card: None };
+        let mut o =
+            Options { frames: 300, windows: 20, hold: Duration::ZERO, buffers: 3, card: None, direct: false };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -36,6 +42,7 @@ impl Options {
                     o.hold = Duration::from_secs(value()?.parse().map_err(|e| format!("--hold: {e}"))?)
                 }
                 "--card" => o.card = Some(value()?),
+                "--direct" => o.direct = true,
                 "--buffers" => {
                     o.buffers = value()?.parse().map_err(|e| format!("--buffers: {e}"))?;
                     if !(2..=3).contains(&o.buffers) {
@@ -44,7 +51,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--card PATH]"
+                        "kms-probe [--frames N] [--windows N] [--hold SECS] [--buffers 2|3] [--direct] [--card PATH]"
                     );
                     std::process::exit(0);
                 }
@@ -59,6 +66,10 @@ impl Options {
 #[derive(Default)]
 pub struct Timings {
     pub render: Vec<Duration>,
+    /// The parts of `render` (see compositor::headless::FrameTiming).
+    pub encode: Vec<Duration>,
+    pub gpu: Vec<Duration>,
+    pub read: Vec<Duration>,
     pub copy: Vec<Duration>,
     pub flip_wait: Vec<Duration>,
     pub frame: Vec<Duration>,
@@ -71,16 +82,28 @@ fn pct(v: &[Duration], p: f64) -> f64 {
 }
 
 impl Timings {
-    pub fn report(&self, started: Instant) -> Vec<String> {
+    pub fn report(&self, started: Instant, direct: bool) -> Vec<String> {
         let row = |name: &str, v: &[Duration]| {
             format!("| {name} | {:.2} ms | {:.2} ms |", pct(v, 0.5), pct(v, 0.99))
         };
         let elapsed = started.elapsed().as_secs_f64();
-        vec![
-            "| Stage | p50 | p99 |".into(),
-            "| --- | --- | --- |".into(),
-            row("Render + GPU readback", &self.render),
-            row("Copy into dumb buffer", &self.copy),
+        let mut lines = vec!["| Stage | p50 | p99 |".into(), "| --- | --- | --- |".into()];
+        if direct {
+            lines.extend([
+                row("Render into the scanout buffer", &self.render),
+                row("  of which: encode (CPU)", &self.encode),
+                row("  of which: GPU draws", &self.gpu),
+            ]);
+        } else {
+            lines.extend([
+                row("Render + GPU readback", &self.render),
+                row("  of which: encode (CPU)", &self.encode),
+                row("  of which: GPU draws and copies out", &self.gpu),
+                row("  of which: read back (CPU)", &self.read),
+                row("Copy into dumb buffer", &self.copy),
+            ]);
+        }
+        lines.extend([
             row("Wait for page flip", &self.flip_wait),
             row("Whole frame", &self.frame),
             String::new(),
@@ -90,7 +113,8 @@ impl Timings {
                 elapsed,
                 self.frame.len() as f64 / elapsed
             ),
-        ]
+        ]);
+        lines
     }
 }
 

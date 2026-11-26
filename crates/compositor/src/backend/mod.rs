@@ -19,6 +19,8 @@ pub struct Options {
     pub card: Option<String>,
     /// How many rows the KMS backend renders.
     pub render_height: RenderHeight,
+    /// How finished frames reach the KMS backend's scanout buffers.
+    pub scanout: Scanout,
 }
 
 impl Default for Options {
@@ -30,6 +32,33 @@ impl Default for Options {
             continuous: false,
             card: None,
             render_height: RenderHeight::Native,
+            scanout: Scanout::Auto,
+        }
+    }
+}
+
+/// How finished frames reach the display in the KMS backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scanout {
+    /// Direct where the GPU can import the display's buffers, copy otherwise.
+    Auto,
+    /// Render offscreen, read the pixels back and copy them into the display's buffer.
+    /// Works everywhere, lavapipe included; on a Pi 4 at 3440x1440 it costs ~70 ms a
+    /// frame on top of drawing.
+    Copy,
+    /// The GPU renders straight into the display's buffers, shared as dma-bufs: no
+    /// readback or copy. Fails if the driver can't import them.
+    Direct,
+}
+
+impl Scanout {
+    /// `auto`, `copy` or `direct`.
+    pub fn parse(s: &str) -> Option<Scanout> {
+        match s {
+            "auto" => Some(Scanout::Auto),
+            "copy" => Some(Scanout::Copy),
+            "direct" => Some(Scanout::Direct),
+            _ => None,
         }
     }
 }
@@ -84,6 +113,16 @@ impl RenderHeight {
 #[cfg(test)]
 mod tests {
     use super::RenderHeight::{self, *};
+
+    #[test]
+    fn parses_scanout_modes() {
+        use super::Scanout;
+        assert_eq!(Scanout::parse("auto"), Some(Scanout::Auto));
+        assert_eq!(Scanout::parse("copy"), Some(Scanout::Copy));
+        assert_eq!(Scanout::parse("direct"), Some(Scanout::Direct));
+        assert_eq!(Scanout::parse("zero-copy"), None);
+        assert_eq!(super::Options::default().scanout, Scanout::Auto);
+    }
 
     #[test]
     fn parses_render_heights() {
