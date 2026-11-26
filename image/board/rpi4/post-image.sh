@@ -3,9 +3,12 @@ set -e
 BOARD_DIR="$(dirname "$0")"
 # The Pi's display and Wi-Fi drivers are modules. If depmod couldn't read them
 # (missing xz support), modules.dep is empty, udev loads nothing, and the Pi boots
-# to a text console with no network. Fail here rather than on the device.
-for m in vc4 brcmfmac; do
-	grep -qs "/$m\.ko" "$TARGET_DIR"/lib/modules/*/modules.dep || {
+# to a text console with no network. Fail here rather than on the device. The Pi 4
+# also needs v3d, its GPU: the image has no software renderer to fall back on.
+# A driver built into the kernel (the Pi kernel builds v3d in) is in modules.builtin.
+for m in vc4 v3d brcmfmac; do
+	grep -qs "/$m\.ko" "$TARGET_DIR"/lib/modules/*/modules.dep ||
+		grep -qs "/$m\.ko" "$TARGET_DIR"/lib/modules/*/modules.builtin || {
 		echo "post-image: $m.ko is missing from modules.dep (depmod couldn't index the modules)"
 		exit 1
 	}

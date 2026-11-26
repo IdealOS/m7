@@ -27,6 +27,8 @@ printf 'undervoltage: %s since boot%s\n' "$n" "$([ "$n" -gt 0 ] && dmesg | grep 
 
 section 'Memory and storage'
 free -m | sed -n '1,2p'
+# The contiguous pool GPU and display buffers come from (vc4 and v3d on a Pi).
+grep -E '^Cma(Total|Free):' /proc/meminfo
 df -h / /data 2>/dev/null
 
 section Services
