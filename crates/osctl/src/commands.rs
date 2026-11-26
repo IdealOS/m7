@@ -55,6 +55,15 @@ pub enum Command {
         watch: bool,
     },
     AppList,
+    /// Print a style sheet's edits (`builtin`: the built-in system sheet).
+    StyleGet {
+        target: String,
+    },
+    /// Check a style sheet, and with a target, set that sheet's edits to it.
+    StyleSet {
+        target: Option<String>,
+        file: String,
+    },
     /// `launch` or `stop` an app through session.
     AppControl {
         method: &'static str,
@@ -133,6 +142,17 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
         }
         Command::AppInstall { dir, watch } => crate::apps::install(bus, &dir, watch, out).await,
         Command::AppList => crate::apps::list(bus, out).await,
+        Command::StyleGet { target } => crate::style::get(bus, &target, out).await,
+        Command::StyleSet { target, file } => {
+            let css = if file.is_empty() { String::new() } else { crate::style::read(&file)? };
+            match target {
+                Some(t) => crate::style::set(bus, &t, &css, out).await,
+                None => {
+                    crate::style::check(bus, &css).await?;
+                    writeln!(out, "no mistakes").map_err(w)
+                }
+            }
+        }
         Command::AppControl { method, id } => crate::apps::control(bus, method, &id).await,
         Command::PutBlob { file } => {
             let f = std::fs::File::open(&file).map_err(|e| format!("{}: {e}", file.display()))?;

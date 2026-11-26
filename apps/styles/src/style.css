@@ -1,0 +1,5 @@
+/* The editor's own look: code in a monospace face. */
+.code { font-family: "DejaVu Sans Mono", monospace; font-size: 13px; }
+.ok { color: #16a34a; }
+.err { color: var(--danger); }
+@dark { .ok { color: #4ade80; } }

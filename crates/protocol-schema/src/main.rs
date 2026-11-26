@@ -16,6 +16,9 @@ fn document() -> Value {
     g.subschema_for::<protocol::OpenWindowParams>();
     g.subschema_for::<protocol::WindowEvent>();
     g.subschema_for::<protocol::Clipboard>();
+    g.subschema_for::<protocol::scene::CheckStyleParams>();
+    g.subschema_for::<protocol::scene::CheckStyleResult>();
+    g.subschema_for::<protocol::scene::SystemStyleResult>();
     g.subschema_for::<db::SpliceParams>();
     g.subschema_for::<protocol::session::AppParams>();
     g.subschema_for::<protocol::session::AppsResult>();

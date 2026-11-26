@@ -32,6 +32,7 @@ const FILES: &[(&str, &str)] = &[
     ("Message", include_str!("../../../schemas/Message.json")),
     ("Playlist", include_str!("../../../schemas/Playlist.json")),
     ("Setting", include_str!("../../../schemas/Setting.json")),
+    ("StyleSheet", include_str!("../../../schemas/StyleSheet.json")),
     ("TextDocument", include_str!("../../../schemas/TextDocument.json")),
     ("Track", include_str!("../../../schemas/Track.json")),
 ];

@@ -109,6 +109,8 @@ pub const SERVICE: &str = "compositor";
 /// | `set_clipboard` | [`Clipboard`]    | null   |
 /// | `prompt`      | [`PromptParams`]     | [`PromptResult`] |
 /// | `screen`      | none                 | [`ScreenInfo`] |
+/// | `check_style` | [`CheckStyleParams`] | [`CheckStyleResult`] |
+/// | `system_style` | none                | [`SystemStyleResult`] |
 ///
 /// The clipboard belongs to the compositor: text fields copy and paste through it
 /// without asking the app. Apps can write it, with text and, optionally, the id of
@@ -124,6 +126,46 @@ pub mod method {
     pub const SET_CLIPBOARD: &str = "set_clipboard";
     pub const PROMPT: &str = "prompt";
     pub const SCREEN: &str = "screen";
+    pub const CHECK_STYLE: &str = "check_style";
+    pub const SYSTEM_STYLE: &str = "system_style";
+}
+
+/// The document type that holds edits to a style sheet, which the compositor
+/// follows live: `{"target": "system" | "app:<app id>", "css": "..."}`. Its rules
+/// come after the built-in system sheet's (for `system`) or the app's own (for an
+/// app), so they override them; an empty sheet puts things back. A sheet with a
+/// mistake isn't applied: the last good one stays.
+pub const STYLE_SHEET_TYPE: &str = "StyleSheet";
+
+/// Params of `check_style`: a style sheet to check, as the compositor parses them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CheckStyleParams {
+    pub css: String,
+}
+
+/// Result of `check_style`: what's wrong with the sheet, if anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CheckStyleResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<StyleError>,
+}
+
+/// A mistake in a style sheet, and where it is (1-based).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StyleError {
+    pub line: u32,
+    pub col: u32,
+    pub message: String,
+}
+
+/// Result of `system_style`: the built-in system style sheet, for reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SystemStyleResult {
+    pub css: String,
 }
 
 /// Result of `screen`: the display, in logical pixels.

@@ -69,6 +69,11 @@ pub enum Call {
     ReduceMotion {
         on: bool,
     },
+    /// The `StyleSheet` documents now: each target (`system`, `app:<id>`) and its
+    /// edits, newest per target.
+    StyleSheets {
+        sheets: Vec<(String, String)>,
+    },
     /// A screen frame for terminal node `node`, asked for with [`Out::Attach`].
     Screen {
         node: NodeId,
@@ -190,6 +195,10 @@ pub struct Desktop {
     drag: Option<Drag>,
     /// The control the pointer is over, which shows its `:hover` style.
     hovered: Option<NodeId>,
+    /// Each app window's content area: its app, and the sheet it opened with.
+    window_styles: HashMap<NodeId, (Option<String>, Option<std::sync::Arc<crate::style::Sheet>>)>,
+    /// Edits to apps' sheets (`StyleSheet` documents), by app id.
+    style_edits: HashMap<String, std::sync::Arc<crate::style::Sheet>>,
     /// Scroll views still moving after a drag, with their speed.
     coasting: Vec<(NodeId, f32)>,
     last_tick: Option<Instant>,
@@ -228,8 +237,11 @@ impl Desktop {
     pub fn with_fonts(w: f32, h: f32, fonts: FontSystem) -> Desktop {
         let mut apps = Apps::new();
         apps.set_work_area(0.0, BAR_HEIGHT, w, h - BAR_HEIGHT);
+        let mut scene = Scene::new();
+        // The permission prompt keeps the built-in look, whatever a sheet's edits do.
+        scene.pin_builtin(prompt::PROMPT);
         Desktop {
-            scene: Scene::new(),
+            scene,
             wm: WindowManager::default(),
             seat: Seat::new(w, h),
             apps,
@@ -240,6 +252,8 @@ impl Desktop {
             edits: HashMap::new(),
             drag: None,
             hovered: None,
+            window_styles: HashMap::new(),
+            style_edits: HashMap::new(),
             coasting: Vec::new(),
             last_tick: None,
             menu: None,
@@ -1409,6 +1423,65 @@ impl Desktop {
         moving || !self.coasting.is_empty()
     }
 
+    /// Edits to style sheets arrived: apply each that parses, keeping the last good
+    /// one for a target whose new edits don't.
+    fn take_style_sheets(&mut self, sheets: Vec<(String, String)>) {
+        let parse = |target: &str, css: &str| -> Option<Option<std::sync::Arc<crate::style::Sheet>>> {
+            if css.trim().is_empty() {
+                return Some(None);
+            }
+            match crate::style::Sheet::parse(css) {
+                Ok(s) => Some(Some(std::sync::Arc::new(s))),
+                Err(e) => {
+                    // Expected mid-edit (each keystroke arrives); the editors show where it is.
+                    log::debug!("style: edits to {target} not applied: {e}");
+                    None
+                }
+            }
+        };
+        let system = sheets.iter().find(|(t, _)| t == "system");
+        match system.map(|(t, css)| parse(t, css)) {
+            Some(Some(edits)) => self.scene.set_system_edits(edits),
+            Some(None) => {}
+            None => self.scene.set_system_edits(None),
+        }
+        let mut apps = HashMap::new();
+        for (target, css) in &sheets {
+            let Some(app) = target.strip_prefix("app:") else { continue };
+            match parse(target, css) {
+                Some(Some(sheet)) => {
+                    apps.insert(app.to_owned(), sheet);
+                }
+                Some(None) => {}
+                None => {
+                    if let Some(old) = self.style_edits.get(app) {
+                        apps.insert(app.to_owned(), old.clone());
+                    }
+                }
+            }
+        }
+        self.style_edits = apps;
+        self.window_styles.retain(|content, _| self.scene.node(*content).is_some());
+        let windows: Vec<NodeId> = self.window_styles.keys().copied().collect();
+        for content in windows {
+            self.restyle_window(content);
+        }
+    }
+
+    /// Give window content area `content` its app's sheet: the one it opened with,
+    /// then any edits.
+    fn restyle_window(&mut self, content: NodeId) {
+        let Some((app, own)) = self.window_styles.get(&content) else { return };
+        let edits = app.as_ref().and_then(|a| self.style_edits.get(a));
+        let sheet = match (own, edits) {
+            (Some(own), Some(e)) => Some(std::sync::Arc::new(own.then(e))),
+            (Some(own), None) => Some(own.clone()),
+            (None, Some(e)) => Some(e.clone()),
+            (None, None) => None,
+        };
+        self.scene.set_app_style(content, sheet);
+    }
+
     /// Fade node `root` and everything in it in: each colour prop from transparent
     /// to its colour. For the compositor's own menus and switcher, which are plain
     /// rects and text (a whole window can't fade until windows are textures).
@@ -1462,6 +1535,7 @@ impl Desktop {
                 log::info!("desktop: {} theme", if dark { "dark" } else { "light" });
                 self.scene.set_dark(dark);
             }
+            Call::StyleSheets { sheets } => self.take_style_sheets(sheets),
             Call::ReduceMotion { on } => {
                 log::info!("desktop: reduce motion {}", if on { "on" } else { "off" });
                 self.scene.set_reduce_motion(on);
@@ -1526,6 +1600,10 @@ impl Desktop {
                         Some(Ok(sheet)) => Some(std::sync::Arc::new(sheet)),
                         None => None,
                     };
+                    let app_id = match &from {
+                        Sender::App { app, .. } => Some(app.clone()),
+                        _ => None,
+                    };
                     let screen = self.seat.bounds();
                     // One line per window; tools/smoke-checks.ts counts them.
                     log::info!("apps: opened a window for {from:?}: {:?}", p.title);
@@ -1543,10 +1621,11 @@ impl Desktop {
                             crate::anim::Ease::Out,
                         );
                     }
-                    if let (Some(sheet), protocol::WindowEvent::Opened { window, .. }) = (sheet, &reply.event)
+                    if let protocol::WindowEvent::Opened { window, .. } = &reply.event
                         && let Some(content) = self.apps.content_of(*window)
                     {
-                        self.scene.set_app_style(content, Some(sheet));
+                        self.window_styles.insert(content, (app_id, sheet));
+                        self.restyle_window(content);
                     }
                     self.restack();
                     self.send(Some(reply));
@@ -1580,6 +1659,25 @@ impl Desktop {
                 }
                 let value = serde_json::to_value(&self.clipboard).expect("serializes");
                 self.outbox.push(Out::Respond { id, result: Ok(value) });
+            }
+            method::CHECK_STYLE => {
+                let result = parse::<protocol::scene::CheckStyleParams>(params).map(|p| {
+                    let error =
+                        crate::style::Sheet::parse(&p.css).err().map(|e| protocol::scene::StyleError {
+                            line: e.line as u32,
+                            col: e.col as u32,
+                            message: e.message,
+                        });
+                    json!(protocol::scene::CheckStyleResult { error })
+                });
+                self.outbox.push(Out::Respond {
+                    id,
+                    result: result.map_err(|e| BusError { code: code::BAD_REQUEST.into(), message: e }),
+                });
+            }
+            method::SYSTEM_STYLE => {
+                let css = json!(protocol::scene::SystemStyleResult { css: crate::style::SYSTEM.into() });
+                self.outbox.push(Out::Respond { id, result: Ok(css) });
             }
             method::SCREEN => {
                 let (w, h) = self.seat.bounds();
@@ -2998,6 +3096,83 @@ mod tests {
         assert_eq!(start, Some(0), "invisible as it appears");
         d.tick(t0 + crate::anim::STATE_FADE);
         assert_eq!(backdrop(&mut d).0, Some(full));
+    }
+
+    #[test]
+    fn style_sheet_edits_restyle_live_and_a_broken_one_keeps_the_last_good() {
+        use crate::scene::Rgba;
+        let hex = |h: &str| Rgba::parse(h).unwrap();
+        let mut d = desk();
+        let out = d.call(request(
+            7,
+            "open_window",
+            json!({"title": "A", "style": "label { color: #111111 }"}),
+            true,
+        ));
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let WindowEvent::Opened { window, .. } = serde_json::from_value(data.clone()).unwrap() else {
+            panic!()
+        };
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "label", "props": {"text": "Hi"}},
+            {"op": "create", "id": 3, "type": "button", "props": {"label": "Go"}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0},
+            {"op": "insert", "parent": 1, "child": 3, "index": 1}
+        ]);
+        d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
+        let (label, button) = (global(&d, window, 2), global(&d, window, 3));
+        let sheets = |v: &[(&str, &str)]| Call::StyleSheets {
+            sheets: v.iter().map(|(t, c)| (t.to_string(), c.to_string())).collect(),
+        };
+        // System edits come after the built-in sheet; the app's own rule still wins
+        // for its label, and the app's edits come after that.
+        d.call(sheets(&[("system", "button { background: #ff0000 } label { color: #00ff00 }")]));
+        assert_eq!(d.scene.style(button).background, Some(hex("#ff0000")));
+        assert_eq!(d.scene.style(label).color, hex("#111111"));
+        d.call(sheets(&[
+            ("system", "button { background: #ff0000 }"),
+            ("app:org.example.test", "label { color: #222222 }"),
+        ]));
+        assert_eq!(d.scene.style(label).color, hex("#222222"));
+        // A mistake isn't applied: the last good edits stay, for each target.
+        d.call(sheets(&[("system", "button { background: red }"), ("app:org.example.test", "label {")]));
+        assert_eq!(d.scene.style(button).background, Some(hex("#ff0000")));
+        assert_eq!(d.scene.style(label).color, hex("#222222"));
+        // Empty edits, or none, put things back.
+        d.call(sheets(&[("system", "")]));
+        assert_eq!(d.scene.style(button).background, Some(d.scene.style(button).var("control")));
+        assert_eq!(d.scene.style(label).color, hex("#111111"));
+        // The prompt keeps the built-in look whatever the edits say.
+        d.call(sheets(&[("system", ":root { --text: #ff00ff }")]));
+        d.call(prompt_call(9, perm()));
+        assert!(d.scene.node(crate::prompt::PROMPT).is_some(), "the prompt is up");
+        assert_eq!(d.scene.style(crate::prompt::PROMPT).var("text"), hex("#1f2937"));
+        assert_eq!(d.scene.style(button).var("text"), hex("#ff00ff"));
+    }
+
+    #[test]
+    fn the_compositor_checks_style_sheets_and_hands_out_its_own() {
+        let mut d = desk();
+        let out = d.call(request(1, "check_style", json!({"css": "label {\n  colour: #fff }"}), false));
+        assert_eq!(
+            out,
+            [Out::Respond {
+                id: 1,
+                result: Ok(
+                    json!({"error": {"line": 2, "col": 3, "message": "no property \"colour\" (styles set colours and fonts only)"}})
+                )
+            }]
+        );
+        assert_eq!(
+            d.call(request(2, "check_style", json!({"css": "label { color: #fff }"}), false)),
+            [Out::Respond { id: 2, result: Ok(json!({})) }]
+        );
+        let [Out::Respond { result: Ok(v), .. }] =
+            &d.call(request(3, "system_style", Value::Null, false))[..]
+        else {
+            panic!()
+        };
+        assert!(v["css"].as_str().unwrap().contains("--accent"));
     }
 }
 

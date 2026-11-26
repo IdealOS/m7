@@ -16,7 +16,7 @@
 //! are now.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use protocol::{NodeId, NodeKind, Props, SceneOp};
@@ -59,10 +59,17 @@ pub struct Scene {
 /// The style sheets in force, and the styles computed from them.
 #[derive(Debug)]
 struct Styles {
+    /// The built-in system sheet ([`crate::style::SYSTEM`]).
+    builtin: Arc<Sheet>,
+    /// The system sheet in force: the built-in one with any edits after it.
     system: Arc<Sheet>,
     dark: bool,
     /// The system sheet alone: everything outside apps' windows.
     scope: Scope,
+    /// The built-in sheet alone, for [`Scene::pin_builtin`] nodes.
+    builtin_scope: Scope,
+    /// Nodes (and what's in them) styled by the built-in sheet only.
+    pinned: HashSet<NodeId>,
     /// Apps' sheets, by the node they style (a window's content area), with the
     /// scope each makes.
     apps: HashMap<NodeId, (Arc<Sheet>, Scope)>,
@@ -71,9 +78,19 @@ struct Styles {
 }
 
 impl Styles {
-    fn new(system: Arc<Sheet>, dark: bool) -> Styles {
+    fn new(builtin: Arc<Sheet>, system: Arc<Sheet>, dark: bool, pinned: HashSet<NodeId>) -> Styles {
         let scope = Scope::system(system.clone(), dark);
-        Styles { system, dark, scope, apps: HashMap::new(), computed: RefCell::new(None) }
+        let builtin_scope = Scope::system(builtin.clone(), dark);
+        Styles {
+            builtin,
+            system,
+            dark,
+            scope,
+            builtin_scope,
+            pinned,
+            apps: HashMap::new(),
+            computed: RefCell::new(None),
+        }
     }
 }
 
@@ -255,7 +272,10 @@ impl Scene {
             layout_dirty: true,
             layout: HashMap::new(),
             content: HashMap::new(),
-            styles: Styles::new(Arc::new(Sheet::system()), false),
+            styles: {
+                let builtin = Arc::new(Sheet::system());
+                Styles::new(builtin.clone(), builtin, false, HashSet::new())
+            },
             shown_styles: RefCell::new(None),
             fade: Cell::new(anim::STATE_FADE),
             anim: RefCell::new(Animator::default()),
@@ -426,8 +446,6 @@ impl Scene {
         if dark == self.styles.dark {
             return;
         }
-        let apps: Vec<(NodeId, Arc<Sheet>)> =
-            self.styles.apps.iter().map(|(id, (s, _))| (*id, s.clone())).collect();
         // Colour props that name a variable ($surface, ...) change with the theme
         // too: note them as they are, to fade from.
         let mut before = Vec::new();
@@ -441,15 +459,43 @@ impl Scene {
                 }
             }
         }
-        self.styles = Styles::new(self.styles.system.clone(), dark);
+        self.rebuild(self.styles.system.clone(), dark);
         self.fade.set(anim::THEME_FADE);
+        for (id, prop, c) in before {
+            self.animate_from(id, prop, Val::Color(c), anim::THEME_FADE, Ease::Out);
+        }
+    }
+
+    /// Edits to the system style sheet (`None` for none): rules that come after the
+    /// built-in sheet's. Things restyle at once, without fading, so editing a sheet
+    /// live shows each change as it's typed.
+    pub fn set_system_edits(&mut self, edits: Option<Arc<Sheet>>) {
+        let system = match edits {
+            Some(e) => Arc::new(self.styles.builtin.then(&e)),
+            None => self.styles.builtin.clone(),
+        };
+        self.rebuild(system, self.styles.dark);
+        self.fade.set(std::time::Duration::ZERO);
+    }
+
+    /// Style node `id` and everything in it with the built-in system sheet only,
+    /// ignoring edits: the permission prompt, which must stay readable whatever a
+    /// style does.
+    pub fn pin_builtin(&mut self, id: NodeId) {
+        self.styles.pinned.insert(id);
+        self.restyled();
+    }
+
+    /// Replace the system sheet and the theme, keeping apps' sheets.
+    fn rebuild(&mut self, system: Arc<Sheet>, dark: bool) {
+        let apps: Vec<(NodeId, Arc<Sheet>)> =
+            self.styles.apps.iter().map(|(id, (s, _))| (*id, s.clone())).collect();
+        let pinned = std::mem::take(&mut self.styles.pinned);
+        self.styles = Styles::new(self.styles.builtin.clone(), system, dark, pinned);
         for (id, sheet) in apps {
             self.set_app_style(id, Some(sheet));
         }
         self.restyled();
-        for (id, prop, c) in before {
-            self.animate_from(id, prop, Val::Color(c), anim::THEME_FADE, Ease::Out);
-        }
     }
 
     /// Style node `id` (a window's content area) and everything in it with an app's
@@ -489,6 +535,9 @@ impl Scene {
         while let Some((id, parent, scope)) = stack.pop() {
             let Some(node) = self.nodes.get(&id) else { continue };
             let (scope, parent) = match self.styles.apps.get(&id) {
+                _ if self.styles.pinned.contains(&id) => {
+                    (&self.styles.builtin_scope, self.styles.builtin_scope.root(None))
+                }
                 Some((_, app)) => (app, app.root(Some(&parent))),
                 None => (scope, parent),
             };

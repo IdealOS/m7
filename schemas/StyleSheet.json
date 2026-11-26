@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "idealos:schema/StyleSheet",
+  "title": "StyleSheet",
+  "description": "Edits to a style sheet, which the compositor follows live: rules after the built-in system sheet (target \"system\") or an app's own (target \"app:<app id>\"). The newest one per target applies; an empty css puts things back.",
+  "type": "object",
+  "required": ["target", "css"],
+  "properties": {
+    "target": { "type": "string", "minLength": 1, "description": "system, or app: and an app id", "examples": ["system", "app:org.idealos.notes"] },
+    "css": { "type": "string", "maxLength": 65536 }
+  },
+  "x-indexes": ["target"]
+}

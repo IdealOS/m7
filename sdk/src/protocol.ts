@@ -283,6 +283,12 @@ export type ChangesParams = {
 /** Result of `changes`, newest first. */
 export type ChangesResult = { change_sets: ChangeSetInfo[] };
 
+/** Params of `check_style`: a style sheet to check, as the compositor parses them. */
+export type CheckStyleParams = { css: string };
+
+/** Result of `check_style`: what's wrong with the sheet, if anything. */
+export type CheckStyleResult = { error?: StyleError | null };
+
 /** What's on the clipboard: text, and the document it came from, if any. */
 export type Clipboard = { text: string; doc?: string | null };
 
@@ -835,6 +841,12 @@ export type StatsResult = {
   /** This device, as backups name it: its database's peer id, in hex. */
   device?: string;
 };
+
+/** A mistake in a style sheet, and where it is (1-based). */
+export type StyleError = { line: number; col: number; message: string };
+
+/** Result of `system_style`: the built-in system style sheet, for reference. */
+export type SystemStyleResult = { css: string };
 
 /** The one trust level `adopt` names explicitly. */
 export type SystemTrust = "system";

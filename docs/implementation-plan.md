@@ -450,6 +450,10 @@ At 3440x1440 the Pi 4 moves a window at about 35 fps (a drag's cost, mostly the 
 
 **Done when:** switching to dark in Settings restyles every open app at once; an app overrides the accent colour and a font from its own `style.css`; the terminal's family comes from the style; switching workspaces slides the windows across, and hover and press colours fade, at full frame rate on the Pi 4 at 1080p.
 
+### HiDPI scaling
+
+- [ ] **A scale setting for high-density displays**: draw everything at 2× or 3× on a HiDPI screen (a 4K monitor, a laptop panel), so text and widgets stay a readable size and look sharp. The renderer and the layout already work in logical pixels with a scale factor (the hosted backend uses the Mac's), so this is a `display.scale` setting the compositor follows, the KMS backend dividing the mode's size by it, input coordinates scaled to match, and the hardware cursor drawn at that scale. Settings > Display picks 1×, 2× or 3× (and suggests one from the display's size and resolution).
+
 ### Screen and window effects
 
 Shaders applied to the whole screen (a warm night tint) or to particular windows (dim inactive windows, grey out one that isn't responding, frosted glass, open and minimize animations). Each window is already its own layer in the draw list (`Scene::draw_list`: one layer per child of the root), which is the seam both kinds of window effect use.

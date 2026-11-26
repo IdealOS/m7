@@ -1,0 +1,22 @@
+{
+  "name": "@idealos/app-styles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.styles",
+    "name": "Style Editor",
+    "autostart": false,
+    "permissions": [
+      { "type": "StyleSheet", "access": ["read", "write", "create"] },
+      { "type": "App", "access": ["read"] }
+    ]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

@@ -567,6 +567,34 @@
       ],
       "type": "object"
     },
+    "CheckStyleParams": {
+      "description": "Params of `check_style`: a style sheet to check, as the compositor parses them.",
+      "properties": {
+        "css": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "css"
+      ],
+      "type": "object"
+    },
+    "CheckStyleResult": {
+      "description": "Result of `check_style`: what's wrong with the sheet, if anything.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StyleError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Clipboard": {
       "description": "What's on the clipboard: text, and the document it came from, if any.",
       "properties": {
@@ -2517,6 +2545,42 @@
         "blobs",
         "blob_bytes",
         "snapshot_bytes"
+      ],
+      "type": "object"
+    },
+    "StyleError": {
+      "description": "A mistake in a style sheet, and where it is (1-based).",
+      "properties": {
+        "col": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "line",
+        "col",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SystemStyleResult": {
+      "description": "Result of `system_style`: the built-in system style sheet, for reference.",
+      "properties": {
+        "css": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "css"
       ],
       "type": "object"
     },

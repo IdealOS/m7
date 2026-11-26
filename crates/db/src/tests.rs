@@ -1036,7 +1036,7 @@ fn blobs_are_stored_once_by_hash_and_counted() {
 #[test]
 fn system_schemas_load_and_check_writes() {
     let all = schemas::all();
-    assert_eq!(all.len(), 9);
+    assert_eq!(all.len(), 10);
     let mut s = Store::open_in_memory().unwrap();
     // Required fields, types and nested shapes are checked; unknown fields pass.
     let err = |r: Result<Doc>| match r {

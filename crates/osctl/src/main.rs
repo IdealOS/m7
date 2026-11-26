@@ -43,6 +43,10 @@
 //! osctl [--socket PATH] perm revoke ID...            remove grants by id
 //! osctl [--socket PATH] perm revoke --app APP        remove every grant of an app
 //! osctl [--socket PATH] perm audit [--limit N]       the audit log, newest first
+//! osctl [--socket PATH] style get [TARGET]           a sheet's edits (TARGET: system, app:ID, or builtin)
+//! osctl [--socket PATH] style set TARGET FILE         check FILE (- for standard input), then make it TARGET's edits
+//! osctl [--socket PATH] style check FILE              check a sheet; says where any mistake is
+//! osctl [--socket PATH] style reset TARGET            remove TARGET's edits
 //! osctl [--socket PATH] backup status                 drives, and any backup or restore in progress
 //! osctl [--socket PATH] backup setup DRIVE            make a drive (sda1) a backup drive
 //! osctl [--socket PATH] backup now DRIVE              back up to it now
@@ -59,6 +63,7 @@
 mod apps;
 mod bench;
 mod commands;
+mod style;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -75,7 +80,8 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
 | restore NAME | pin ID CHANGE_SET | unpin ID CHANGE_SET | compact | put-blob FILE | get-blob HASH [OUT] | blob-info HASH)
        osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
        osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])
-       osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)";
+       osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)
+       osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -111,7 +117,7 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if ["bus", "db", "app", "perm", "backup"].contains(&g.as_str()) => g,
+        Some(g) if ["bus", "db", "app", "perm", "backup", "style"].contains(&g.as_str()) => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
@@ -189,6 +195,36 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     }
     if group == "perm" {
         return Ok((socket, perm_command(&sub, &positional, &flags, arity, allowed, json)?));
+    }
+    if group == "style" {
+        allowed(&[])?;
+        let target = |t: &String| {
+            if style::valid_target(t) || (sub == "get" && t == "builtin") {
+                Ok(t.clone())
+            } else {
+                Err(format!("a style target is system or app:ID, not {t}"))
+            }
+        };
+        let command = match sub.as_str() {
+            "get" => {
+                arity(0, 1)?;
+                Command::StyleGet { target: positional.first().map_or(Ok("system".into()), target)? }
+            }
+            "set" => {
+                arity(2, 2)?;
+                Command::StyleSet { target: Some(target(&positional[0])?), file: positional[1].clone() }
+            }
+            "check" => {
+                arity(1, 1)?;
+                Command::StyleSet { target: None, file: positional[0].clone() }
+            }
+            "reset" => {
+                arity(1, 1)?;
+                Command::StyleSet { target: Some(target(&positional[0])?), file: String::new() }
+            }
+            other => return Err(format!("unknown style subcommand {other}")),
+        };
+        return Ok((socket, command));
     }
     if group == "backup" {
         allowed(&[])?;
@@ -632,6 +668,23 @@ mod tests {
             "bus stream db",
             "db get a --type x",
         ] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_style_commands() {
+        assert_eq!(parse_str("style get").unwrap().1, Command::StyleGet { target: "system".into() });
+        assert_eq!(parse_str("style get builtin").unwrap().1, Command::StyleGet { target: "builtin".into() });
+        assert_eq!(
+            parse_str("style set app:org.idealos.notes -").unwrap().1,
+            Command::StyleSet { target: Some("app:org.idealos.notes".into()), file: "-".into() }
+        );
+        assert_eq!(
+            parse_str("style reset system").unwrap().1,
+            Command::StyleSet { target: Some("system".into()), file: String::new() }
+        );
+        for bad in ["style set builtin x.css", "style set notes x.css", "style check", "style paint system"] {
             assert!(parse_str(bad).is_err(), "{bad}");
         }
     }

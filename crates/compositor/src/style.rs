@@ -149,6 +149,12 @@ impl Sheet {
     pub fn system() -> Sheet {
         Sheet::parse(SYSTEM).expect("the system style sheet parses")
     }
+
+    /// This sheet's rules, then `other`'s: `other` overrides this one where they
+    /// match equally, as if it were written at the end.
+    pub fn then(&self, other: &Sheet) -> Sheet {
+        Sheet { rules: self.rules.iter().chain(&other.rules).cloned().collect() }
+    }
 }
 
 struct Parser<'a> {

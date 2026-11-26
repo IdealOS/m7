@@ -86,7 +86,7 @@ versions always stay. dbd compacts once a day and then deletes blobs no live
 document and no kept version uses.
 
 **System types** have JSON Schemas (`schemas/`): App, Contact, Email, Image,
-Message, Playlist, Setting, TextDocument and Track. Writes of those types are
+Message, Playlist, Setting, StyleSheet, TextDocument and Track. Writes of those types are
 checked against them.
 
 Shorthands: `osctl db create TYPE JSON`, `get`, `update`, `delete`, `query`,
@@ -212,6 +212,8 @@ itself, so typing, scrolling and dragging never wait on an app.
 | `get_clipboard` | none | `{text, doc?}` (needs `clipboard`) |
 | `set_clipboard` | `{text, doc?}` | null |
 | `screen` | none | `{width, height, workspace, workspaces}` |
+| `check_style` | `{css}` | `{error?: {line, col, message}}`: whether the sheet parses |
+| `system_style` | none | `{css}`: the built-in system sheet |
 | `prompt` | for permd only | the user's answer |
 
 A window lasts as long as its `open_window` request. Its events are `event`
@@ -273,6 +275,23 @@ own, sent with `open_window`. Layout stays in props.
   (value `"dark"` or `"light"`) and `appearance.reduce_motion`, which Settings >
   Display writes. An app's sheet
   applies inside its windows only, never to the frame, title bar or prompts.
+
+### Editing style sheets live
+
+Edits to a sheet are a `StyleSheet` document, `{"target": "system" | "app:<id>",
+"css": "..."}`, which the compositor follows with a live query: the screen
+restyles as the document changes. Edits come after the built-in system sheet
+(target `system`) or the app's own sheet (`app:<id>`), so they win where they
+match equally; empty edits put things back. A sheet with a mistake isn't applied,
+and the last good one stays. The permission prompt always keeps the built-in
+look. Three ways to edit:
+
+- The **Style Editor** app: its text area is bound to the document, with the
+  parse status and a preview beside it.
+- `osctl style get [system | app:ID | builtin]`, `set TARGET FILE` (`-` for
+  standard input; it checks first), `check FILE` and `reset TARGET`.
+- From the Mac: `make style-watch HOST=localhost:2222 FILE=my.css
+  [TARGET=app:org.idealos.notes]` sends the file each time it's saved.
 
 ### Transitions
 

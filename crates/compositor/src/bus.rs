@@ -76,6 +76,7 @@ pub fn connect_with(
                 let Some(mut requests) = bus.take_requests() else { return };
                 tokio::spawn(follow_grants(bus.clone(), calls_tx.clone(), wake.clone()));
                 tokio::spawn(follow_theme(bus.clone(), calls_tx.clone(), wake.clone()));
+                tokio::spawn(follow_style_sheets(bus.clone(), calls_tx.clone(), wake.clone()));
                 let sender = bus.clone();
                 let replies = calls_tx.clone();
                 let woken = wake.clone();
@@ -304,6 +305,59 @@ async fn follow_theme(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn()
             }
             for call in sent {
                 if calls.send(call).is_err() {
+                    return;
+                }
+                wake();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// Follow the `StyleSheet` documents (edits to the system's and apps' sheets) with
+/// a live query, passing the newest per target to the frame loop whenever one
+/// changes, so a sheet being edited restyles the screen as it's typed.
+async fn follow_style_sheets(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn() + Send + Sync>) {
+    use protocol::db::{Doc, WatchEvent};
+    let query = serde_json::json!({"type": protocol::scene::STYLE_SHEET_TYPE});
+    loop {
+        let Ok(mut stream) = bus.request_stream("db", "watch", query.clone()).await else {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            continue;
+        };
+        let mut docs: std::collections::HashMap<String, Doc> = std::collections::HashMap::new();
+        let mut last: Option<Vec<(String, String)>> = None;
+        while let Some(Ok(part)) = stream.next().await {
+            match serde_json::from_value::<WatchEvent>(part) {
+                Ok(WatchEvent::Initial { docs: all }) => {
+                    docs = all.into_iter().map(|d| (d.id.clone(), d)).collect()
+                }
+                Ok(WatchEvent::Diff { added, changed, removed, .. }) => {
+                    for id in removed {
+                        docs.remove(&id);
+                    }
+                    for d in added.into_iter().chain(changed) {
+                        docs.insert(d.id.clone(), d);
+                    }
+                }
+                Err(_) => continue,
+            }
+            let mut newest: std::collections::BTreeMap<String, &Doc> = std::collections::BTreeMap::new();
+            for d in docs.values() {
+                let Some(target) = d.data.get("target").and_then(serde_json::Value::as_str) else { continue };
+                if newest.get(target).is_none_or(|o| o.updated < d.updated) {
+                    newest.insert(target.to_owned(), d);
+                }
+            }
+            let sheets: Vec<(String, String)> = newest
+                .into_iter()
+                .map(|(t, d)| {
+                    (t, d.data.get("css").and_then(serde_json::Value::as_str).unwrap_or("").to_owned())
+                })
+                .collect();
+            if last.as_ref() != Some(&sheets) {
+                last = Some(sheets.clone());
+                if calls.send(Call::StyleSheets { sheets }).is_err() {
                     return;
                 }
                 wake();
