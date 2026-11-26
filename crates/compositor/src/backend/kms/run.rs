@@ -147,7 +147,7 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
 
         // Coasting scroll views, the window switcher's timeout, the clock; then
         // layout, which can change what's drawn.
-        desktop.tick(Instant::now());
+        desktop.tick(display.next_vblank());
         desktop.relayout();
         let mut drew = false;
         if desktop.scene.is_dirty() || opts.continuous {

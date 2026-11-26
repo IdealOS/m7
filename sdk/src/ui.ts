@@ -134,6 +134,9 @@ export function node(kind: NodeKind, props: Record<string, unknown> = {}, childr
 
 /** Layout props every node takes. */
 export interface Common {
+  /** Position in the parent, for a node not placed by a stack, grid or split. */
+  x?: Prop<number>;
+  y?: Prop<number>;
   w?: Prop<Size>;
   h?: Prop<Size>;
   grow?: Prop<number>;
@@ -144,7 +147,16 @@ export interface Common {
   hidden?: Prop<boolean>;
   /** Style classes, separated by spaces, for the app's style sheet (`.primary`). */
   class?: Prop<string>;
+  /**
+   * Props the compositor moves to their new value instead of jumping, with how long
+   * in milliseconds and, optionally, an easing: `{ x: 200, color: [150, "ease-in-out"] }`.
+   * `x` and `y` (for nodes placed by them, not by a stack) and the colour props.
+   */
+  transition?: Prop<Partial<Record<"x" | "y" | "color" | "text_color" | "border_color", Transition>>>;
 }
+
+/** A transition's duration in milliseconds, or that and an easing. */
+export type Transition = number | [number, "linear" | "ease-in" | "ease-out" | "ease-in-out"];
 
 export interface StackProps extends Common {
   gap?: Prop<number>;

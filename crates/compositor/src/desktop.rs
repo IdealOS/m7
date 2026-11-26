@@ -65,6 +65,10 @@ pub enum Call {
     Theme {
         dark: bool,
     },
+    /// The `appearance.reduce_motion` setting changed.
+    ReduceMotion {
+        on: bool,
+    },
     /// A screen frame for terminal node `node`, asked for with [`Out::Attach`].
     Screen {
         node: NodeId,
@@ -163,6 +167,13 @@ const SWITCHER: NodeId = (1 << 40) + 10_000;
 const ROW: f32 = 28.0;
 /// How long the window switcher stays up after Alt+Tab.
 const SWITCHER_SHOWS: Duration = Duration::from_millis(1200);
+/// How long the window manager's own motion takes: windows sliding in on a
+/// workspace switch, a new window rising into place.
+const MOVE: Duration = Duration::from_millis(180);
+/// How far windows slide in when switching workspaces.
+const SLIDE: f32 = 48.0;
+/// How far below its place a new window starts.
+const RISE: f32 = 16.0;
 /// The corner of an app window that resizes it.
 const GRIP: f32 = 14.0;
 
@@ -1186,6 +1197,7 @@ impl Desktop {
         let rect = Rect { h: labels.len() as f32 * ROW + 8.0, ..at };
         self.menu = Some(Menu { labels, values, highlight, rect, purpose });
         self.draw_menu();
+        self.fade_in(MENU);
     }
 
     fn draw_menu(&mut self) {
@@ -1263,6 +1275,7 @@ impl Desktop {
 
     /// Show workspace `n`: its windows appear and the others' hide.
     pub fn switch_workspace(&mut self, n: u32) {
+        let from = self.workspace;
         self.workspace = n.clamp(1, WORKSPACES);
         self.apps.workspace = self.workspace;
         let frames: Vec<NodeId> = self
@@ -1277,6 +1290,18 @@ impl Desktop {
             let hidden = ws != self.workspace;
             if self.prop(id, "hidden").and_then(Value::as_bool).unwrap_or(false) != hidden {
                 self.set(id, json!({"hidden": hidden}));
+                // The windows that appear slide in from the side being moved to.
+                if !hidden && from != self.workspace {
+                    let x = self.prop(id, "x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                    let dx = if self.workspace > from { SLIDE } else { -SLIDE };
+                    self.scene.animate_from(
+                        id,
+                        "x",
+                        crate::anim::Val::Num(x + dx),
+                        MOVE,
+                        crate::anim::Ease::Out,
+                    );
+                }
             }
         }
         if self.focus.is_some_and(|f| self.top_window().is_none_or(|w| !self.scene.is_within(f, w))) {
@@ -1302,6 +1327,7 @@ impl Desktop {
 
     /// Show the window switcher for a moment, with `raised` highlighted.
     fn show_switcher(&mut self, raised: Option<NodeId>) {
+        let showing = self.switcher_until.is_some();
         let windows: Vec<(NodeId, String)> = self
             .scene
             .top_level()
@@ -1344,13 +1370,18 @@ impl Desktop {
         }
         self.scene.apply_all(ops);
         self.switcher_until = Some(Instant::now() + SWITCHER_SHOWS);
+        if !showing {
+            self.fade_in(SWITCHER);
+        }
     }
 
     // --- Time ----------------------------------------------------------------------
 
-    /// Move animations along to `now`: coasting scroll views, the switcher's
-    /// timeout, the clock. Returns whether something is still animating.
+    /// Move animations along to `now`: transitions, coasting scroll views, the
+    /// switcher's timeout, the clock. Returns whether something is still animating.
+    /// The KMS backend passes when the frame will reach the screen (the next vblank).
     pub fn tick(&mut self, now: Instant) -> bool {
+        let moving = self.scene.tick(now);
         let dt = self.last_tick.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32()).min(0.1);
         self.last_tick = Some(now);
         let mut still = Vec::new();
@@ -1375,12 +1406,36 @@ impl Desktop {
         if self.scene.node(TOP_BAR).is_some() {
             shell::set_clock(&mut self.scene, &shell::clock_text(SystemTime::now()));
         }
-        !self.coasting.is_empty()
+        moving || !self.coasting.is_empty()
+    }
+
+    /// Fade node `root` and everything in it in: each colour prop from transparent
+    /// to its colour. For the compositor's own menus and switcher, which are plain
+    /// rects and text (a whole window can't fade until windows are textures).
+    fn fade_in(&mut self, root: NodeId) {
+        let ids: Vec<NodeId> = self.scene.paint_order(root).into_iter().map(|(id, ..)| id).collect();
+        for id in ids {
+            for prop in ["color", "text_color", "border_color"] {
+                let Some(text) = self.prop(id, prop).and_then(Value::as_str).map(str::to_owned) else {
+                    continue;
+                };
+                if let Some(c) = self.scene.style(id).resolve(&text) {
+                    let clear = crate::scene::Rgba([c.0[0], c.0[1], c.0[2], 0]);
+                    self.scene.animate_from(
+                        id,
+                        prop,
+                        crate::anim::Val::Color(clear),
+                        crate::anim::STATE_FADE,
+                        crate::anim::Ease::Out,
+                    );
+                }
+            }
+        }
     }
 
     /// When [`Desktop::tick`] next has something to do.
     pub fn next_wake(&self, now: Instant) -> Instant {
-        if !self.coasting.is_empty() {
+        if !self.coasting.is_empty() || self.scene.animating() {
             return now + Duration::from_millis(16);
         }
         let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -1406,6 +1461,10 @@ impl Desktop {
             Call::Theme { dark } => {
                 log::info!("desktop: {} theme", if dark { "dark" } else { "light" });
                 self.scene.set_dark(dark);
+            }
+            Call::ReduceMotion { on } => {
+                log::info!("desktop: reduce motion {}", if on { "on" } else { "off" });
+                self.scene.set_reduce_motion(on);
             }
             Call::Screen { node, frame } => self.screen_frame(node, frame),
             Call::ScreenEnd { node } => {
@@ -1471,6 +1530,19 @@ impl Desktop {
                     // One line per window; tools/smoke-checks.ts counts them.
                     log::info!("apps: opened a window for {from:?}: {:?}", p.title);
                     let reply = self.apps.open(&mut self.scene, from, id, &p, screen);
+                    // A new window rises into place.
+                    if let protocol::WindowEvent::Opened { window, .. } = &reply.event
+                        && let Some(frame) = self.apps.frame_of(*window)
+                    {
+                        let y = self.prop(frame, "y").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                        self.scene.animate_from(
+                            frame,
+                            "y",
+                            crate::anim::Val::Num(y + RISE),
+                            MOVE,
+                            crate::anim::Ease::Out,
+                        );
+                    }
                     if let (Some(sheet), protocol::WindowEvent::Opened { window, .. }) = (sheet, &reply.event)
                         && let Some(content) = self.apps.content_of(*window)
                     {
@@ -2771,10 +2843,18 @@ mod tests {
         ));
         let [Out::Respond { result: Err(e), .. }] = &out[..] else { panic!("{out:?}") };
         assert!(e.message.contains("line 2, column 3"), "{}", e.message);
-        // The dark theme restyles everything, the desktop included.
+        // The dark theme restyles everything, the desktop included, fading over
+        // THEME_FADE.
         let desktop = |d: &mut Desktop| d.draw_list().layers[0].quads[0].color;
+        let t0 = Instant::now();
+        d.tick(t0);
         assert_eq!(desktop(&mut d), hex("#dfe5ec"));
         d.call(Call::Theme { dark: true });
+        assert_eq!(desktop(&mut d), hex("#dfe5ec"), "it starts from where it was");
+        d.tick(t0 + crate::anim::THEME_FADE / 2);
+        let mid = desktop(&mut d);
+        assert!(mid != hex("#dfe5ec") && mid != hex("#0b1220"), "{mid:?}");
+        d.tick(t0 + crate::anim::THEME_FADE);
         assert_eq!(desktop(&mut d), hex("#0b1220"));
         assert_eq!(d.scene.style(label).color, hex("#ff0000"), "the app's own colour stays");
     }
@@ -2798,6 +2878,126 @@ mod tests {
         d.input(Input::MotionTo { x: 5.0, y: 790.0 });
         assert_ne!(d.scene.node(button).unwrap().props.get("_hover"), Some(&json!(true)));
         assert_eq!(d.scene.style(button).background, plain);
+    }
+
+    /// The first quad node `node` draws, in `d`'s draw list now.
+    fn quad_of(d: &mut Desktop, node: NodeId) -> crate::scene::QuadItem {
+        d.relayout();
+        let (rect, _) = d.scene.screen_rects()[&node];
+        d.draw_list()
+            .layers
+            .iter()
+            .flat_map(|l| l.quads.iter())
+            .find(|q| q.rect == rect)
+            .cloned()
+            .unwrap_or_else(|| panic!("node {node} draws no quad at {rect:?}"))
+    }
+
+    #[test]
+    fn a_declared_transition_moves_a_prop_to_its_new_value() {
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "rect",
+             "props": {"x": 0, "y": 0, "w": 40, "h": 20, "color": "#000000", "transition": {"x": 100, "color": [100, "linear"]}}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let window = open(&mut d, 7, ops);
+        let rect = global(&d, window, 2);
+        let t0 = Instant::now();
+        d.tick(t0);
+        let x0 = quad_of(&mut d, rect).rect.x;
+        let set = json!([{"op": "set", "id": 2, "props": {"x": 100, "color": "#ffffff"}}]);
+        d.call(request(9, "commit", json!({"window": window, "ops": set}), false));
+        assert_eq!(d.scene.node(rect).unwrap().props["x"], 100, "the prop holds where it ends up");
+        assert_eq!(quad_of(&mut d, rect).rect.x, x0, "drawn where it was");
+        d.tick(t0 + Duration::from_millis(50));
+        let mid = quad_of(&mut d, rect);
+        assert!(mid.rect.x > x0 + 10.0 && mid.rect.x < x0 + 100.0, "{:?}", mid.rect);
+        assert!(mid.color.0[0] > 60 && mid.color.0[0] < 200, "halfway grey: {:?}", mid.color);
+        assert!(d.tick(t0 + Duration::from_millis(60)), "still moving");
+        assert!(d.next_wake(t0) <= t0 + Duration::from_millis(16), "frames come while it moves");
+        d.tick(t0 + Duration::from_millis(100));
+        let end = quad_of(&mut d, rect);
+        assert_eq!((end.rect.x, end.color), (x0 + 100.0, crate::scene::Rgba::parse("#ffffff").unwrap()));
+        assert!(!d.tick(t0 + MOVE + Duration::from_millis(10)), "and stops (once the window has risen too)");
+    }
+
+    #[test]
+    fn hovering_fades_a_controls_colours_and_reduce_motion_skips_it() {
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "button", "props": {"label": "Go", "x": 20, "y": 20, "w": 80, "h": 32}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let window = open(&mut d, 7, ops);
+        let button = global(&d, window, 2);
+        let at = center(&mut d, button);
+        let t0 = Instant::now();
+        d.tick(t0);
+        let plain = quad_of(&mut d, button).color;
+        d.input(Input::MotionTo { x: at.0, y: at.1 });
+        let hover = d.scene.style(button).var("control-hover");
+        assert_eq!(quad_of(&mut d, button).color, plain, "the fade starts from the old colour");
+        d.tick(t0 + crate::anim::STATE_FADE);
+        assert_eq!(quad_of(&mut d, button).color, hover);
+        // With reduce motion, it changes at once.
+        d.call(Call::ReduceMotion { on: true });
+        d.input(Input::MotionTo { x: 5.0, y: 790.0 });
+        assert_eq!(quad_of(&mut d, button).color, plain);
+        assert!(!d.scene.animating());
+    }
+
+    #[test]
+    fn windows_slide_in_when_switching_workspaces() {
+        let mut d = desk();
+        let window = open(&mut d, 7, json!([]));
+        let frame = d.apps.frame_of(window).unwrap();
+        let t0 = Instant::now();
+        d.tick(t0);
+        d.tick(t0 + MOVE); // the new window has risen into place
+        let x = d.scene.screen_rects()[&frame].0.x;
+        d.switch_workspace(2);
+        d.switch_workspace(1);
+        d.relayout();
+        assert_eq!(d.scene.screen_rects()[&frame].0.x, x - SLIDE, "coming back to 1, from the left");
+        d.tick(t0 + MOVE + MOVE);
+        d.relayout();
+        assert_eq!(d.scene.screen_rects()[&frame].0.x, x);
+    }
+
+    #[test]
+    fn a_dialogs_backdrop_fades_in() {
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "dialog", "props": {"hidden": true, "w": 200, "h": 100}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let window = open(&mut d, 7, ops);
+        let t0 = Instant::now();
+        d.tick(t0);
+        d.call(request(
+            9,
+            "commit",
+            json!({"window": window, "ops": [{"op": "set", "id": 2, "props": {"hidden": false}}]}),
+            false,
+        ));
+        let dialog = global(&d, window, 2);
+        let backdrop = |d: &mut Desktop| {
+            let style = d.scene.style(dialog);
+            let full = style.var("backdrop");
+            let list = d.draw_list();
+            let alpha = list
+                .layers
+                .iter()
+                .flat_map(|l| l.quads.iter())
+                .find(|q| q.color.0[..3] == full.0[..3])
+                .map(|q| q.color.0[3]);
+            (alpha, full.0[3])
+        };
+        let (start, full) = backdrop(&mut d);
+        assert_eq!(start, Some(0), "invisible as it appears");
+        d.tick(t0 + crate::anim::STATE_FADE);
+        assert_eq!(backdrop(&mut d).0, Some(full));
     }
 }
 

@@ -8,14 +8,21 @@
 //! light or dark, and inside an app's windows the app's own sheet. Styles are
 //! computed top-down when something asks for them after a change, and kept until
 //! the next one; drawing, layout and text measuring all read the same ones.
+//!
+//! Positions and colours can move instead of jumping ([`crate::anim`]): a node's
+//! `transition` prop names the props that move when set, a style's colours fade
+//! when they change (a hover, a theme switch), and the desktop can move things too.
+//! Props always hold where things end up; drawing and placement read where they
+//! are now.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use protocol::{NodeId, NodeKind, Props, SceneOp};
 use serde_json::Value;
 
+use crate::anim::{self, Animator, Channel, Ease, StyleColor, Val};
 use crate::style::{NodeInfo, Scope, Sheet, Style};
 
 /// The implicit root every window is inserted under.
@@ -42,6 +49,11 @@ pub struct Scene {
     /// Scroll views' content sizes.
     content: HashMap<NodeId, (f32, f32)>,
     styles: Styles,
+    /// The styles last computed, to fade colours from when they change.
+    shown_styles: RefCell<Option<Arc<HashMap<NodeId, Style>>>>,
+    /// How long the next style change fades for.
+    fade: Cell<std::time::Duration>,
+    anim: RefCell<Animator>,
 }
 
 /// The style sheets in force, and the styles computed from them.
@@ -244,6 +256,161 @@ impl Scene {
             layout: HashMap::new(),
             content: HashMap::new(),
             styles: Styles::new(Arc::new(Sheet::system()), false),
+            shown_styles: RefCell::new(None),
+            fade: Cell::new(anim::STATE_FADE),
+            anim: RefCell::new(Animator::default()),
+        }
+    }
+
+    // --- Transitions ---------------------------------------------------------------
+
+    /// Advance transitions to `now`: when the frame being drawn will reach the
+    /// screen. Returns whether any still run. A frame is due while any do, and
+    /// once more when the last ends.
+    pub fn tick(&mut self, now: std::time::Instant) -> bool {
+        let anim = self.anim.get_mut();
+        let was = anim.is_animating();
+        let running = anim.tick(now);
+        if was {
+            self.dirty = true;
+        }
+        running
+    }
+
+    /// Whether anything is moving.
+    pub fn animating(&self) -> bool {
+        self.anim.borrow().is_animating()
+    }
+
+    /// With reduce motion on, everything changes at once.
+    pub fn set_reduce_motion(&mut self, on: bool) {
+        let anim = self.anim.get_mut();
+        anim.reduce_motion = on;
+        if on {
+            anim.clear();
+        }
+        self.dirty = true;
+    }
+
+    /// Move node `id`'s prop `prop` (one of [`anim::PROPS`]) from `from` to the
+    /// value it has now.
+    pub fn animate_from(
+        &mut self,
+        id: NodeId,
+        prop: &'static str,
+        from: Val,
+        duration: std::time::Duration,
+        ease: Ease,
+    ) {
+        let Some(to) = self.prop_value(id, prop, self.nodes.get(&id).and_then(|n| n.props.get(prop))) else {
+            return;
+        };
+        self.anim.get_mut().start(id, Channel::Prop(prop), from, to, duration, ease);
+        self.dirty = true;
+    }
+
+    /// A prop's value as a transition moves it: a number for `x` and `y`, a
+    /// colour (in node `id`'s style) for the rest.
+    fn prop_value(&self, id: NodeId, prop: &str, v: Option<&Value>) -> Option<Val> {
+        let v = v?;
+        match prop {
+            "x" | "y" => v.as_f64().map(|n| Val::Num(n as f32)),
+            _ => self.style(id).resolve(v.as_str()?).map(Val::Color),
+        }
+    }
+
+    /// The transitions a `set` of `props` on `id` starts: each prop its
+    /// `transition` names, from where it is now to its new value.
+    fn transitions(&self, id: NodeId, props: &Props) -> Vec<(&'static str, Val, Val, anim::Spec)> {
+        let Some(node) = self.nodes.get(&id) else { return Vec::new() };
+        let mut out = Vec::new();
+        for prop in anim::PROPS {
+            let Some(new) = props.get(prop) else { continue };
+            let spec = anim::spec(props, prop).or_else(|| anim::spec(&node.props, prop));
+            let Some(spec) = spec else { continue };
+            let shown = self.anim.borrow().value(id, Channel::Prop(prop));
+            let (Some(from), Some(to)) = (
+                shown.or_else(|| self.prop_value(id, prop, node.props.get(prop))),
+                self.prop_value(id, prop, Some(new)),
+            ) else {
+                continue;
+            };
+            out.push((prop, from, to, spec));
+        }
+        out
+    }
+
+    /// Node `id` as it's drawn now: its moving props at their current values.
+    fn moving_node(&self, id: NodeId, node: &Node) -> Node {
+        let anim = self.anim.borrow();
+        let mut node = node.clone();
+        for prop in anim::PROPS {
+            match anim.value(id, Channel::Prop(prop)) {
+                Some(Val::Num(n)) => {
+                    node.props.insert(prop.into(), n.into());
+                }
+                Some(Val::Color(c)) => {
+                    node.props.insert(prop.into(), anim::hex(c).into());
+                }
+                None => {}
+            }
+        }
+        if let Some(Val::Num(t)) = anim.value(id, Channel::Appear) {
+            node.props.insert("_appear".into(), t.into());
+        }
+        node
+    }
+
+    /// Node `id`'s style as it's drawn now: its fading colours at their current values.
+    fn moving_style(&self, id: NodeId, style: &Style) -> Style {
+        let anim = self.anim.borrow();
+        let mut style = style.clone();
+        let at = |c: StyleColor| match anim.value(id, Channel::Style(c)) {
+            Some(Val::Color(c)) => Some(c),
+            _ => None,
+        };
+        if let Some(c) = at(StyleColor::Color) {
+            style.color = c;
+        }
+        if let Some(c) = at(StyleColor::Accent) {
+            style.accent = c;
+        }
+        if let Some(c) = at(StyleColor::Background) {
+            style.background = Some(c);
+        }
+        if let Some(c) = at(StyleColor::Border) {
+            style.border = Some(c);
+        }
+        style
+    }
+
+    /// Fade the colours that changed between each node's last style and its new
+    /// one.
+    fn fade_styles(&self, before: &HashMap<NodeId, Style>, after: &HashMap<NodeId, Style>) {
+        let duration = self.fade.replace(anim::STATE_FADE);
+        let mut anim = self.anim.borrow_mut();
+        for (id, new) in after {
+            let Some(old) = before.get(id) else { continue };
+            let pairs = [
+                (StyleColor::Color, Some(old.color), Some(new.color)),
+                (StyleColor::Accent, Some(old.accent), Some(new.accent)),
+                (StyleColor::Background, old.background, new.background),
+                (StyleColor::Border, old.border, new.border),
+            ];
+            for (channel, from, to) in pairs {
+                if let (Some(from), Some(to)) = (from, to)
+                    && from != to
+                {
+                    anim.start(
+                        *id,
+                        Channel::Style(channel),
+                        Val::Color(from),
+                        Val::Color(to),
+                        duration,
+                        Ease::Out,
+                    );
+                }
+            }
         }
     }
 
@@ -261,11 +428,28 @@ impl Scene {
         }
         let apps: Vec<(NodeId, Arc<Sheet>)> =
             self.styles.apps.iter().map(|(id, (s, _))| (*id, s.clone())).collect();
+        // Colour props that name a variable ($surface, ...) change with the theme
+        // too: note them as they are, to fade from.
+        let mut before = Vec::new();
+        for (&id, node) in &self.nodes {
+            for prop in ["color", "text_color", "border_color"] {
+                let Some(text) = node.props.get(prop).and_then(Value::as_str) else { continue };
+                if (text.starts_with('$') || text.starts_with("var("))
+                    && let Some(c) = self.style(id).resolve(text)
+                {
+                    before.push((id, prop, c));
+                }
+            }
+        }
         self.styles = Styles::new(self.styles.system.clone(), dark);
+        self.fade.set(anim::THEME_FADE);
         for (id, sheet) in apps {
             self.set_app_style(id, Some(sheet));
         }
         self.restyled();
+        for (id, prop, c) in before {
+            self.animate_from(id, prop, Val::Color(c), anim::THEME_FADE, Ease::Out);
+        }
     }
 
     /// Style node `id` (a window's content area) and everything in it with an app's
@@ -316,6 +500,10 @@ impl Scene {
         }
         let out = Arc::new(out);
         self.styles.computed.replace(Some(out.clone()));
+        let before = self.shown_styles.replace(Some(out.clone()));
+        if let Some(before) = before {
+            self.fade_styles(&before, &out);
+        }
         out
     }
 
@@ -423,6 +611,24 @@ impl Scene {
     /// a buggy app must never be able to crash the compositor.
     pub fn apply(&mut self, op: SceneOp) {
         self.dirty = true;
+        // Transitions start from the old values, so find them before the change.
+        let starts = match &op {
+            SceneOp::Set { id, props } => self.transitions(*id, props),
+            _ => Vec::new(),
+        };
+        let appears = matches!(&op, SceneOp::Set { id, props }
+            if props.get("hidden") == Some(&Value::Bool(false))
+                && self.nodes.get(id).is_some_and(|n| n.kind == NodeKind::Dialog
+                    && n.props.get("hidden").and_then(Value::as_bool) == Some(true)));
+        if let SceneOp::Set { id, .. } = &op {
+            let anim = self.anim.get_mut();
+            for (prop, from, to, spec) in starts {
+                anim.start(*id, Channel::Prop(prop), from, to, spec.duration, spec.ease);
+            }
+            if appears {
+                anim.start(*id, Channel::Appear, Val::Num(0.0), Val::Num(1.0), anim::STATE_FADE, Ease::Out);
+            }
+        }
         self.styles.computed.replace(None);
         if !matches!(&op, SceneOp::Set { props, .. } if props.keys().all(|k| VISUAL.contains(&k.as_str()))) {
             self.layout_dirty = true;
@@ -489,6 +695,7 @@ impl Scene {
         }
         let Some(node) = self.nodes.remove(&id) else { return };
         self.styles.apps.remove(&id);
+        self.anim.get_mut().forget(id);
         if let Some(parent) = node.parent
             && let Some(p) = self.nodes.get_mut(&parent)
         {
@@ -537,7 +744,12 @@ impl Scene {
                     let next = Layer { key: (child, layer.key.1 + 1), ..Layer::default() };
                     list.layers.push(std::mem::replace(&mut layer, next));
                 }
-                crate::draw::draw(id, node, rect, clip, styles.get(&id).unwrap_or(root), &mut layer)
+                let style = styles.get(&id).unwrap_or(root);
+                if self.anim.borrow().moving(id) {
+                    crate::draw::draw(id, node, rect, clip, &self.moving_style(id, style), &mut layer)
+                } else {
+                    crate::draw::draw(id, node, rect, clip, style, &mut layer)
+                }
             });
             list.layers.push(layer);
         }
@@ -570,6 +782,13 @@ impl Scene {
         visit: &mut dyn FnMut(NodeId, &Node, Rect, Rect),
     ) {
         let Some(node) = self.nodes.get(&id) else { return };
+        let moving;
+        let node = if self.anim.borrow().moving(id) {
+            moving = self.moving_node(id, node);
+            &moving
+        } else {
+            node
+        };
         let p = &node.props;
         if p.get("hidden").and_then(Value::as_bool) == Some(true) {
             return;

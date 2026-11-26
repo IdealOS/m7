@@ -26,6 +26,7 @@ import {
   toolbar,
   virtualList,
   vstack,
+  node,
   openWindow,
   type UiNode,
 } from "@idealos/sdk";
@@ -63,6 +64,7 @@ await openWindow({ title: "Widget Gallery", width: 520, height: 620, style }, ()
   const [submitted, setSubmitted] = signal("");
   const [showDialog, setShowDialog] = signal(false);
   const [ratio, setRatio] = signal(0.4);
+  const [moved, setMoved] = signal(false);
   const colors = ["$accent", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"];
 
   return vstack(
@@ -87,6 +89,24 @@ await openWindow({ title: "Widget Gallery", width: 520, height: 620, style }, ()
         label({ text: "A serif heading", class: "serif" }),
         label({ text: "let x = 42; // monospace", class: "code" }),
         label({ text: "An italic note, in the muted colour.", class: "note" }),
+      ),
+      section(
+        "Transitions (the compositor moves it; the app only sets where to)",
+        hstack(
+          { gap: 12, align: "center" },
+          button({ label: "Move", onClick: () => setMoved((m) => !m) }),
+          node("group", { w: 260, h: 28 }, [
+            rect({
+              x: () => (moved() ? 220 : 0),
+              y: 0,
+              w: 40,
+              h: 28,
+              radius: 6,
+              color: () => (moved() ? "#10b981" : "$accent"),
+              transition: { x: [400, "ease-in-out"], color: 400 },
+            }),
+          ]),
+        ),
       ),
       section(
         "Checkbox and toggle",

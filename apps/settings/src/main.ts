@@ -269,23 +269,25 @@ function permissionsSection(shown: () => boolean): UiNode {
 
 // --- Display, Storage, About ---------------------------------------------------
 
-/** The setting the compositor follows for the light or dark theme. */
+/** The settings the compositor follows: the light or dark theme, and reduce motion. */
 const THEME_KEY = "appearance.theme";
+const MOTION_KEY = "appearance.reduce_motion";
 
 function displaySection(shown: () => boolean): UiNode {
   const [screen, setScreen] = signal<ScreenInfo | null>(null);
   const [message, setMessage] = signal("");
   const load = () => request<ScreenInfo>("compositor", "screen", null).then(setScreen, () => {});
   whenShown(shown, load);
-  // The theme setting, followed live (the compositor follows the same document).
-  const theme = db.live({ type: "Setting", where: { key: THEME_KEY } });
-  const dark = () => theme().some((d) => d.data.value === "dark");
-  const setDark = async (on: boolean) => {
+  // The appearance settings, followed live (the compositor follows the same documents).
+  const settings = db.live({ type: "Setting", where: { key: { $in: [THEME_KEY, MOTION_KEY] } } });
+  const setting = (key: string) => settings().find((d) => d.data.key === key);
+  const dark = () => setting(THEME_KEY)?.data.value === "dark";
+  const still = () => setting(MOTION_KEY)?.data.value === true;
+  const save = async (key: string, value: unknown) => {
     try {
-      const value = on ? "dark" : "light";
-      const doc = theme()[0];
+      const doc = setting(key);
       if (doc) await db.update(doc.id, { value });
-      else await db.put("Setting", { key: THEME_KEY, value });
+      else await db.put("Setting", { key, value });
       setMessage("");
     } catch (e) {
       setMessage(errorText(e));
@@ -296,8 +298,10 @@ function displaySection(shown: () => boolean): UiNode {
     heading("Display"),
     label({ text: () => (screen() ? `${screen()!.width} × ${screen()!.height} (logical pixels)` : "…") }),
     muted(() => (screen() ? `Workspace ${screen()!.workspace} of ${screen()!.workspaces}` : "")),
-    toggle({ label: "Dark theme", checked: dark, onChange: (on) => void setDark(on) }),
+    toggle({ label: "Dark theme", checked: dark, onChange: (on) => void save(THEME_KEY, on ? "dark" : "light") }),
     muted("Every app follows the theme, apart from colours an app sets itself."),
+    toggle({ label: "Reduce motion", checked: still, onChange: (on) => void save(MOTION_KEY, on) }),
+    muted("Things change at once instead of sliding and fading."),
     label({ text: message, color: "$danger", size: 13, hidden: () => message() === "" }),
   );
 }

@@ -14,7 +14,7 @@
       { "capability": "permissions" },
       { "capability": "storage" },
       { "type": "App", "access": ["read"] },
-      { "type": "Setting", "access": ["read", "write", "create"], "filter": { "key": "appearance.theme" } }
+      { "type": "Setting", "access": ["read", "write", "create"], "filter": { "key": { "$in": ["appearance.theme", "appearance.reduce_motion"] } } }
     ]
   },
   "scripts": {

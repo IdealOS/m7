@@ -10,6 +10,7 @@
 //! - [`backend`]: hosted (winit) and KMS display backends.
 //! - [`headless`]: offscreen rendering for screenshots and golden-image tests.
 
+pub mod anim;
 pub mod apps;
 pub mod backend;
 pub mod bus;

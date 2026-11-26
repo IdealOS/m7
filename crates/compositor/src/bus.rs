@@ -240,13 +240,16 @@ async fn follow_grants(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn(
 /// The setting that picks the theme: a `Setting` document with this key and the
 /// value `"dark"` or `"light"`. Settings writes it.
 pub const THEME_KEY: &str = "appearance.theme";
+/// The setting that turns transitions off: value `true` or `false`.
+pub const MOTION_KEY: &str = "appearance.reduce_motion";
 
-/// Follow the theme setting with a live query, passing each change to the frame
-/// loop. Without the setting the theme stays as the compositor started (`--theme`).
-/// If dbd isn't there (yet, or any more), try again a little later.
+/// Follow the appearance settings (the theme, reduce motion) with a live query,
+/// passing each change to the frame loop. Without a setting, things stay as the
+/// compositor started (`--theme`). If dbd isn't there (yet, or any more), try
+/// again a little later.
 async fn follow_theme(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn() + Send + Sync>) {
     use protocol::db::{Doc, WatchEvent};
-    let query = serde_json::json!({"type": "Setting", "where": {"key": THEME_KEY}});
+    let query = serde_json::json!({"type": "Setting", "where": {"key": {"$in": [THEME_KEY, MOTION_KEY]}}});
     let mut warned = false;
     loop {
         let mut stream = match bus.request_stream("db", "watch", query.clone()).await {
@@ -262,7 +265,7 @@ async fn follow_theme(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn()
         };
         // The setting's documents, by id (there should be one).
         let mut docs: std::collections::HashMap<String, Doc> = std::collections::HashMap::new();
-        let mut last: Option<bool> = None;
+        let (mut last_dark, mut last_motion): (Option<bool>, Option<bool>) = (None, None);
         while let Some(Ok(part)) = stream.next().await {
             match serde_json::from_value::<WatchEvent>(part) {
                 Ok(WatchEvent::Initial { docs: all }) => {
@@ -278,16 +281,29 @@ async fn follow_theme(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn()
                 }
                 Err(_) => continue,
             }
-            // The most recently changed one decides.
-            let dark = docs
-                .values()
-                .max_by_key(|d| d.updated)
-                .map(|d| d.data.get("value") == Some(&serde_json::json!("dark")));
+            // For each key, the most recently changed document decides.
+            let latest = |key: &str| {
+                docs.values()
+                    .filter(|d| d.data.get("key") == Some(&serde_json::json!(key)))
+                    .max_by_key(|d| d.updated)
+            };
+            let dark = latest(THEME_KEY).map(|d| d.data.get("value") == Some(&serde_json::json!("dark")));
+            let motion = latest(MOTION_KEY).map(|d| d.data.get("value") == Some(&serde_json::json!(true)));
+            let mut sent = Vec::new();
             if let Some(dark) = dark
-                && last != Some(dark)
+                && last_dark != Some(dark)
             {
-                last = Some(dark);
-                if calls.send(Call::Theme { dark }).is_err() {
+                last_dark = Some(dark);
+                sent.push(Call::Theme { dark });
+            }
+            if let Some(on) = motion
+                && last_motion != Some(on)
+            {
+                last_motion = Some(on);
+                sent.push(Call::ReduceMotion { on });
+            }
+            for call in sent {
+                if calls.send(call).is_err() {
                     return;
                 }
                 wake();

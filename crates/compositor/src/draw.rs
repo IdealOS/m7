@@ -344,8 +344,11 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, style: &Style, laye
             }
         }
         NodeKind::Dialog => {
-            // A backdrop over the rest of the window, then the panel.
-            o.quad(clip, style.var("backdrop"), Rgba::TRANSPARENT, 0.0, 0.0);
+            // A backdrop over the rest of the window (fading in as the dialog
+            // appears, `_appear` going from 0 to 1), then the panel.
+            let mut backdrop = style.var("backdrop");
+            backdrop.0[3] = (backdrop.0[3] as f32 * num(p, "_appear", 1.0).clamp(0.0, 1.0)).round() as u8;
+            o.quad(clip, backdrop, Rgba::TRANSPARENT, 0.0, 0.0);
             o.quad_clipped(rect, fill, border, 1.0, theme::radius::L, Rect::INFINITE.intersect(&clip));
         }
         NodeKind::Split => {

@@ -81,6 +81,8 @@ pub struct Display {
     back: usize,
     /// A page flip is queued and its event has not arrived yet.
     pending: bool,
+    /// When the last page flip happened (its vblank).
+    last_vblank: Option<Instant>,
     /// The CRTC has been set, so later frames page-flip.
     shown: bool,
     driver: String,
@@ -145,6 +147,7 @@ impl Display {
             buffers: Vec::new(),
             back: 0,
             pending: false,
+            last_vblank: None,
             shown: false,
             driver,
             cursor: None,
@@ -327,11 +330,27 @@ impl Display {
     /// call it only once the fd is readable or a flip is pending.
     pub fn dispatch_events(&mut self) -> Result<(), String> {
         for event in self.card.receive_events().map_err(|e| format!("receive events: {e}"))? {
-            if let Event::PageFlip(_) = event {
+            if let Event::PageFlip(flip) = event {
                 self.pending = false;
+                self.last_vblank = Some(monotonic_instant(flip.duration));
             }
         }
         Ok(())
+    }
+
+    /// When the next frame will reach the screen: a whole number of refresh periods
+    /// after the last page flip, the first one still to come. Animations are
+    /// sampled at this time, so motion is smooth even when a frame starts late.
+    pub fn next_vblank(&self) -> Instant {
+        let now = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / f64::from(self.refresh_hz().max(1)));
+        match self.last_vblank {
+            Some(v) if v <= now => {
+                let periods = (now - v).as_secs_f64() / period.as_secs_f64();
+                v + period.mul_f64(periods.floor() + 1.0)
+            }
+            _ => now,
+        }
     }
 
     /// Block until the pending page flip (if any) has happened, i.e. until vblank.
@@ -442,6 +461,15 @@ impl Drop for Display {
             let _ = self.card.destroy_dumb_buffer(b.buffer);
         }
     }
+}
+
+/// A CLOCK_MONOTONIC time (as DRM stamps events) as an `Instant`.
+fn monotonic_instant(at: Duration) -> Instant {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid timespec to fill.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    let now = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
+    Instant::now().checked_sub(now.saturating_sub(at)).unwrap_or_else(Instant::now)
 }
 
 #[cfg(test)]
