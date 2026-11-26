@@ -1,14 +1,17 @@
 #!/bin/sh
 # Preset a Wi-Fi network on a flashed Pi SD card (macOS), so the Pi joins it on its
 # next boot and can be reached over SSH without a keyboard or Ethernet.
-# Usage: tools/sd-wifi /dev/diskN        Find N with: diskutil list external
+# Usage: tools/sd-wifi /dev/diskN [SSID [PASSWORD]]   Find N with: diskutil list external
 #
-# Asks for the network's name and password (not echoed) and writes them to wifi.txt
-# on the card's boot partition. At boot, S05data saves them as a NetworkManager
-# profile on /data and deletes wifi.txt. Nothing is kept on this Mac. Run it again
-# to switch networks; profiles already saved stay until Forget in Settings.
+# Asks for whatever isn't given: the network's name, then its password (not
+# echoed). Given only an SSID, it still asks for the password, which keeps it out
+# of your shell history and `ps`; pass "" as the password for an open network.
+# Writes them to wifi.txt on the card's boot partition. At boot, S05data saves them
+# as a NetworkManager profile on /data and deletes wifi.txt. Nothing is kept on this
+# Mac. Run it again to switch networks; profiles already saved stay until Forget in
+# Settings.
 set -eu
-DISK="${1:?usage: tools/sd-wifi /dev/diskN (see: diskutil list external)}"
+DISK="${1:?usage: tools/sd-wifi /dev/diskN [SSID [PASSWORD]] (see: diskutil list external)}"
 INFO="$(diskutil info "$DISK")" || exit 1
 echo "$INFO" | grep -Eq "Device Location: +External|Removable Media: +(Removable|Yes)" \
 	|| { echo "$DISK is not an external or removable disk. Refusing."; exit 1; }
@@ -25,15 +28,23 @@ if [ ! -f "$MNT/start4.elf" ] && [ ! -f "$MNT/start.elf" ]; then
 	exit 1
 fi
 
-printf "Wi-Fi network name: "
-IFS= read -r SSID
+if [ $# -ge 2 ]; then
+	SSID="$2"
+else
+	printf "Wi-Fi network name: "
+	IFS= read -r SSID
+fi
 [ -n "$SSID" ] || { echo "No name given."; exit 1; }
 [ "$(printf '%s' "$SSID" | wc -c)" -le 32 ] || { echo "A network name is at most 32 bytes."; exit 1; }
-printf "Password (leave empty for an open network): "
-[ -t 0 ] && stty -echo
-IFS= read -r PASSWORD || true
-[ -t 0 ] && stty echo
-echo
+if [ $# -ge 3 ]; then
+	PASSWORD="$3"
+else
+	printf "Password (leave empty for an open network): "
+	[ -t 0 ] && stty -echo
+	IFS= read -r PASSWORD || true
+	[ -t 0 ] && stty echo
+	echo
+fi
 if [ -n "$PASSWORD" ]; then
 	len=$(printf '%s' "$PASSWORD" | wc -c | tr -d ' ')
 	[ "$len" -ge 8 ] && [ "$len" -le 63 ] || {

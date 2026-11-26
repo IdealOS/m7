@@ -392,6 +392,23 @@ Goal: no data is lost to a dead SD card or a bad update.
 
 **Done when (Phase 2 gate):** the author uses the system as their main computer for writing, mail and music for one week.
 
+## Future projects
+
+Not scheduled. Each needs its own go-ahead.
+
+### Pi 3: OpenGL ES 2.0 renderer
+
+The Pi 3's GPU (VideoCore IV, Mesa's `vc4` driver) only does OpenGL ES 2.0. It has no Vulkan driver (V3DV starts at the Pi 4's VideoCore VI), and wgpu's GL backend needs ES 3.0, so today the Pi 3 renders on the CPU through lavapipe. On a Pi 3B+ at 1080p a frame takes about 250 ms (4 fps at best), and the compositor uses about a full core even at rest. Rendering at 720p and letting the display hardware scale it up (`--render-height`) makes text fuzzy and didn't visibly help.
+
+- [ ] A second renderer behind the backend-neutral `DrawList`, on EGL with GBM and GLES 2.0. The scene, window manager and apps don't change.
+- [ ] Rounded rectangles and shadows as the same SDF shaders. ES 2.0 has no instancing, so build each quad's vertices on the CPU (a frame is a few hundred quads).
+- [ ] Its own glyph atlas for text: glyphon is wgpu-only.
+- [ ] Zero-copy scanout: render into GBM buffers and page-flip them, with no readback or copy.
+- [ ] The KMS backend picks this renderer when wgpu finds only a CPU adapter and `vc4` can render; the hosted backend and QEMU keep wgpu.
+- [ ] The image enables Mesa's `vc4` Gallium driver for the Pi 3.
+
+**Done when:** the Pi 3 draws the desktop at native 1080p at 30 fps or better while a window is dragged, with sharp text.
+
 ## Testing strategy
 
 Most tests run on the Mac and in CI without hardware. QEMU covers boot and Linux-only paths, and a performance script on the Pi closes each milestone.

@@ -4,7 +4,7 @@
 # apps/*/dist. Needs a built image (tools/build-image) for BOARD.
 # Both boards share the toolchain (aarch64 cortex-a72, same glibc), so binaries
 # from either output run on both.
-# Usage: [BOARD=qemu|rpi4] tools/build-device-bins
+# Usage: [BOARD=qemu|rpi3|rpi4] tools/build-device-bins
 set -eu
 . "$(dirname "$0")/_vm.sh"
 . "$(dirname "$0")/_bins.sh"

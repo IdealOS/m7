@@ -1,12 +1,13 @@
 #!/bin/sh
 # Build a device image in the idealos-build VM and copy it to image/output/<board>.
-# Usage: tools/build-image qemu|rpi4 [buildroot make args...]
+# Usage: tools/build-image qemu|rpi3|rpi4 [buildroot make args...]
 set -eu
 . "$(dirname "$0")/_vm.sh"
-BOARD="${1:?usage: tools/build-image qemu|rpi4}"
+BOARD="${1:?usage: tools/build-image qemu|rpi3|rpi4}"
 shift
 case "$BOARD" in
 	qemu) DEFCONFIG=qemu_aarch64_idealos_defconfig ;;
+	rpi3) DEFCONFIG=rpi3_idealos_defconfig ;;
 	rpi4) DEFCONFIG=rpi4_idealos_defconfig ;;
 	*) echo "unknown board: $BOARD"; exit 2 ;;
 esac

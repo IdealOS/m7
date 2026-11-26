@@ -1,17 +1,30 @@
 #!/bin/sh
-# Write the Pi 4 image to an SD card (macOS).
-# Usage: tools/flash-sd /dev/diskN      Find N with: diskutil list external
+# Write a Pi image to an SD card (macOS).
+# Usage: tools/flash-sd /dev/diskN [rpi4|rpi3 [SSID [PASSWORD]]]
+#   Find N with: diskutil list external
+# The board defaults to rpi4. The images aren't interchangeable: each Pi model
+# needs its own firmware and device tree, and boots nothing from the other's card.
+# With an SSID, presets that Wi-Fi network afterwards without asking (tools/sd-wifi;
+# it asks for the password if it isn't given). Otherwise it offers to.
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IMG="$REPO/image/output/rpi4/sdcard.img"
-DISK="${1:?usage: tools/flash-sd /dev/diskN (see: diskutil list external)}"
-[ -f "$IMG" ] || { echo "No Pi image. Run: tools/build-image rpi4"; exit 1; }
+DISK="${1:?usage: tools/flash-sd /dev/diskN [rpi4|rpi3 [SSID [PASSWORD]]] (see: diskutil list external)}"
+BOARD="${2:-rpi4}"
+case "$BOARD" in
+	rpi3 | rpi4) ;;
+	*) echo "unknown board: $BOARD (rpi4 or rpi3)"; exit 2 ;;
+esac
+# Whatever follows the board goes to sd-wifi: SSID, then optionally the password.
+[ $# -gt 2 ] && shift 2 || set --
+[ $# -le 2 ] || { echo "too many arguments: expected SSID [PASSWORD] after the board"; exit 2; }
+IMG="$REPO/image/output/$BOARD/sdcard.img"
+[ -f "$IMG" ] || { echo "No $BOARD image. Run: tools/build-image $BOARD"; exit 1; }
 
 INFO="$(diskutil info "$DISK")" || exit 1
 echo "$INFO" | grep -Eq "Device Location: +External|Removable Media: +Removable" \
 	|| { echo "$DISK is not an external or removable disk. Refusing."; exit 1; }
 echo "$INFO" | grep -E "Device / Media Name|Disk Size"
-printf "Erase everything on %s and write %s? Type yes: " "$DISK" "$(basename "$IMG")"
+printf "Erase everything on %s and write the %s image? Type yes: " "$DISK" "$BOARD"
 read -r answer
 [ "$answer" = yes ] || { echo "Cancelled."; exit 1; }
 
@@ -21,6 +34,7 @@ sudo dd if="$IMG" of="$RDISK" bs=4m status=progress
 sync
 # The card is still attached, so this is the moment to preset Wi-Fi (tools/sd-wifi
 # ejects it when done).
+[ $# -gt 0 ] && exec "$REPO/tools/sd-wifi" "$DISK" "$@"
 printf "Preset a Wi-Fi network, so the Pi joins it on first boot? [y/N]: "
 read -r answer
 case "$answer" in

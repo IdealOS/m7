@@ -52,9 +52,12 @@ make smoke-qemu    # boot it headless and check it, input included (~20 s); exit
 make smoke-deploy  # ...then rebuild, deploy binaries and apps over SSH, check everything restarted from them
 make smoke-report  # ...then run the Pi's first-boot hardware report against it
 make qemu          # boot it; serial console here, display in a window
-make image-rpi4    # Buildroot image for the Pi -> image/output/rpi4
-tools/flash-sd /dev/diskN        # write it to an SD card (diskutil list external); offers to preset Wi-Fi
-tools/sd-wifi /dev/diskN         # preset Wi-Fi on a flashed card: the Pi joins it on its next boot
+make image-rpi4    # Buildroot image for the Pi 4 -> image/output/rpi4
+make image-rpi3    # ...or for a Pi 3, rendering in software -> image/output/rpi3 (first build ~2-3 h)
+tools/flash-sd /dev/diskN        # write the Pi 4 image to an SD card (diskutil list external)
+tools/flash-sd /dev/diskN rpi3   # ...or the Pi 3 image; both offer to preset Wi-Fi afterwards
+tools/flash-sd /dev/diskN rpi3 MyWifi   # ...and preset that network without asking (prompts for its password)
+tools/sd-wifi /dev/diskN [SSID [PASSWORD]]   # preset Wi-Fi on a flashed card: the Pi joins it on its next boot
 make deploy HOST=192.168.1.50           # rebuild and push binaries and apps to a running dev image
 make deploy HOST=localhost PORT=2222   # ...or to QEMU
 make pi-report HOST=192.168.1.50        # hardware report + Spike A-D numbers -> image/output/reports
@@ -67,6 +70,10 @@ To reach a new Pi without Ethernet, preset Wi-Fi on the card: `tools/sd-wifi`
 writes the network's name and password to `wifi.txt` on the boot partition, and at
 boot `S05data` saves it as a NetworkManager profile on `/data` and deletes the file.
 It's an ordinary saved network afterwards (Settings → Network can forget it).
+Both scripts take the SSID and password as arguments, and ask for whichever is
+missing. A password given as an argument lands in your shell history and is
+visible in `ps` while the script runs, so leave it off to be asked instead (`""`
+means an open network).
 
 `tools/build-image` makes an SSH key, `image/output/dev-key`, and bakes its public
 half into dev images as root's only login. `make deploy` uses it, so reflash after
@@ -119,16 +126,17 @@ docs/               feature list, implementation plan, screenshots
 | Window manager v0: raise on click, drag by title bar, Alt+Tab | Done, tested. Both backends feed one `Seat`, so mouse, tablet and keyboard drive the same code. |
 | Damage tracking | Frame-level only: an idle scene draws nothing. Region damage is still to do. |
 | Headless render to PNG | Done (screenshots, future golden-image tests) |
-| `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. |
+| `session` supervisor with restart backoff | Done, tested on macOS. Stops its services on SIGTERM (SIGKILL after 2 s), so a restart leaves nothing behind. Gives up on a service that fails 5 times in a row without running a minute (a missing driver won't fix itself, and the restarts would bury the console shell); `launch` retries an app, and restarting session retries everything. |
 | Bundled UI font | Done: Inter (variable, SIL OFL) is built into the compositor as the sans-serif face on every target; system fonts are only fallbacks for other scripts. |
 | Images, transforms beyond translation | Not started. |
 | KMS backend | **Output and input work** (M1): `compositor --backend kms` draws the scene with three page-flipped dumb buffers (Spike A's copy path), redraws only when the scene changes, and takes keyboard and pointer input through libinput and xkbcommon. The pointer is a hardware cursor, so moving it costs no redraw (checked by eye in QEMU's window; screendumps leave it out). It picks the first DRM card with a connected display (on a Pi 4, `vc4`, not `v3d`). While it runs, the text console's keyboard and drawing are off, so keys don't also reach the console (on the Pi, a root shell); it exits cleanly on SIGTERM and gives them back. Mesa's shader cache lives on `/data/cache`. Not yet: the zero-copy Pi path (Spike B). |
 | Buildroot image for QEMU | **Built and booted** (Buildroot 2026.08.2, kernel 6.12.58). Boots to `session` in ~0.4 s under HVF; `/data` and the dev overlay mount; the compositor shows its first frame on virtio-gpu (lavapipe), finds QEMU's virtio keyboard and tablet, and moves a window dragged by its title bar and raises the next on Alt+Tab. `make smoke-qemu` checks all of this. |
-| Buildroot image for the Pi | **Built** on the first try (~45 min, reusing downloads): Pi kernel `stable_20250916`, V3DV Vulkan driver, firmware with the `vc4-kms-v3d-pi4` overlay, and the dev SSH key, in a 3.3 GB `sdcard.img`. **Never booted**: no Pi on hand yet. |
+| Buildroot image for the Pi 4 | **Built** on the first try (~45 min, reusing downloads): Pi kernel `stable_20250916`, V3DV Vulkan driver, firmware with the `vc4-kms-v3d-pi4` overlay, and the dev SSH key, in a 3.3 GB `sdcard.img`. **Never booted**: no Pi 4 on hand yet. |
+| Buildroot image for the Pi 3 | A stand-in until a Pi 4 is on hand (`make image-rpi3`): the same kernel, partitions, services and apps, with Pi 3 firmware (`bootcode.bin`, `start.elf`), the 3B and 3B+ device trees and the `vc4-kms-v3d` overlay. The Pi 3's GPU has no Vulkan driver, so the compositor renders with lavapipe, as under QEMU: slower, and no measure of the Pi 4's GPU path. 1 GB of memory. **Boots on a Pi 3B+** to the desktop on 1080p HDMI, joins Wi-Fi from a preset, and takes SSH and `make deploy`. Its drivers are xz-compressed modules, so the image builds host and target kmod with xz and uses kmod's `modprobe` (the kernel runs it to load `brcmfmac-wcc`); `post-image.sh` fails the build if `vc4` or `brcmfmac` is missing from `modules.dep`. A 1080p frame takes about 250 ms (4 fps at best). Rendering 720 rows and letting the display scale them up (`compositor --render-height 720`) made text fuzzy without a visible speed-up, so it's opt-in; an OpenGL ES 2.0 renderer is filed under Future projects in the plan. |
 | Lima build VM, image build, QEMU boot | Run end to end. |
-| SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes every service binary and app bundle, and checks that session, each service and the apps restarted from the overlay with the old shell gone. Not yet run against a Pi. |
-| Hardware report (`make pi-report`) | **Works against QEMU**: `make smoke-report` runs it end to end and checks every section, both kms-probe runs, the compositor finding input, both benchmark tables, and that the desktop comes back. Not yet run on a Pi. |
-| SD card flashing | **Works**: `tools/flash-sd` wrote the Pi 4 image to a 15.5 GB card, and its four partitions read back on the Mac. `tools/sd-wifi` (Wi-Fi preset) tested against a copy of the image attached as a disk; the Pi side, against QEMU's NetworkManager in `make smoke-qemu`. |
+| SSH deploy | **Works against QEMU**: `make smoke-deploy` rebuilds, pushes every service binary and app bundle, and checks that session, each service and the apps restarted from the overlay with the old shell gone. Also run against a Pi 3B+ over Wi-Fi. |
+| Hardware report (`make pi-report`) | **Works against QEMU**: `make smoke-report` runs it end to end and checks every section, both kms-probe runs, the compositor finding input, both benchmark tables, and that the desktop comes back. **Run on a Pi 3B+**: all sections completed (kms-probe, the compositor, both benchmarks), and the desktop came back. |
+| SD card flashing | **Works**: `tools/flash-sd` wrote the Pi 4 image to a 15.5 GB card, and its four partitions read back on the Mac. `tools/sd-wifi` (Wi-Fi preset) tested against a copy of the image attached as a disk; the Pi side, against QEMU's NetworkManager in `make smoke-qemu`, and on a Pi 3B+, which joined the preset network on first boot. Both scripts take the SSID and password as arguments. |
 
 ### Message bus (M2)
 

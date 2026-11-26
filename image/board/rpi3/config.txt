@@ -1,0 +1,10 @@
+# Raspberry Pi 3 firmware config
+arm_64bit=1
+kernel=Image
+# Full KMS driver: the compositor drives the display through DRM/KMS. The Pi 3's
+# GPU has no Vulkan driver, so the compositor renders on the CPU (lavapipe) and
+# copies each frame into a KMS dumb buffer, as it does under QEMU.
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+disable_overscan=1
+enable_uart=1

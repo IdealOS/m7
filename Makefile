@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk apps app-host protocol tools-check
+.PHONY: hosted bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-report sdk apps app-host protocol tools-check
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -69,6 +69,9 @@ check-defconfigs:  ## Fail if Buildroot drops any defconfig option (needs the bu
 
 image-qemu:
 	tools/build-image qemu
+
+image-rpi3:        ## Buildroot image for the Pi 3 (software rendering) -> image/output/rpi3
+	tools/build-image rpi3
 
 image-rpi4:
 	tools/build-image rpi4
