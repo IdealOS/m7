@@ -37,7 +37,7 @@ Phase 1 · Core OS                                    │
                            ▼
                       M7 First apps
 Phase 2 · Daily driver     ▼
-                      M8 Backup and updates
+                      M8 Backup and restore
                            │
      ┌──────────┬──────────┼──────────┬──────────┬──────────┐
      ▼          ▼          ▼          ▼          ▼          ▼
@@ -324,25 +324,43 @@ Goal: the Pi boots straight to a desktop that can join Wi-Fi, browse documents a
 
 M8 comes first. After that, M9 to M14 depend only on Phase 1 and can be built in any order, except that full HTML email waits for the browser.
 
-### M8: Backup, restore and updates
+### M8: Backup and restore
 
-Goal: no data is lost to a dead SD card or a bad update.
+Goal: no data is lost to a dead SD card. Encrypted backups, a recovery boot and system updates moved to a later milestone (see [Later: encryption, recovery and system updates](#later-encryption-recovery-and-system-updates)).
 
 - [ ] `backupd`: scheduled snapshots, and backup to a USB drive. Backups are incremental because blobs are named by hash.
-- [ ] Optional encryption of backups, using a key held by `secretsd`.
-- [ ] Restore: a recovery boot mode that restores the data partition from a backup. Restoring onto a running system works first (Settings > Backup, or `osctl backup restore`): a freshly flashed card boots, then takes on the backed-up device's database and identity. The recovery boot is for a device that can't start.
+- [ ] Restore onto a running system (Settings > Backup, or `osctl backup restore`): a freshly flashed card boots, then takes on the backed-up device's database and identity.
 - [ ] History compaction: keep everything for 30 days, then daily for a year, then weekly; pinned versions are kept; unreferenced blobs are swept.
-- [ ] RAUC A/B system updates, with automatic rollback if the new slot fails to boot. How releases reach beta testers (GitHub Releases, a release image, signing, database rollback) is planned in [releases.md](releases.md).
 - [ ] Settings: Storage and Backup pages.
 
-**Done when:** after wiping the data partition, a restore from USB brings back every document and blob, and a deliberately broken update rolls back.
+**Done when:** after wiping the data partition, a restore from USB brings back every document and blob.
 
 ### M9: Text editor
 
-- [ ] `TextDocument` schema with CRDT text.
-- [ ] Editor app built on the bound multiline widget: open, create, rename, find and replace.
-- [ ] Version history sidebar using the history API.
-- [ ] Plain text and Markdown first; syntax highlighting later.
+Goal: a place to write that never loses anything. Documents are database records, so there are no files and no Save button: every keystroke is stored, history keeps every version, and undo survives a restart. Most of the work is UI; the database already does persistence, history, search and links.
+
+Compositor work first:
+
+- [ ] **Bound fields follow live changes.** Today a bound text field loads its text once, so a restored version, another window on the same document or an edit from elsewhere doesn't show. The field should follow its document with a live query.
+- [ ] **Long documents.** Text areas shape their whole text each time, which is fine for notes but slow for a long chapter: shape and lay out only what changed and what's visible.
+- [ ] **Styled runs in a text area** (bold, headings, colours), for Markdown shown as you type and later syntax highlighting. Not needed for the first version, which previews beside the text.
+
+The editor:
+
+- [ ] `TextDocument` schema with CRDT text (the body as Loro text, so edits merge); `format` is plain text or Markdown.
+- [ ] Editor app built on the bound multiline widget: create, open, rename, delete (undoable).
+- [ ] A document list: recent first, full-text search, and filters by tag and format.
+- [ ] Find and replace, with match case and whole word.
+- [ ] Word and character counts, and the caret's line and column.
+- [ ] Version history sidebar using the history API: a timeline to scrub through, the diff of each change, and restoring a version (a new change, so it can be undone). Pinned versions (`pin`), such as "draft sent", which history compaction keeps.
+- [ ] Markdown: a live preview beside the text (headings, lists, emphasis, links, code); links to other documents as `$link`, so backlinks work; images stored as blobs.
+- [ ] Writing comfort: monospace or serif modes through the app's `style.css`, a focus mode that hides the toolbar, and the Emacs and macOS text keys.
+
+Later:
+
+- [ ] Syntax highlighting for code.
+- [ ] Several cursors; editing together across devices once sync exists.
+- [ ] Export to `.md` and `.txt` (with M14's import and export).
 
 **Done when:** the author writes real documents in it.
 
@@ -359,11 +377,39 @@ Goal: no data is lost to a dead SD card or a bad update.
 
 ### M11: Music player
 
-- [ ] `audiod` on PipeWire, decoding with symphonia.
-- [ ] Audio importer: tags read with lofty become `Track` documents; audio files and cover art become blobs.
-- [ ] Player app: library by artist and album, playlists, queue, now playing.
+Goal: your music library on the Pi, playing without a skip. Playback lives in `audiod`, a service, not in the app: the app's JavaScript can stall or quit, but audio mustn't, so the app is a remote control and music keeps playing when it's closed.
 
-**Done when:** an album imported from USB plays from the library.
+System work first:
+
+- [ ] **Audio in the image:** PipeWire and the Pi's audio drivers (headphone jack, HDMI, USB audio), with the output chosen in Settings. Nothing plays sound today.
+- [ ] **A media control the compositor draws** in the top bar (play, pause, next, what's playing) and media keys, so playback can be controlled from anywhere. Trusted chrome, like the prompt.
+- [ ] **Finding files on USB drives:** the start of M14's `importd`, sharing backupd's drive detection and mounting.
+
+`audiod`:
+
+- [ ] Decoding with symphonia (MP3, FLAC, AAC, Vorbis, WAV), playing through PipeWire, gapless between tracks.
+- [ ] Play, pause, next, previous, seek and volume; a queue it owns (play next, add to queue, shuffle, repeat); ReplayGain from the tags.
+- [ ] A `watch` stream of what's playing, for the app and the top bar.
+
+The library:
+
+- [ ] An importer: tags read with lofty become `Track` documents; audio files and cover art become blobs, stored once (duplicates are skipped, since blobs are named by hash), with progress shown.
+- [ ] Ratings, play counts and last played on each `Track`.
+- [ ] `Playlist` documents linking to tracks, and smart playlists as live queries ("rated 4+", "added this month", "never played") that keep themselves current.
+
+The player app:
+
+- [ ] Browse by artist, album, genre and year, with cover art; full-text search over titles, artists and albums.
+- [ ] Now playing: large cover art, progress, and the queue beside it.
+- [ ] Playlists: make, edit and reorder them (drag and drop).
+
+Later:
+
+- [ ] Lyrics from the tags, and an equaliser.
+- [ ] Internet radio and podcasts (with the network grant).
+- [ ] Playing from a backup drive without importing.
+
+**Done when:** an album imported from USB plays from the library, keeps playing with the app closed, and is controlled from the top bar.
 
 ### M12: Chat (dummy service)
 
@@ -387,7 +433,16 @@ Goal: no data is lost to a dead SD card or a bad update.
 ### M14: Database shell, import and export, history viewer
 
 - [ ] Database shell: a Nushell-style pipeline language (`emails | where from.name == "Bob" | sort date | first 10`) that prints tables in the terminal.
-- [ ] `importd`: detects USB drives and imports images (with EXIF), audio, PDFs, vCards and text. Export writes records back to files.
+- [ ] `importd`: the border between files and the database. Files come in as typed documents (their bytes as blobs); documents go out as ordinary files. Parts of it come earlier: M11 needs the USB scanning and the audio importer, M13 hands it downloads.
+  - **Finding files:** shares backupd's drive detection and mounting (mounted only while reading), adding FAT32 for cameras and older sticks. A scan lists what a drive holds by kind, with counts and sizes, before anything is imported. Downloads arrive as a file descriptor, as `put_blob` takes them.
+  - **One importer per kind:** images (JPEG, PNG, HEIC) become `Image` documents with EXIF date, camera, location and size; audio becomes `Track` documents (lofty tags, cover art); PDFs a new `Document` type (title, author, pages, text for search, maybe later); vCards `Contact` documents; `.txt` and `.md` `TextDocument`s.
+  - **Safe to repeat and undo:** blobs are named by hash, so re-plugging a card imports nothing twice; each import is one change set ("imported 312 photos from CAMERA"), so it undoes in one step; each document keeps where it came from (drive, path, date).
+  - **Export:** chosen documents or a query ("all photos from 2025") written to a drive as files: images in their original bytes, contacts as `.vcf`, text as `.md`.
+  - **Who may use it:** trusted apps with `service:import` (Settings, a Files app, Music for its own imports); it writes many types, so it acts with its own rights. It parses untrusted files, so it runs sandboxed like an app, and a bad file fails as one item, never the service.
+  - **Network shares:** SMB, which macOS File Sharing, Windows and NAS boxes all serve. Computers are found by name over Bonjour (mDNS, `_smb._tcp`); the user signs in once and the password is kept in `secretsd`. A share is mounted read-only with the kernel's CIFS client (`nosuid`, `nodev`, `noexec`) only while scanning and importing, then goes through the same scan and importers as a USB drive. Bulk imports (a whole music archive) run in the background with progress, carry on with the window closed, and resume cheaply after an interruption, since anything already stored by hash is skipped. Needs CIFS in the kernel, mDNS discovery, and the `network` grant for `importd`.
+  - **First slice (next, after the style work):** enough for QEMU to browse a folder shared from the Mac and import its files into the database. CIFS in the QEMU kernel; `importd` connects to a share by address (QEMU's network reaches the Mac at `10.0.2.2`; Bonjour can't cross it, so discovery waits for the Pi), with the password in `secretsd`; `browse` lists folders and files; `import` copies the chosen ones in as blobs with their documents (text and images first, then audio), in the background with progress, skipping what's already stored. `osctl import` drives it, then a small Files page. Done when QEMU lists a Mac folder and imported files show up in the database.
+  - **A developer shortcut:** `make import HOST=… DIR=…` sends files from a Mac over SSH to `osctl import`, for testing the importers.
+  - Later: photos straight from a phone (MTP); playing from a share without copying (index only), which breaks when the computer sleeps and leaves the music out of backups.
 - [ ] History viewer: a timeline per document, plus a global list of change sets with undo.
 
 **Done when (Phase 2 gate):** the author uses the system as their main computer for writing, mail and music for one week.
@@ -395,6 +450,16 @@ Goal: no data is lost to a dead SD card or a bad update.
 ## Future projects
 
 Not scheduled. Each needs its own go-ahead.
+
+### Later: encryption, recovery and system updates
+
+Moved out of M8, to come after the Phase 2 apps or when beta testers need them.
+
+- [ ] Optional encryption of backups. The key must survive a dead SD card, so it needs a recovery code the user writes down or a passphrase, not only a copy in `secretsd`.
+- [ ] A recovery boot mode that restores the data partition from a backup, for a device that can't start.
+- [ ] RAUC A/B system updates, with automatic rollback if the new slot fails to boot. The image already has both root slots. How releases reach beta testers (GitHub Releases, a release image, signing, database rollback) is planned in [releases.md](releases.md).
+
+**Done when:** an encrypted backup restores with only its recovery code, a device that won't boot restores from USB, and a deliberately broken update rolls back.
 
 ### Pi 3: OpenGL ES 2.0 renderer
 
@@ -449,6 +514,10 @@ button:pressed { background: var(--control-pressed); }
 At 3440x1440 the Pi 4 moves a window at about 35 fps (a drag's cost, mostly the fixed tile cost of a partial frame), and 1080p should reach 60. Short transitions, 150 to 200 ms, hide a lower frame rate well.
 
 **Done when:** switching to dark in Settings restyles every open app at once; an app overrides the accent colour and a font from its own `style.css`; the terminal's family comes from the style; switching workspaces slides the windows across, and hover and press colours fade, at full frame rate on the Pi 4 at 1080p.
+
+### Grow /data to fill the card
+
+- [ ] **On first boot, grow the data partition to fill the SD card.** `/data` is a fixed 2 GB in the image today, whatever the card's size, so a music or photo library soon fills it. `S05data` would grow the partition (it's the last one) and the ext4 filesystem on it once, at first boot, and record that it did. Needed before bulk imports from shares or USB; worth doing before M10 and M11.
 
 ### HiDPI scaling
 
