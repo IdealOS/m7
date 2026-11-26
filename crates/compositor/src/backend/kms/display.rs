@@ -6,6 +6,9 @@
 //! longer costs a whole extra period.
 //!
 //! The pointer is a hardware cursor, so moving it never redraws the scene.
+//!
+//! The buffers can be smaller than the display mode ([`Display::scale_from`]): the
+//! primary plane then scales them up to fill the screen, in the display hardware.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -13,12 +16,12 @@ use std::time::{Duration, Instant};
 
 use crate::cursor::Bitmap;
 
-use drm::Device as _;
 use drm::buffer::{Buffer as _, DrmFourcc};
 use drm::control::{
     Device as ControlDevice, Event, Mode, ModeTypeFlags, PageFlipFlags, connector, crtc,
     dumbbuffer::DumbBuffer, framebuffer,
 };
+use drm::{ClientCapability, Device as _};
 
 /// Pixel format of the scanout buffers. BGRA bytes in memory are XRGB8888 on
 /// little-endian, so a `Bgra8UnormSrgb` texture's rows copy straight over.
@@ -83,6 +86,9 @@ pub struct Display {
     driver: String,
     /// The cursor image, once [`Display::show_cursor`] has succeeded.
     cursor: Option<Cursor>,
+    /// Size of the scanout buffers: the mode's, unless [`Display::scale_from`] made
+    /// them smaller.
+    render: (u32, u32),
 }
 
 struct Cursor {
@@ -142,8 +148,10 @@ impl Display {
             shown: false,
             driver,
             cursor: None,
+            render: (0, 0),
         };
-        let (w, h) = display.size();
+        display.render = display.mode_size();
+        let (w, h) = display.render;
         for _ in 0..buffers {
             let buffer = display
                 .card
@@ -156,9 +164,90 @@ impl Display {
         Ok(display)
     }
 
+    /// Size of the frames to draw: the display mode's, or smaller once
+    /// [`Display::scale_from`] has succeeded.
     pub fn size(&self) -> (u32, u32) {
+        self.render
+    }
+
+    /// Size of the display mode, the pixels on screen.
+    pub fn mode_size(&self) -> (u32, u32) {
         let (w, h) = self.output.mode.size();
         (w as u32, h as u32)
+    }
+
+    /// Draw frames of `size` from now on, and have the display hardware scale them up
+    /// to the mode. Rendering on the CPU costs per pixel, so this is how a Pi 3 gets a
+    /// usable frame rate on a 1080p display.
+    ///
+    /// This sets the mode now (showing the first, black, buffer), then moves the CRTC's
+    /// primary plane to a smaller buffer, scaled to the whole screen. Later frames
+    /// page-flip between the small buffers; a flip keeps the plane's scaling. On an
+    /// error, such as a driver that can't scale planes (virtio-gpu in QEMU), the
+    /// buffers stay at the mode's size and frames are drawn at that size as before.
+    pub fn scale_from(&mut self, size: (u32, u32)) -> Result<(), String> {
+        assert!(!self.shown, "scale before the first flip");
+        let (w, h) = size;
+        let mode = self.mode_size();
+        // The mode can only be set with a buffer as big as the mode: the first one.
+        let base = self.buffers[0].fb;
+        self.card
+            .set_crtc(self.output.crtc, Some(base), (0, 0), &[self.output.connector], Some(self.output.mode))
+            .map_err(|e| format!("set CRTC (is another process DRM master?): {e}"))?;
+        self.shown = true;
+        self.back = 1;
+        // Planes, primary ones included, are only listed to clients that ask for them.
+        self.card
+            .set_client_capability(ClientCapability::UniversalPlanes, true)
+            .map_err(|e| format!("can't list planes: {e}"))?;
+        // The CRTC's primary plane is the one now showing the base buffer.
+        let plane = self
+            .card
+            .plane_handles()
+            .map_err(|e| format!("list planes: {e}"))?
+            .into_iter()
+            .find(|&p| self.card.get_plane(p).is_ok_and(|info| info.framebuffer() == Some(base)))
+            .ok_or("no plane is showing the display's buffer")?;
+        let mut small = Vec::new();
+        let result = (|| {
+            for _ in 0..self.buffers.len() {
+                let buffer = self
+                    .card
+                    .create_dumb_buffer((w, h), DrmFourcc::Xrgb8888, 32)
+                    .map_err(|e| format!("create dumb buffer: {e}"))?;
+                let fb = match self.card.add_framebuffer(&buffer, 24, 32) {
+                    Ok(fb) => fb,
+                    Err(e) => {
+                        let _ = self.card.destroy_dumb_buffer(buffer);
+                        return Err(format!("add framebuffer: {e}"));
+                    }
+                };
+                small.push(Scanout { buffer, fb });
+            }
+            // Source coordinates are 16.16 fixed point.
+            self.card
+                .set_plane(
+                    plane,
+                    self.output.crtc,
+                    Some(small[0].fb),
+                    0,
+                    (0, 0, mode.0, mode.1),
+                    (0, 0, w << 16, h << 16),
+                )
+                .map_err(|e| format!("the display can't scale {w}x{h} up to {}x{}: {e}", mode.0, mode.1))
+        })();
+        // Whichever set of buffers isn't on screen now goes.
+        let unused = match result {
+            Ok(()) => std::mem::replace(&mut self.buffers, small),
+            Err(_) => small,
+        };
+        for b in unused {
+            let _ = self.card.destroy_framebuffer(b.fb);
+            let _ = self.card.destroy_dumb_buffer(b.buffer);
+        }
+        result?;
+        self.render = size;
+        Ok(())
     }
 
     pub fn refresh_hz(&self) -> u32 {
@@ -271,8 +360,13 @@ impl Display {
 
     /// Put the cursor's hotspot at `(x, y)`. Does nothing before `show_cursor`.
     #[allow(deprecated)] // see show_cursor
+    /// `(x, y)` is in frame coordinates; the cursor plane is in the mode's, which
+    /// differ while the frame is scaled up.
     pub fn move_cursor(&self, x: f32, y: f32) -> Result<(), String> {
         let Some(cursor) = &self.cursor else { return Ok(()) };
+        let (mode, frame) = (self.mode_size(), self.render);
+        let x = x * mode.0 as f32 / frame.0 as f32;
+        let y = y * mode.1 as f32 / frame.1 as f32;
         let pos = (x as i32 - cursor.hotspot.0, y as i32 - cursor.hotspot.1);
         self.card.move_cursor(self.output.crtc, pos).map_err(|e| format!("move cursor: {e}"))
     }

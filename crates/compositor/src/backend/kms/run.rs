@@ -35,10 +35,22 @@ pub fn run(opts: Options) -> Result<(), Box<dyn std::error::Error>> {
     // First, before wgpu starts any threads; see Signals::block.
     let signals = Signals::block()?;
     let mut display = Display::open(opts.card.as_deref(), BUFFERS)?;
+    let mode = display.size();
+    let mut target = Offscreen::new(mode.0, mode.1, RENDER_FORMAT)?;
+    // Render fewer pixels and let the display scale them up, if asked.
+    let cpu = target.adapter.device_type == wgpu::DeviceType::Cpu;
+    let want = opts.render_height.size(mode, cpu);
+    if want != mode {
+        match display.scale_from(want) {
+            Ok(()) => target.resize(want.0, want.1),
+            Err(e) => log::warn!("kms: {e}; rendering at {}x{}", mode.0, mode.1),
+        }
+    }
     let (w, h) = display.size();
-    let mut target = Offscreen::new(w, h, RENDER_FORMAT)?;
+    // tools/smoke-checks.ts reads the frame size from "at WxH @".
+    let scaled = if (w, h) == mode { String::new() } else { format!(", scaled up to {}x{}", mode.0, mode.1) };
     log::info!(
-        "kms: {} on {} at {w}x{h} @ {} Hz; adapter {} ({:?})",
+        "kms: {} on {} at {w}x{h} @ {} Hz{scaled}; adapter {} ({:?})",
         display.driver(),
         display.output_name(),
         display.refresh_hz(),

@@ -5,6 +5,10 @@
 //! copied into one of three KMS dumb buffers, and that buffer is page-flipped on
 //! vblank. It works with any Vulkan driver, lavapipe included.
 //!
+//! It can also render fewer rows than the display mode and have the display's primary
+//! plane scale the frame up, in the display hardware (`--render-height`; see
+//! [`crate::backend::RenderHeight`]). That's off by default: text comes out fuzzy.
+//!
 //! Input comes from libinput ([`input`]), with keymaps from xkbcommon, and feeds the
 //! same [`crate::input::Seat`] as the hosted backend. The pointer is drawn on the
 //! display's cursor plane, so moving it costs no redraw. While it runs, the text

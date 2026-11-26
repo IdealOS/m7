@@ -13,12 +13,17 @@
 //!                                    # steps too, spread over the time in order
 //! compositor --backend kms           # device backend (Linux, feature "kms")
 //! compositor --backend kms --card /dev/dri/card1
+//! compositor --backend kms --render-height 720
+//!                                    # render at most 720 rows and let the display
+//!                                    # scale them up (text gets fuzzy); "auto"
+//!                                    # means 720 when rendering on the CPU, and
+//!                                    # "native" (the default) never scales
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use compositor::backend::Options;
+use compositor::backend::{Options, RenderHeight};
 use compositor::desktop::Desktop;
 use compositor::input::{Input, Key, Mods};
 use compositor::{bus, demo, headless};
@@ -49,6 +54,10 @@ fn main() -> ExitCode {
             "--scale" => scale = value("--scale").parse().unwrap_or_else(|_| usage("bad --scale")),
             "--continuous" => opts.continuous = true,
             "--card" => opts.card = Some(value("--card")),
+            "--render-height" => {
+                opts.render_height = RenderHeight::parse(&value("--render-height"))
+                    .unwrap_or_else(|| usage("--render-height is auto, native or a number of rows"))
+            }
             "--screenshot" => screenshot = Some(value("--screenshot").into()),
             "--serve-for" => {
                 serve_for = value("--serve-for").parse().unwrap_or_else(|_| usage("bad --serve-for"))
@@ -201,7 +210,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

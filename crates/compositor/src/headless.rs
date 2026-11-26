@@ -82,6 +82,38 @@ impl Offscreen {
             })
             .await
             .map_err(|e| format!("request_device: {e}"))?;
+        let (texture, view, readback, padded_row) = Self::target(&device, width, height, format);
+        let renderer = Renderer::new(&device, &queue, format);
+        Ok(Offscreen {
+            adapter: adapter.get_info(),
+            device,
+            queue,
+            texture,
+            view,
+            readback,
+            renderer,
+            width,
+            height,
+            padded_row,
+        })
+    }
+
+    /// Render at `width` x `height` from now on. Keeps the device, so it costs only
+    /// the new texture and readback buffer.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let (texture, view, readback, padded_row) =
+            Self::target(&self.device, width, height, self.texture.format());
+        (self.texture, self.view, self.readback, self.padded_row) = (texture, view, readback, padded_row);
+        (self.width, self.height) = (width, height);
+    }
+
+    /// The texture to render into, and the buffer its rows are read back through.
+    fn target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Buffer, u32) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -102,19 +134,7 @@ impl Offscreen {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let renderer = Renderer::new(&device, &queue, format);
-        Ok(Offscreen {
-            adapter: adapter.get_info(),
-            device,
-            queue,
-            texture,
-            view,
-            readback,
-            renderer,
-            width,
-            height,
-            padded_row,
-        })
+        (texture, view, readback, padded_row)
     }
 
     /// Render one frame and hand each row of tightly packed pixels to `row`, top to bottom.
