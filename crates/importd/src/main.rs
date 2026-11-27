@@ -1,8 +1,11 @@
-//! `importd [--dir ROOT] [--mounts DIR] [--socket PATH]`: run the `import` service.
+//! `importd [--dir ROOT] [--mounts DIR] [--reader PROGRAM] [--socket PATH]`: run
+//! the `import` service.
 //!
 //! Shares are mounted under `DIR` while in use (`/run/idealos/import`). `--dir`
 //! lets `dir:` sources import from folders inside `ROOT` on this machine, for
-//! development; without it, only shares can be imported from.
+//! development; without it, only shares can be imported from. Music and pictures
+//! are read by `import-reader`, from beside importd's own program unless
+//! `--reader` says where.
 //!
 //! Started by session as a `bus=system` service, it uses the bus connection session
 //! made for it; otherwise it connects to the default socket (or `--socket`).
@@ -12,7 +15,12 @@ use std::path::PathBuf;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut socket: Option<PathBuf> = None;
-    let mut config = importd::Config { mounts: "/run/idealos/import".into(), dir_root: None };
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("import-reader")));
+    let mut config = importd::Config {
+        mounts: "/run/idealos/import".into(),
+        dir_root: None,
+        reader: beside.unwrap_or_else(|| "import-reader".into()),
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().map(PathBuf::from);
@@ -20,9 +28,10 @@ fn main() {
             "--socket" => socket = value(),
             "--dir" => config.dir_root = value(),
             "--mounts" => config.mounts = value().unwrap_or(config.mounts),
+            "--reader" => config.reader = value().unwrap_or(config.reader),
             other => {
                 eprintln!(
-                    "importd: unknown argument {other}\nusage: importd [--dir ROOT] [--mounts DIR] [--socket PATH]"
+                    "importd: unknown argument {other}\nusage: importd [--dir ROOT] [--mounts DIR] [--reader PROGRAM] [--socket PATH]"
                 );
                 std::process::exit(2);
             }

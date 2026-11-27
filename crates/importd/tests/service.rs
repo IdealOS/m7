@@ -21,6 +21,11 @@ impl Drop for TempDir {
 
 /// A broker, dbd, secretsd and importd allowing folders under `files`.
 async fn start(dir: &Path, files: &Path) -> Client {
+    start_with(dir, files, env!("CARGO_BIN_EXE_import-reader").into()).await
+}
+
+/// The same, with `reader` reading music and pictures.
+async fn start_with(dir: &Path, files: &Path, reader: PathBuf) -> Client {
     let socket = dir.join("bus.sock");
     tokio::spawn(busd::serve(UnixListener::bind(&socket).unwrap(), Box::new(busd::AllowAll), None));
     let path = dir.join("idealos.db");
@@ -32,7 +37,7 @@ async fn start(dir: &Path, files: &Path) -> Client {
     tokio::spawn(secretsd::serve(secrets_bus, secretsd::Store::open_in_memory(&[7; 32]).unwrap()));
     let import_bus = Client::connect(&socket).await.unwrap();
     import_bus.claim(protocol::import::SERVICE).await.unwrap();
-    let config = importd::Config { mounts: dir.join("mounts"), dir_root: Some(files.to_owned()) };
+    let config = importd::Config { mounts: dir.join("mounts"), dir_root: Some(files.to_owned()), reader };
     tokio::spawn(importd::serve(import_bus, config));
     Client::connect(&socket).await.unwrap()
 }
@@ -211,4 +216,28 @@ async fn files_come_in_once_as_documents_and_blobs() {
     let e = call(&c, "browse", json!({"source": share})).await.unwrap_err();
     assert_eq!(e.code(), code::UNREACHABLE);
     assert!(!format!("{e:?}").contains("log in first"), "{e:?}");
+}
+
+/// A reader that dies on every file fails just the music and pictures; text,
+/// which importd reads itself, still comes in, and the import finishes.
+#[tokio::test]
+async fn a_reader_that_dies_fails_only_what_it_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir(std::env::temp_dir().join(format!("importd-crash-{}", std::process::id())));
+    let files = dir.0.join("files");
+    std::fs::create_dir_all(&files).unwrap();
+    std::fs::write(files.join("note.txt"), "still here").unwrap();
+    std::fs::write(files.join("cat.png"), png()).unwrap();
+    tagged_wav(&files.join("song.wav"), "Song", 1, &png());
+    let crash = dir.0.join("crash");
+    std::fs::write(&crash, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&crash, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let c = start_with(&dir.0, &files, crash).await;
+    let source = json!({"dir": {"path": files.to_str().unwrap()}});
+    call(&c, "import", json!({"source": source, "paths": [""]})).await.unwrap();
+    let s = finished(&c).await;
+    assert_eq!((s.imported, s.failed), (1, 2), "{s:?}");
+    assert!(s.errors.iter().all(|e| e.contains("reading it failed")), "{:?}", s.errors);
+    assert_eq!(docs(&c, "TextDocument").await.len(), 1);
+    assert!(docs(&c, "Image").await.is_empty() && docs(&c, "Track").await.is_empty());
 }

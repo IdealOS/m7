@@ -1,0 +1,11 @@
+[package]
+name = "sandbox"
+description = "Sandboxes set up between fork and exec: a network namespace, Landlock, seccomp, another user and resource limits."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+libc = "0.2"

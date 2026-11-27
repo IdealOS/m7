@@ -11,9 +11,9 @@ vm_sync
 vm_run "set -e; cd ~/idealos
 	rustup component add clippy 2>/dev/null
 	CARGO_TARGET_DIR=\$HOME/lint-target cargo clippy --locked \\
-		-p compositor --no-default-features --features kms -p kms-probe -p session \\
+		-p compositor --no-default-features --features kms -p kms-probe -p session -p sandbox \\
 		-p protocol -p busd -p bus-client -p osctl -p db -p dbd -p permd -p secretsd -p ptyd -p netd -p backupd -p importd -p app-host \\
 		--all-targets -- -D warnings
-	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q -p protocol -p busd -p bus-client -p osctl -p session -p db -p dbd -p permd -p secretsd -p ptyd -p netd -p backupd -p importd -p app-host
+	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q -p protocol -p busd -p bus-client -p osctl -p session -p sandbox -p db -p dbd -p permd -p secretsd -p ptyd -p netd -p backupd -p importd -p app-host
 	CARGO_TARGET_DIR=\$HOME/lint-target cargo test --locked -q \\
 		-p compositor --no-default-features --features kms --lib backend::kms"

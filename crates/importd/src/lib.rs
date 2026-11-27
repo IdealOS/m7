@@ -12,9 +12,15 @@
 //! Every document one import makes goes in one change set (the first one's), so
 //! `undo` takes the whole import back in one step.
 //! The share stays mounted until the import ends.
+//!
+//! importd runs as root (mounting needs it), so it never decodes a file itself:
+//! music tags and picture sizes are read by `import-reader`, sandboxed, from
+//! descriptors importd opens ([`reader`]). Files are opened with openat2, so no
+//! symbolic link on the share can lead importd anywhere else.
 
 pub mod audio;
 pub mod kinds;
+pub mod reader;
 pub mod source;
 
 use std::io::Read;
@@ -36,7 +42,8 @@ use protocol::secrets;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use kinds::{HEAD_BYTES, image_size, image_type, stem, text_format};
+use kinds::{image_type, stem, text_format};
+use reader::{Ask, Reader};
 use source::{File, Opened, Share};
 
 /// How long dbd gets to store a large blob.
@@ -50,6 +57,8 @@ pub struct Config {
     /// The folder on this machine that `dir` sources may be in, if any (for
     /// development and tests; none on the device).
     pub dir_root: Option<PathBuf>,
+    /// The `import-reader` program, which reads music and pictures for importd.
+    pub reader: PathBuf,
 }
 
 struct Service {
@@ -58,6 +67,8 @@ struct Service {
     status: Mutex<ImportStatus>,
     /// Numbers mount points, so a browse and an import can mount at once.
     mounts: AtomicU64,
+    /// Reads music and pictures; started per import (one runs at a time).
+    reader: Arc<Mutex<Reader>>,
 }
 
 fn fail(code: &str, message: impl Into<String>) -> BusError {
@@ -175,7 +186,7 @@ impl Service {
             let mut set = None;
             for file in files {
                 this.update(|s| s.current = Some(file.path.clone()));
-                let outcome = this.import_one(&from, &file, &mut set).await;
+                let outcome = this.import_one(&opened, &from, &file, &mut set).await;
                 if set.is_some() {
                     this.update(|s| s.change_set = set);
                 }
@@ -196,6 +207,9 @@ impl Service {
                 });
             }
             drop(opened); // unmounts a share
+            // A fresh reader for the next import: nothing a file did carries over.
+            let reader = this.reader.clone();
+            let _ = tokio::task::spawn_blocking(move || reader.lock().expect("reader").stop()).await;
             this.update(|s| {
                 s.running = false;
                 s.current = None;
@@ -217,7 +231,13 @@ impl Service {
 
     /// Make a document of one file, unless it's there already.
     /// `set` is the import's change set, once its first document has made one.
-    async fn import_one(&self, from: &str, file: &File, set: &mut Option<i64>) -> Result<Outcome, String> {
+    async fn import_one(
+        &self,
+        opened: &Opened,
+        from: &str,
+        file: &File,
+        set: &mut Option<i64>,
+    ) -> Result<Outcome, String> {
         let doc_type = match file.kind {
             Kind::Text => "TextDocument",
             Kind::Image => "Image",
@@ -231,11 +251,13 @@ impl Service {
                 MAX_TEXT_BYTES / 1024
             ));
         }
-        let real = file.real.clone();
-        let (hash, head) = tokio::task::spawn_blocking(move || hash_file(&real))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("reading it: {e}"))?;
+        let (root, path) = (opened.root.clone(), file.path.clone());
+        let (hash, head) = tokio::task::spawn_blocking(move || {
+            let f = source::open_in(&root, &path)?;
+            hash_file(f).map_err(|e| format!("reading it: {e}"))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let existing: DocsResult = self
             .db(
                 db::method::QUERY,
@@ -255,16 +277,12 @@ impl Service {
                 json!({"title": stem(name), "body": body, "format": text_format(name), SOURCE_FIELD: origin})
             }
             Kind::Audio => {
-                let real = file.real.clone();
-                let tags = match tokio::task::spawn_blocking(move || audio::read(&real)).await {
-                    Ok(Ok(tags)) => tags,
-                    Ok(Err(e)) => {
-                        log::warn!("importd: {}: no tags read ({e}); importing it by its name", file.path);
-                        audio::Tags::default()
-                    }
-                    Err(e) => return Err(e.to_string()),
-                };
-                self.store_blob(&file.real, &hash).await?;
+                let found = self.read(opened, file, Ask::Audio).await?;
+                if let Some(e) = &found.problem {
+                    log::warn!("importd: {}: no tags read ({e}); importing it by its name", file.path);
+                }
+                let tags = found.tags;
+                self.store_blob(opened, file, &hash).await?;
                 // A cover that can't be stored leaves the track without one.
                 let artwork = match &tags.artwork {
                     Some(art) => self
@@ -279,12 +297,13 @@ impl Service {
                 Value::Object(track)
             }
             _ => {
-                self.store_blob(&file.real, &hash).await?;
+                let found = self.read(opened, file, Ask::Image).await?;
+                self.store_blob(opened, file, &hash).await?;
                 let mut image = json!({"blob": {"$blob": hash}, "caption": stem(name), SOURCE_FIELD: origin});
                 if let Some(t) = image_type(name) {
                     image["type"] = json!(t);
                 }
-                if let Some((w, h)) = image_size(&head) {
+                if let Some((w, h)) = found.size {
                     image["width"] = json!(w);
                     image["height"] = json!(h);
                 }
@@ -323,12 +342,25 @@ impl Service {
         Ok(hash)
     }
 
-    /// Store file `real` as a blob, unless dbd has it already.
-    async fn store_blob(&self, real: &std::path::Path, hash: &str) -> Result<(), String> {
+    /// Have `import-reader` read `ask` from `file`. An error means the reader
+    /// itself failed on it (crashed, hung, answered nonsense): the file fails.
+    async fn read(&self, opened: &Opened, file: &File, ask: Ask) -> Result<reader::Found, String> {
+        let (root, path, reader) = (opened.root.clone(), file.path.clone(), self.reader.clone());
+        tokio::task::spawn_blocking(move || {
+            let f = source::open_in(&root, &path)?;
+            let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+            reader.lock().expect("reader").read(ask, &f, &ext)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Store `file` as a blob, unless dbd has it already.
+    async fn store_blob(&self, opened: &Opened, file: &File, hash: &str) -> Result<(), String> {
         if self.db::<BlobInfo>(db::method::BLOB_INFO, json!({"hash": hash})).await.is_ok() {
             return Ok(());
         }
-        let fd: OwnedFd = std::fs::File::open(real).map_err(|e| format!("opening it: {e}"))?.into();
+        let fd: OwnedFd = opened.open(&file.path).map_err(|e| format!("opening it: {e}"))?.into();
         self.put_blob(fd, hash).await
     }
 
@@ -374,10 +406,9 @@ enum Outcome {
     Ignored,
 }
 
-/// A file's SHA-256 in hex, and its first bytes ([`HEAD_BYTES`], or all of a
-/// smaller file).
-fn hash_file(path: &std::path::Path) -> std::io::Result<(String, Vec<u8>)> {
-    let mut f = std::fs::File::open(path)?;
+/// A file's SHA-256 in hex, and its first bytes (all of a text file small
+/// enough to be a document).
+fn hash_file(mut f: std::fs::File) -> std::io::Result<(String, Vec<u8>)> {
     let mut hash = ::db::sha256::Sha256::default();
     let mut head = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -387,7 +418,7 @@ fn hash_file(path: &std::path::Path) -> std::io::Result<(String, Vec<u8>)> {
             break;
         }
         hash.update(&buf[..n]);
-        let room = (HEAD_BYTES.max(MAX_TEXT_BYTES as usize)).saturating_sub(head.len());
+        let room = (MAX_TEXT_BYTES as usize).saturating_sub(head.len());
         head.extend_from_slice(&buf[..n.min(room)]);
     }
     Ok((hash.hex(), head))
@@ -405,8 +436,14 @@ fn to_value(v: impl serde::Serialize) -> Value {
 pub async fn serve(bus: Client, config: Config) -> Result<(), String> {
     let Some(mut requests) = bus.take_requests() else { return Ok(()) };
     source::release_stale(&config.mounts);
-    let service =
-        Arc::new(Service { bus: bus.clone(), config, status: Mutex::default(), mounts: AtomicU64::new(0) });
+    let reader = Arc::new(Mutex::new(Reader::new(config.reader.clone())));
+    let service = Arc::new(Service {
+        bus: bus.clone(),
+        config,
+        status: Mutex::default(),
+        mounts: AtomicU64::new(0),
+        reader,
+    });
     while let Some(incoming) = requests.next().await {
         if let Incoming::Request { id, method, params, .. } = incoming {
             let (bus, service) = (bus.clone(), service.clone());

@@ -53,6 +53,27 @@ impl Opened {
     pub fn resolve(&self, path: &str) -> Result<PathBuf, String> {
         Ok(self.root.join(relative(path)?))
     }
+
+    /// Open file `path` in the source to read. Nothing on the way may be a
+    /// symbolic link or lead out of the source, checked by the kernel as it opens
+    /// (so a server can't swap a file for a link between listing and opening),
+    /// and it must be an ordinary file.
+    pub fn open(&self, path: &str) -> Result<std::fs::File, String> {
+        open_in(&self.root, path)
+    }
+}
+
+/// [`Opened::open`] for a source open at `root`.
+pub fn open_in(root: &Path, path: &str) -> Result<std::fs::File, String> {
+    let file = sys::open_beneath(root, &relative(path)?).map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::EXDEV) => "it's a link, or leads out of the source".to_owned(),
+        _ => e.to_string(),
+    })?;
+    match file.metadata() {
+        Ok(m) if m.is_file() => Ok(file),
+        Ok(_) => Err("it isn't an ordinary file".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// What mounting a share needs.
@@ -100,11 +121,11 @@ pub fn list(dir: &Path) -> std::io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// A file to import: its path in the source, where it is, its size and kind.
+/// A file to import: its path in the source, its size and kind. (It's opened
+/// by its path, with [`Opened::open`].)
 #[derive(Debug, Clone, PartialEq)]
 pub struct File {
     pub path: String,
-    pub real: PathBuf,
     pub size: u64,
     pub kind: Kind,
 }
@@ -137,7 +158,6 @@ fn add(
         let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         out.push(File {
             path: rel.to_string_lossy().replace('\\', "/"),
-            real: real.to_owned(),
             size: meta.len(),
             kind: kind_of(&name),
         });
@@ -223,6 +243,32 @@ mod sys {
         Ok(())
     }
 
+    /// Open `rel` under `root` with openat2(2): beneath it, no links at all.
+    pub fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let dir = std::fs::File::open(root)?;
+        let path = std::ffi::CString::new(rel.as_os_str().as_bytes())?;
+        // SAFETY: open_how is plain data; every field is set below.
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOCTTY | libc::O_NONBLOCK) as u64;
+        how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+        // SAFETY: openat2(2) with a directory we hold, a C string and an open_how of its size.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                dir.as_raw_fd(),
+                path.as_ptr(),
+                &how as *const libc::open_how,
+                size_of::<libc::open_how>(),
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a descriptor the kernel just returned, owned by nothing else.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd as i32) })
+    }
+
     pub fn unmount(at: &Path) {
         let Ok(target) = std::ffi::CString::new(at.as_os_str().as_bytes()) else { return };
         // Detached: it goes from view at once and the kernel finishes when it can,
@@ -245,6 +291,17 @@ mod sys {
     }
 
     pub fn unmount(_at: &Path) {}
+
+    /// Away from Linux (development only): no link as the file itself, and its
+    /// real path inside `root`. Not race-free, unlike openat2 on Linux.
+    pub fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = root.join(rel);
+        if !std::fs::canonicalize(&path)?.starts_with(std::fs::canonicalize(root)?) {
+            return Err(std::io::Error::from_raw_os_error(libc::EXDEV));
+        }
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +348,15 @@ mod tests {
             "each once, no link, no hidden file"
         );
         assert!(walk(&opened, &["../x".into()]).is_err());
+
+        // Opening: files inside, never a link, a folder or a way out.
+        assert!(opened.open("Notes/a.md").is_ok());
+        std::os::unix::fs::symlink(dir.join("Notes/a.md"), dir.join("Notes/swapped.md")).unwrap();
+        let e = opened.open("Notes/swapped.md").unwrap_err();
+        assert!(e.contains("link"), "{e}");
+        assert!(opened.open("Notes/etc/passwd").is_err(), "through a linked folder");
+        assert!(opened.open("Notes").is_err(), "a folder");
+        assert!(opened.open("../x").is_err());
         assert!(Opened::dir("/", Some(&dir)).is_err(), "outside the allowed root");
         assert!(Opened::dir(dir.to_str().unwrap(), None).is_err(), "no root, no folders");
         std::fs::remove_dir_all(&dir).unwrap();

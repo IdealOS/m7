@@ -1543,6 +1543,7 @@ dependencies = [
  "log",
  "png",
  "protocol",
+ "sandbox",
  "secretsd",
  "serde",
  "serde_json",
@@ -3313,6 +3314,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "schemars"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3486,6 +3494,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "protocol",
+ "sandbox",
  "serde",
  "serde_json",
 ]

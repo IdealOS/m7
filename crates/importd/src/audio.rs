@@ -2,10 +2,13 @@
 //! Vorbis comments, RIFF INFO and the rest, whichever the file has), how long it
 //! plays, and its cover art.
 
-use std::path::Path;
+use std::io::BufReader;
 
+use lofty::file::FileType;
 use lofty::picture::PictureType;
 use lofty::prelude::*;
+use lofty::probe::Probe;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 /// A picture embedded in a music file: its bytes and MIME type.
@@ -16,7 +19,9 @@ pub struct Artwork {
 }
 
 /// What a music file's tags say. Anything missing is left out of its `Track`.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// `import-reader` sends it to importd without the artwork, which follows apart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Tags {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -28,13 +33,21 @@ pub struct Tags {
     pub year: Option<u16>,
     /// Seconds.
     pub duration: Option<f64>,
+    #[serde(skip)]
     pub artwork: Option<Artwork>,
 }
 
-/// Read file `path`'s tags. A file lofty can't make sense of is an error; the
-/// caller can still import it, by its name.
-pub fn read(path: &Path) -> Result<Tags, String> {
-    let file = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+/// Read the tags of `file`, whose extension is `ext` (how lofty knows the format,
+/// as it would from a path; by its first bytes when the extension says nothing).
+/// A file lofty can't make sense of is an error; the caller can still import it,
+/// by its name. Runs in `import-reader`, never in importd itself.
+pub fn read(file: &mut std::fs::File, ext: &str) -> Result<Tags, String> {
+    let probe = Probe::new(BufReader::new(file));
+    let probe = match FileType::from_ext(ext) {
+        Some(t) => probe.set_file_type(t),
+        None => probe.guess_file_type().map_err(|e| e.to_string())?,
+    };
+    let file = probe.read().map_err(|e| e.to_string())?;
     let seconds = file.properties().duration().as_secs_f64();
     let mut tags = Tags { duration: (seconds > 0.0).then_some(seconds), ..Tags::default() };
     let Some(tag) = file.primary_tag().or_else(|| file.first_tag()) else { return Ok(tags) };
@@ -85,6 +98,12 @@ pub mod tests {
     use lofty::config::WriteOptions;
     use lofty::picture::{MimeType, Picture};
     use lofty::tag::{Tag, TagType};
+    use std::path::Path;
+
+    fn read_path(path: &Path) -> Result<Tags, String> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_owned();
+        read(&mut std::fs::File::open(path).map_err(|e| e.to_string())?, &ext)
+    }
 
     /// A second of silent 8 kHz mono WAV at `path`, tagged (ID3v2) as given.
     pub fn tagged_wav(path: &Path, title: Option<&str>, picture: Option<&[u8]>) {
@@ -131,7 +150,7 @@ pub mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("song.wav");
         tagged_wav(&path, Some("Quiet"), Some(b"\x89PNG fake cover"));
-        let tags = read(&path).unwrap();
+        let tags = read_path(&path).unwrap();
         assert_eq!(tags.title.as_deref(), Some("Quiet"));
         assert_eq!(tags.artist.as_deref(), Some("The Testers"));
         assert_eq!(tags.album_artist.as_deref(), Some("Various"));
@@ -153,9 +172,16 @@ pub mod tests {
         // No title: the file's name.
         let bare = dir.join("bare.wav");
         tagged_wav(&bare, None, None);
-        let tags = read(&bare).unwrap();
+        let tags = read_path(&bare).unwrap();
         assert_eq!(track(&tags, "bare", "aa", None)["title"], "bare");
-        assert!(read(&dir.join("missing.mp3")).is_err());
+        let junk = dir.join("junk.mp3");
+        std::fs::write(&junk, b"not music at all").unwrap();
+        assert!(read_path(&junk).is_err());
+        // No extension: lofty goes by the first bytes.
+        assert_eq!(
+            read(&mut std::fs::File::open(&path).unwrap(), "").unwrap().title.as_deref(),
+            Some("Quiet")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! It reads `/etc/idealos/session.conf`, starts each service, and restarts any that
 //! exit, with exponential backoff. It also makes services' bus connections (see
-//! `bus.rs`), and starts each app in a sandbox (see `sandbox.rs`): its own network
+//! `bus.rs`), and starts each app in a sandbox (see the `sandbox` crate): its own network
 //! namespace unless it holds the `network` grant, Landlock and seccomp.
 //! `IDEALOS_NO_SANDBOX=1` turns sandboxes off, for debugging only.
 //!
@@ -52,7 +52,6 @@ macro_rules! say {
 
 mod bus;
 mod log;
-mod sandbox;
 
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};

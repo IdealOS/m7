@@ -1,4 +1,5 @@
-//! Per-app sandboxes, applied by session between fork and exec of `app-host`.
+//! Sandboxes, applied between fork and exec: by session for each app's
+//! `app-host`, and by importd for the `import-reader` that reads untrusted files.
 //!
 //! An app gets three layers, all set up before any of its code runs:
 //!
@@ -22,21 +23,43 @@
 //! through. If the kernel has no Landlock, the app runs without file limits and
 //! session says so.
 //!
+//! A helper like `import-reader` can be held tighter still: no directory it may
+//! write at all, another Unix user (when started by root), and resource limits.
+//!
 //! Everything that can allocate or fail in interesting ways happens in
-//! [`Sandbox::prepare`], in session; [`Sandbox::enter`] runs in the child after
+//! [`Sandbox::prepare`], in the parent; [`Sandbox::enter`] runs in the child after
 //! fork and only makes system calls.
 
 use std::path::{Path, PathBuf};
 
-/// What an app's sandbox allows.
+/// What a sandbox allows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
-    /// Whether it holds the `network` grant.
+    /// Whether it may use the network (an app's `network` grant).
     pub network: bool,
     /// Its own directory: its working directory, and the one place it may write.
-    pub runtime_dir: PathBuf,
+    /// None: it may write nowhere.
+    pub runtime_dir: Option<PathBuf>,
     /// Directories and files it may read (and execute, for programs).
     pub read_exec: Vec<PathBuf>,
+    /// The Unix user (and group) it runs as, when the parent is root. Ignored
+    /// otherwise: only root can become someone else.
+    pub user: Option<u32>,
+    /// Resource limits, each set as both the soft and the hard limit.
+    pub limits: Vec<(Limit, u64)>,
+}
+
+/// A resource a sandbox can limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Limit {
+    /// Address space, in bytes (`RLIMIT_AS`).
+    Memory,
+    /// The largest file it may write, in bytes (`RLIMIT_FSIZE`).
+    FileSize,
+    /// Open descriptors (`RLIMIT_NOFILE`): one more than the highest it may have.
+    OpenFiles,
+    /// Core dumps, in bytes (`RLIMIT_CORE`).
+    CoreSize,
 }
 
 /// The system paths every app may read and execute from, besides its program's
@@ -51,7 +74,18 @@ impl Spec {
         if let Some(dir) = program_dir(program) {
             read_exec.push(dir);
         }
-        Spec { network, runtime_dir, read_exec }
+        Spec { network, runtime_dir: Some(runtime_dir), read_exec, user: None, limits: Vec::new() }
+    }
+
+    /// The tightest sandbox, for a helper whose program is `program` that works
+    /// only on descriptors it's handed: no network, nowhere to write, running as
+    /// `user` with `limits`.
+    pub fn for_helper(program: &Path, user: u32, limits: Vec<(Limit, u64)>) -> Spec {
+        let mut spec = Spec::for_app(program, PathBuf::new(), false);
+        spec.runtime_dir = None;
+        spec.user = Some(user);
+        spec.limits = limits;
+        spec
     }
 }
 
@@ -105,12 +139,19 @@ mod other {
 
     impl Sandbox {
         pub fn prepare(spec: &Spec) -> io::Result<Sandbox> {
-            std::fs::create_dir_all(&spec.runtime_dir)?;
+            if let Some(dir) = &spec.runtime_dir {
+                std::fs::create_dir_all(dir)?;
+            }
             Ok(Sandbox)
         }
 
         /// Whether file limits are on (never, here).
         pub fn limits_files(&self) -> bool {
+            false
+        }
+
+        /// Whether it will run as another user (never, here).
+        pub fn changes_user(&self) -> bool {
             false
         }
 
@@ -273,10 +314,23 @@ mod linux {
 
     pub struct Sandbox {
         network: bool,
-        runtime_dir: OwnedFd,
+        runtime_dir: Option<OwnedFd>,
+        /// The user to become: only when the parent is root.
+        user: Option<libc::uid_t>,
+        limits: Vec<(i32, libc::rlimit)>,
         /// The Landlock ruleset, ready to apply, if the kernel has Landlock.
         ruleset: Option<OwnedFd>,
         filter: Vec<libc::sock_filter>,
+    }
+
+    fn resource(limit: super::Limit) -> i32 {
+        use super::Limit;
+        (match limit {
+            Limit::Memory => libc::RLIMIT_AS,
+            Limit::FileSize => libc::RLIMIT_FSIZE,
+            Limit::OpenFiles => libc::RLIMIT_NOFILE,
+            Limit::CoreSize => libc::RLIMIT_CORE,
+        }) as i32
     }
 
     fn cstr(path: &std::path::Path) -> io::Result<CString> {
@@ -298,11 +352,24 @@ mod linux {
         /// Make the runtime directory and build the Landlock ruleset and the
         /// seccomp program, in session, before forking.
         pub fn prepare(spec: &Spec) -> io::Result<Sandbox> {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&spec.runtime_dir)?;
-            let dir = open_path(&spec.runtime_dir)?;
+            let dir = match &spec.runtime_dir {
+                Some(dir) => {
+                    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+                    Some(open_path(dir)?)
+                }
+                None => None,
+            };
+            // SAFETY: geteuid(2) takes nothing and can't fail.
+            let root = unsafe { libc::geteuid() } == 0;
             Ok(Sandbox {
                 network: spec.network,
                 runtime_dir: dir,
+                user: spec.user.filter(|_| root),
+                limits: spec
+                    .limits
+                    .iter()
+                    .map(|&(l, n)| (resource(l), libc::rlimit { rlim_cur: n as _, rlim_max: n as _ }))
+                    .collect(),
                 ruleset: ruleset(spec)?,
                 filter: filter(spec.network),
             })
@@ -313,8 +380,14 @@ mod linux {
             self.ruleset.is_some()
         }
 
-        /// Enter the sandbox: the network namespace, the runtime directory,
-        /// Landlock, then seccomp.
+        /// Whether it will run as another user (the spec named one and the
+        /// parent is root).
+        pub fn changes_user(&self) -> bool {
+            self.user.is_some()
+        }
+
+        /// Enter the sandbox: resource limits, the network namespace, the runtime
+        /// directory, another user, Landlock, then seccomp.
         ///
         /// # Safety
         /// Only between fork and exec (a `pre_exec` hook): it makes system calls
@@ -324,11 +397,28 @@ mod linux {
             // SAFETY (the block): plain system calls on descriptors and structs
             // this sandbox owns.
             unsafe {
+                for (resource, limit) in &self.limits {
+                    if libc::setrlimit(*resource as _, limit) != 0 {
+                        return fail();
+                    }
+                }
+                // The namespace first: as root it needs no user namespace.
                 if !self.network {
                     isolate_network();
                 }
-                if libc::fchdir(self.runtime_dir.as_raw_fd()) != 0 {
+                if let Some(dir) = &self.runtime_dir
+                    && libc::fchdir(dir.as_raw_fd()) != 0
+                {
                     return fail();
+                }
+                if let Some(uid) = self.user {
+                    // Groups first: once it isn't root it can't change them.
+                    if libc::setgroups(0, std::ptr::null()) != 0
+                        || libc::setgid(uid) != 0
+                        || libc::setuid(uid) != 0
+                    {
+                        return fail();
+                    }
                 }
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return fail();
@@ -462,7 +552,9 @@ mod linux {
         }
         add(std::path::Path::new("/dev/null"), 0, FS_READ_FILE | FS_WRITE_FILE)?;
         add(std::path::Path::new("/dev/urandom"), 0, FS_READ_FILE)?;
-        add(&spec.runtime_dir, fs, fs)?;
+        if let Some(dir) = &spec.runtime_dir {
+            add(dir, fs, fs)?;
+        }
         Ok(Some(rs))
     }
 
@@ -539,7 +631,8 @@ mod tests {
 
     /// What a sandboxed process could do, one letter each: `f` read a file
     /// outside, `w` write in its runtime directory, `i` make an IPv4 socket, `u`
-    /// a Unix socket, `p` ptrace, `n` make a namespace.
+    /// a Unix socket, `p` ptrace, `n` make a namespace, `l` have at most 64
+    /// descriptors (a limit was set).
     fn probe() -> String {
         let mut could = String::new();
         if std::fs::read("/etc/hostname").is_ok() || std::fs::read("/etc/passwd").is_ok() {
@@ -566,6 +659,10 @@ mod tests {
             if libc::unshare(libc::CLONE_NEWUSER) == 0 {
                 could.push('n');
             }
+            let mut files = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut files) == 0 && files.rlim_cur <= 64 {
+                could.push('l');
+            }
         }
         could
     }
@@ -577,17 +674,25 @@ mod tests {
         }
     }
 
-    /// Run the probe in a sandbox for `spec`; returns what it could do.
-    fn run_probe(network: bool) -> String {
+    /// Run the probe in an app's sandbox, or with `helper` a helper's (working in
+    /// the same directory, which it may not write); returns what it could do.
+    fn run_probe(network: bool, helper: bool) -> String {
         let me = std::env::current_exe().unwrap();
-        let dir = std::env::temp_dir().join(format!("sandbox-test-{}-{network}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sandbox-test-{}-{network}-{helper}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let spec = Spec::for_app(&me, dir.clone(), network);
+        let spec = if helper {
+            std::fs::create_dir_all(&dir).unwrap();
+            Spec::for_helper(&me, 61_000, vec![(Limit::OpenFiles, 64), (Limit::CoreSize, 0)])
+        } else {
+            Spec::for_app(&me, dir.clone(), network)
+        };
         let sandbox = Sandbox::prepare(&spec).unwrap();
         assert!(sandbox.limits_files(), "this kernel has no Landlock");
         let mut cmd = Command::new(&me);
-        cmd.args(["--exact", "sandbox::tests::sandbox_probe", "--nocapture", "--test-threads", "1"])
-            .env("SANDBOX_PROBE", "1");
+        cmd.args(["--exact", "tests::sandbox_probe", "--nocapture", "--test-threads", "1"])
+            .env("SANDBOX_PROBE", "1")
+            .current_dir(&dir);
         // SAFETY: enter only makes system calls.
         unsafe { cmd.pre_exec(move || sandbox.enter()) };
         let out = cmd.output().unwrap();
@@ -601,11 +706,16 @@ mod tests {
 
     #[test]
     fn apps_cannot_open_files_or_sockets_they_were_not_given() {
-        assert_eq!(run_probe(false), "w", "only writing its own directory");
+        assert_eq!(run_probe(false, false), "w", "only writing its own directory");
     }
 
     #[test]
     fn the_network_grant_allows_internet_sockets_only() {
-        assert_eq!(run_probe(true), "wi");
+        assert_eq!(run_probe(true, false), "wi");
+    }
+
+    #[test]
+    fn helpers_cannot_write_anywhere_and_keep_their_limits() {
+        assert_eq!(run_probe(false, true), "l");
     }
 }
