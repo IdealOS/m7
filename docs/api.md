@@ -49,7 +49,7 @@ lives in blobs, named by their SHA-256.
 | `get` | `{id}` | the document |
 | `update` | `{id, patch}` (a JSON merge patch) | the document |
 | `splice` | `{id, path, at, delete, insert}` | `{change_set}`: an edit to a text field, as collaborative text |
-| `delete` | `{id}` | null (its history stays, so it can be undone) |
+| `delete` | `{id}` | `{change_set}`: its history stays, and `undo` of that brings it back |
 | `query` | a query (below) | `{docs}` |
 | `search` | `{text, type?, limit?}` | `{docs}`: every word matches |
 | `watch` | a query, streamed | the result, then each change: `{kind: "initial", docs}`, then `{kind: "diff", added, changed, removed, order?}` |
@@ -76,7 +76,8 @@ the snapshot methods need the `storage` capability.
 `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$exists`, `$and`, `$or`,
 `$not`, and for links `$linksTo` and `$linkedFrom`; `$createdBy` matches the app
 that made a document, and `$id` one document by its id (to follow it with
-`watch`).
+`watch`). `orderBy` takes field paths, and `$updated` and `$created` for when a
+document last changed and when it was made.
 
 **Links and blobs** live in document data: `{"$link": "<id>"}` and `{"$blob":
 "<sha-256>"}`. A blob must be stored before a document refers to it.
@@ -364,7 +365,8 @@ await openWindow({ title: "Counter", width: 300, height: 200, style }, () => {
 - **Bus**: `request(to, method, params?, {timeoutMs?})`, `stream(to, method,
   params, onPart, onEnd)` (returns a cancel function), `exit(code?)`.
 - **Database** (`db.`): `query(q)`, `get(id)`, `put(type, data)`, `update(id,
-  patch)`, `remove(id)`, `search(text, {type?, limit?})`, and `live(q)`: a
+  patch)`, `remove(id)` (giving the change set), `undo(changeSet)`, `search(text,
+  {type?, limit?})`, and `live(q)`: a
   signal of the query's result that stays current (`ready()`, `error()`,
   `close()`).
 - **Signals**: `signal(initial)` gives `[get, set]`; `effect(fn)`, `memo(fn)`,

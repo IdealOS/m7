@@ -70,9 +70,12 @@ async fn documents_round_trip_over_the_bus() {
             .unwrap();
     assert_eq!(hits.docs[0].id, created.id);
 
-    assert_eq!(call(&c, "delete", json!({"id": created.id})).await.unwrap(), Value::Null);
+    let deleted = call(&c, "delete", json!({"id": created.id})).await.unwrap();
     let gone = call(&c, "get", json!({"id": created.id})).await.unwrap_err();
     assert_eq!(gone.code(), code::NOT_FOUND);
+    // The delete's change set undoes it.
+    call(&c, "undo", json!({"change_set": deleted["change_set"]})).await.unwrap();
+    assert_eq!(call(&c, "get", json!({"id": created.id})).await.unwrap()["id"], json!(created.id));
 }
 
 #[tokio::test]

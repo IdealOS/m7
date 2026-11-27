@@ -267,6 +267,18 @@ test("a virtual list makes rows as they come into view and drops them as they le
   assert.equal(host.commits().flat().filter((op) => op.op === "destroy").length, 6, "the first rows left");
 });
 
+test("a delete gives back the change set that undoing it takes", async () => {
+  const host = fresh();
+  host.answer = (_to, method) => ({ change_set: method === "delete" ? 7 : 8 });
+  const set = await db.remove("a");
+  assert.equal(set, 7);
+  assert.equal(await db.undo(set), 8);
+  assert.deepEqual(host.requests, [
+    { to: "db", method: "delete", params: { id: "a" } },
+    { to: "db", method: "undo", params: { change_set: 7 } },
+  ]);
+});
+
 test("the clipboard goes through the compositor", async () => {
   const host = fresh();
   host.answer = (_, method) => (method === "get_clipboard" ? { text: "hi" } : null);

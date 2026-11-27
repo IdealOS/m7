@@ -161,7 +161,7 @@ fn handle_app(store: &mut Store, scope: &Scope, method: &str, params: Value) -> 
         method::DELETE => {
             let id = parse::<IdParams>(params)?.id;
             check(store, scope, &id, true)?;
-            reply(store.delete(&id, app))
+            reply(store.delete(&id, app).map(|change_set| UndoResult { change_set }))
         }
         method::GET | method::HISTORY | method::AT | method::DIFF => {
             let id = params.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -258,7 +258,10 @@ fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -
             let p: UpdateParams = parse(params)?;
             reply(store.update(&p.id, &p.patch, origin))
         }
-        method::DELETE => reply(store.delete(&parse::<IdParams>(params)?.id, origin)),
+        method::DELETE => {
+            let set = store.delete(&parse::<IdParams>(params)?.id, origin);
+            reply(set.map(|change_set| UndoResult { change_set }))
+        }
         method::QUERY => reply(store.query(&parse::<Query>(params)?).map(|docs| DocsResult { docs })),
         method::SEARCH => {
             let p: SearchParams = parse(params)?;

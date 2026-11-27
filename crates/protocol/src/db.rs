@@ -49,7 +49,7 @@ pub const SERVICE: &str = "db";
 /// | `create` | [`CreateParams`] | [`Doc`]        |
 /// | `get`    | [`IdParams`]     | [`Doc`]        |
 /// | `update` | [`UpdateParams`] | [`Doc`]        |
-/// | `delete` | [`IdParams`]     | null           |
+/// | `delete` | [`IdParams`]     | [`UndoResult`] (the change set, to undo it) |
 /// | `query`  | [`Query`]        | [`DocsResult`] |
 /// | `search` | [`SearchParams`] | [`DocsResult`] |
 /// | `history` | [`IdParams`]    | [`HistoryResult`] |
@@ -531,7 +531,9 @@ pub struct Query {
     /// of the type.
     #[serde(default, rename = "where", skip_serializing_if = "Map::is_empty")]
     pub filter: Map<String, Value>,
-    /// Sort keys, most significant first. Ties keep creation order.
+    /// Sort keys, most significant first: field paths, or `$updated` and
+    /// `$created` for when a document last changed and when it was made. Ties
+    /// keep creation order.
     #[serde(default, rename = "orderBy", skip_serializing_if = "Vec::is_empty")]
     pub order_by: Vec<OrderBy>,
     /// At most this many documents (default 100, at most 10,000).
@@ -555,7 +557,8 @@ impl Query {
     }
 }
 
-/// A sort key: a field path and a direction, written `["date", "desc"]`.
+/// A sort key: a field path (or `$updated`, `$created`) and a direction,
+/// written `["date", "desc"]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OrderBy(pub String, pub Direction);

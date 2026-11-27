@@ -337,9 +337,9 @@ impl Store {
             .ok_or_else(|| Error::NotFound(id.into()))?
     }
 
-    /// Delete document `id`. Its state and history stay (for undo); it leaves
-    /// queries and search.
-    pub fn delete(&mut self, id: &str, origin: &str) -> Result<()> {
+    /// Delete document `id`. Its state and history stay; it leaves queries and
+    /// search. Returns the change set, which [`Store::undo`] takes to bring it back.
+    pub fn delete(&mut self, id: &str, origin: &str) -> Result<i64> {
         let tx = self.conn.transaction()?;
         let Some((row, _, _)) = live_row(&tx, id)? else { return Err(Error::NotFound(id.into())) };
         let now = now_ms();
@@ -347,7 +347,7 @@ impl Store {
         let version = load(&tx, row, self.peer)?.oplog_frontiers();
         delete_row(&tx, row, set, now, &version)?;
         tx.commit()?;
-        Ok(())
+        Ok(set)
     }
 
     /// Documents matching `q` (see [`protocol::db`] for the filter language).

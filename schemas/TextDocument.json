@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "idealos:schema/TextDocument",
   "title": "TextDocument",
-  "description": "A text file, note or other writing.",
+  "description": "A piece of writing, edited in the Editor. The body (and the title) become collaborative text the first time they're spliced, so edits from several writers merge.",
   "type": "object",
   "properties": {
     "title": { "type": "string" },
     "body": { "type": "string" },
-    "format": { "enum": ["plain", "markdown"], "default": "plain" }
+    "format": { "enum": ["plain", "markdown"], "default": "plain" },
+    "tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["draft", "letters"]] }
   },
-  "x-indexes": ["title"]
+  "x-indexes": ["title", "format"]
 }

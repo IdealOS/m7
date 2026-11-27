@@ -54,7 +54,12 @@ pub fn compile(q: &Query) -> Result<Compiled> {
             Direction::Asc => "ASC",
             Direction::Desc => "DESC",
         };
-        order.push_str(&format!("{} {dir}, ", extract(&json_path(&key.0)?)));
+        let column = match key.0.as_str() {
+            "$updated" => "d.updated".to_owned(),
+            "$created" => "d.created".to_owned(),
+            field => extract(&json_path(field)?),
+        };
+        order.push_str(&format!("{column} {dir}, "));
     }
     c.params.push(Sql::Integer(limit.into()));
     c.params.push(Sql::Integer(q.offset.unwrap_or(0).into()));

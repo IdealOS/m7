@@ -1673,7 +1673,7 @@
       "type": "object"
     },
     "OrderBy": {
-      "description": "A sort key: a field path and a direction, written `[\"date\", \"desc\"]`.",
+      "description": "A sort key: a field path (or `$updated`, `$created`) and a direction,\nwritten `[\"date\", \"desc\"]`.",
       "maxItems": 2,
       "minItems": 2,
       "prefixItems": [
@@ -1786,7 +1786,7 @@
           ]
         },
         "orderBy": {
-          "description": "Sort keys, most significant first. Ties keep creation order.",
+          "description": "Sort keys, most significant first: field paths, or `$updated` and\n`$created` for when a document last changed and when it was made. Ties\nkeep creation order.",
           "items": {
             "$ref": "#/$defs/OrderBy"
           },

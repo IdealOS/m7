@@ -1,0 +1,19 @@
+{
+  "name": "@idealos/app-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.editor",
+    "name": "Editor",
+    "autostart": false,
+    "permissions": [{ "type": "TextDocument", "access": ["read", "write", "create"] }]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

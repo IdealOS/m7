@@ -27,14 +27,36 @@ fn create_get_update_delete() {
     assert!(changed.updated >= note.updated);
     assert_eq!(s.get(&note.id).unwrap(), changed);
 
-    s.delete(&note.id, "test").unwrap();
+    let deleted = s.delete(&note.id, "test").unwrap();
     assert!(matches!(s.get(&note.id), Err(Error::NotFound(_))));
     assert!(matches!(s.update(&note.id, &Map::new(), "test"), Err(Error::NotFound(_))));
     assert!(matches!(s.delete(&note.id, "test"), Err(Error::NotFound(_))));
     assert!(s.query(&Query::all("Note")).unwrap().is_empty());
     assert!(s.search("hello", None, 10).unwrap().is_empty());
-    // The state stays, for history and undo.
+    // The state stays, for history and undo; undoing the delete brings it back.
     assert_eq!(loro_json::read(&s.loro(&note.id).unwrap())["title"], "hello");
+    s.undo(deleted, "test").unwrap();
+    assert_eq!(s.get(&note.id).unwrap().data, changed.data);
+}
+
+#[test]
+fn queries_can_order_by_when_documents_changed_and_were_made() {
+    let mut s = Store::open_in_memory().unwrap();
+    let a = s.create("Note", &obj(json!({"n": 1})), "t").unwrap();
+    let b = s.create("Note", &obj(json!({"n": 2})), "t").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    s.update(&a.id, &obj(json!({"n": 3})), "t").unwrap();
+    let ordered = |s: &Store, key: &str, dir| {
+        let mut q = Query::all("Note");
+        q.order_by = vec![OrderBy(key.into(), dir)];
+        ids(&s.query(&q).unwrap())
+    };
+    assert_eq!(ordered(&s, "$updated", Direction::Desc), [a.id.clone(), b.id.clone()]);
+    assert_eq!(ordered(&s, "$updated", Direction::Asc), [b.id.clone(), a.id.clone()]);
+    assert_eq!(ordered(&s, "$created", Direction::Desc), [b.id.clone(), a.id.clone()]);
+    let mut q = Query::all("Note");
+    q.order_by = vec![OrderBy("$deleted".into(), Direction::Asc)];
+    assert!(s.query(&q).is_err(), "other $ names aren't sort keys");
 }
 
 #[test]
@@ -1079,6 +1101,12 @@ fn system_schemas_load_and_check_writes() {
     assert!(
         err(s.create("TextDocument", &obj(json!({"format": "rtf"})), "t")).contains("format must be one of")
     );
+    assert!(
+        err(s.create("TextDocument", &obj(json!({"tags": ["ok", 3]})), "t"))
+            .contains("tags.1 must be string")
+    );
+    s.create("TextDocument", &obj(json!({"title": "t", "format": "markdown", "tags": ["draft"]})), "t")
+        .unwrap();
     assert!(
         err(s.create("Playlist", &obj(json!({"name": "p", "tracks": ["t1"]})), "t"))
             .contains("tracks.0 must be a link")

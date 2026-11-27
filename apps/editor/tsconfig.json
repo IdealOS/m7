@@ -1,0 +1,14 @@
+{
+  "extends": "../../sdk/tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@idealos/sdk": [
+        "../../sdk/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "../../sdk/app-env.d.ts"
+  ]
+}

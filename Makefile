@@ -1,5 +1,5 @@
 # Day-to-day entry points. Device builds run in the idealos-build Lima VM.
-.PHONY: hosted bench text-bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps app-host protocol tools-check style-watch style-export
+.PHONY: hosted bench text-bench bus bus-bench db db-bench spike-db spike-js spike-kms screenshot test lint lint-device fmt vm check-defconfigs image-qemu image-rpi3 image-rpi4 qemu smoke-qemu smoke-deploy smoke-report device-bins deploy pi-state pi-report sdk apps apps-check app-host protocol tools-check style-watch style-export
 
 hosted:            ## Compositor demo in a window on this Mac
 	cargo run -p compositor
@@ -57,6 +57,9 @@ sdk:               ## Type-check the TypeScript SDK and its tests, and run them
 
 apps:              ## Bundle every app in apps/ (dist/app.js and dist/manifest.json)
 	node tools/build-app.ts apps/*/
+
+apps-check:        ## Type-check and unit-test the apps that have tests (apps/*/check)
+	for c in apps/*/check; do $$c || exit 1; done
 
 app-host:          ## Build app-host, which session (or osctl app install) runs each app in
 	cargo build -p app-host

@@ -347,9 +347,9 @@ Compositor work first:
 
 The editor:
 
-- [ ] `TextDocument` schema with CRDT text (the body as Loro text, so edits merge); `format` is plain text or Markdown.
-- [ ] Editor app built on the bound multiline widget: create, open, rename, delete (undoable).
-- [ ] A document list: recent first, full-text search, and filters by tag and format.
+- [x] `TextDocument` schema with CRDT text (the body as Loro text, so edits merge); `format` is plain text or Markdown; `tags`. Text fields become Loro text the first time they're spliced, which the bound fields do.
+- [x] Editor app built on the bound multiline widget: create, open, rename, delete (undoable). `delete` now answers with its change set, so the app can `undo` it.
+- [x] A document list: recent first, full-text search, and filters by tag and format. Queries can order by `$updated` and `$created`.
 - [ ] Find and replace, with match case and whole word.
 - [ ] Word and character counts, and the caret's line and column.
 - [ ] Version history sidebar using the history API: a timeline to scrub through, the diff of each change, and restoring a version (a new change, so it can be undone). Pinned versions (`pin`), such as "draft sent", which history compaction keeps.

@@ -633,7 +633,10 @@ export type OpenWindowParams = {
   width?: number | null;
 };
 
-/** A sort key: a field path and a direction, written `["date", "desc"]`. */
+/**
+ * A sort key: a field path (or `$updated`, `$created`) and a direction,
+ * written `["date", "desc"]`.
+ */
 export type OrderBy = [string, Direction];
 
 /**
@@ -661,7 +664,11 @@ export type Query = {
   limit?: number | null;
   /** Skip this many matching documents first. */
   offset?: number | null;
-  /** Sort keys, most significant first. Ties keep creation order. */
+  /**
+   * Sort keys, most significant first: field paths, or `$updated` and
+   * `$created` for when a document last changed and when it was made. Ties
+   * keep creation order.
+   */
   orderBy?: OrderBy[];
   /**
    * Field paths mapped to a value to equal or an object of operators (`$eq`,

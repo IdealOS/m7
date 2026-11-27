@@ -2,7 +2,7 @@
 // type; queries filter, order and limit them (see protocol.ts `Query`).
 
 import { request, stream } from "./bus.ts";
-import type { Doc, DocsResult, Query, WatchEvent } from "./protocol.ts";
+import type { Doc, DocsResult, Query, UndoResult, WatchEvent } from "./protocol.ts";
 import { signal } from "./signals.ts";
 
 export type Data = Record<string, unknown>;
@@ -25,8 +25,15 @@ export function update(id: string, patch: Data): Promise<Doc> {
   return request<Doc>("db", "update", { id, patch });
 }
 
-export function remove(id: string): Promise<void> {
-  return request("db", "delete", { id }).then(() => undefined);
+/** Delete a document. Its history stays: the change set returned undoes it. */
+export function remove(id: string): Promise<number> {
+  return request<UndoResult>("db", "delete", { id }).then((r) => r.change_set);
+}
+
+/** Revert one of this app's change sets (a delete, say) with a new change set,
+ * which is returned and can itself be undone. */
+export function undo(changeSet: number): Promise<number> {
+  return request<UndoResult>("db", "undo", { change_set: changeSet }).then((r) => r.change_set);
 }
 
 export function search(text: string, options: { type?: string; limit?: number } = {}): Promise<Doc[]> {
