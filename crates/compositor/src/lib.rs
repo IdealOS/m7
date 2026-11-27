@@ -33,5 +33,6 @@ pub mod stats;
 pub mod style;
 pub mod terminal;
 pub mod textedit;
+pub mod texthistory;
 pub mod theme;
 pub mod wm;

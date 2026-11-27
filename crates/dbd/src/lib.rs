@@ -163,6 +163,12 @@ fn handle_app(store: &mut Store, scope: &Scope, method: &str, params: Value) -> 
             check(store, scope, &id, true)?;
             reply(store.delete(&id, app).map(|change_set| UndoResult { change_set }))
         }
+        method::PIN => {
+            // Keeping a version is a change to the document's history.
+            let id = parse::<PinParams>(params.clone())?.id;
+            check(store, scope, &id, true)?;
+            handle_system(store, app, method, params)
+        }
         method::GET | method::HISTORY | method::AT | method::DIFF => {
             let id = params.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
             check(store, scope, &id, false)?;

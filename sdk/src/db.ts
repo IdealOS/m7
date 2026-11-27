@@ -2,7 +2,7 @@
 // type; queries filter, order and limit them (see protocol.ts `Query`).
 
 import { request, stream } from "./bus.ts";
-import type { Doc, DocsResult, Query, UndoResult, WatchEvent } from "./protocol.ts";
+import type { AtResult, Doc, DocsResult, HistoryResult, LinksResult, Query, UndoResult, VersionInfo, WatchEvent } from "./protocol.ts";
 import { signal } from "./signals.ts";
 
 export type Data = Record<string, unknown>;
@@ -34,6 +34,33 @@ export function remove(id: string): Promise<number> {
  * which is returned and can itself be undone. */
 export function undo(changeSet: number): Promise<number> {
   return request<UndoResult>("db", "undo", { change_set: changeSet }).then((r) => r.change_set);
+}
+
+/** Edit text field `path` (`body`, `a.b`) as collaborative text: at character
+ * `at` (code points), delete `del` characters and insert `insert`. Returns the
+ * change set. A plain string field becomes collaborative text on its first splice. */
+export function splice(id: string, path: string, at: number, del: number, insert: string): Promise<number> {
+  return request<UndoResult>("db", "splice", { id, path, at, delete: del, insert }).then((r) => r.change_set);
+}
+
+/** Every version of a document, oldest first. */
+export function history(id: string): Promise<VersionInfo[]> {
+  return request<HistoryResult>("db", "history", { id }).then((r) => r.versions);
+}
+
+/** A document's data as it was after change set `changeSet`. */
+export function at(id: string, changeSet: number): Promise<Record<string, unknown>> {
+  return request<AtResult>("db", "at", { id, change_set: changeSet }).then((r) => r.data);
+}
+
+/** Keep (or stop keeping) a version through history compaction. */
+export function pin(id: string, changeSet: number, pinned = true): Promise<void> {
+  return request("db", "pin", { id, change_set: changeSet, pinned }).then(() => undefined);
+}
+
+/** What a document links to, and what links to it. */
+export function links(id: string): Promise<LinksResult> {
+  return request<LinksResult>("db", "links", { id });
 }
 
 export function search(text: string, options: { type?: string; limit?: number } = {}): Promise<Doc[]> {

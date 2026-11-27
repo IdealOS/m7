@@ -9,7 +9,8 @@
 //!                                    # serve app windows on the bus for 3 s,
 //!                                    # pressing the button labelled "Add one"
 //!                                    # partway through, then render; --type TEXT
-//!                                    # and --key NAME (tab, enter, down, ...) are
+//!                                    # and --key NAME (tab, enter, down, cmd+z,
+//!                                    # alt+up, ...) are
 //!                                    # steps too, spread over the time in order
 //! compositor --backend kms           # device backend (Linux, feature "kms")
 //! compositor --backend kms --card /dev/dri/card1
@@ -85,9 +86,8 @@ fn main() -> ExitCode {
             }
             "--key" => {
                 let name = value("--key");
-                steps.push(Step::Key(
-                    key_named(&name).unwrap_or_else(|| usage(&format!("unknown key {name}"))),
-                ))
+                let (key, mods) = key_named(&name).unwrap_or_else(|| usage(&format!("unknown key {name}")));
+                steps.push(Step::Key(key, mods))
             }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
@@ -120,12 +120,35 @@ enum Step {
     Click(String),
     /// Type this text into whatever has focus.
     Type(String),
-    Key(Key),
+    /// A key, with modifiers.
+    Key(Key, Mods),
     /// Turn the wheel under the pointer this many pixels.
     Scroll(f32),
 }
 
-fn key_named(name: &str) -> Option<Key> {
+/// A key by name, after any modifiers: `enter`, `cmd+z`, `alt+shift+up`. A
+/// single character is that character's key.
+fn key_named(name: &str) -> Option<(Key, Mods)> {
+    let mut mods = Mods::default();
+    let mut parts: Vec<&str> = name.split('+').collect();
+    let last = parts.pop()?;
+    for m in parts {
+        match m {
+            "cmd" | "logo" => mods.logo = true,
+            "ctrl" => mods.ctrl = true,
+            "alt" | "option" => mods.alt = true,
+            "shift" => mods.shift = true,
+            _ => return None,
+        }
+    }
+    let mut chars = last.chars();
+    if let (Some(c), None) = (chars.next(), chars.clone().next()) {
+        return Some((Key::Char(if mods.shift { c.to_ascii_uppercase() } else { c }), mods));
+    }
+    Some((named_key(last)?, mods))
+}
+
+fn named_key(name: &str) -> Option<Key> {
     Some(match name {
         "tab" => Key::Tab,
         "enter" => Key::Enter,
@@ -208,7 +231,7 @@ fn serve(desktop: &mut Desktop, secs: f64, steps: &[Step]) -> Result<(), Box<dyn
                 Step::Type(text) => {
                     text.chars().map(|c| Input::Key { key: Key::Char(c), mods: Mods::default() }).collect()
                 }
-                Step::Key(key) => vec![Input::Key { key: *key, mods: Mods::default() }],
+                Step::Key(key, mods) => vec![Input::Key { key: *key, mods: *mods }],
                 Step::Scroll(dy) => vec![Input::Scroll { dx: 0.0, dy: *dy }],
             };
             for input in inputs {

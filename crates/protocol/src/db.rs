@@ -72,8 +72,9 @@ pub const SERVICE: &str = "db";
 /// | `pin`     | [`PinParams`]  | null |
 /// | `compact` | none            | [`CompactResult`] |
 ///
-/// `pin` and `compact` are for system services and tools only. dbd compacts
-/// history once a day by itself; `compact` runs it now.
+/// `compact` is for system services and tools only; an app may `pin` versions
+/// of documents it may change. dbd compacts history once a day by itself;
+/// `compact` runs it now.
 ///
 /// `put_blob` stores the contents of a regular file (or memfd) passed with the
 /// request, and `get_blob` answers with a read-only descriptor for the blob.

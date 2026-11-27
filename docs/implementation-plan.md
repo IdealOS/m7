@@ -350,11 +350,11 @@ The editor:
 - [x] `TextDocument` schema with CRDT text (the body as Loro text, so edits merge); `format` is plain text or Markdown; `tags`. Text fields become Loro text the first time they're spliced, which the bound fields do.
 - [x] Editor app built on the bound multiline widget: create, open, rename, delete (undoable). `delete` now answers with its change set, so the app can `undo` it.
 - [x] A document list: recent first, full-text search, and filters by tag and format. Queries can order by `$updated` and `$created`.
-- [ ] Find and replace, with match case and whole word.
-- [ ] Word and character counts, and the caret's line and column.
-- [ ] Version history sidebar using the history API: a timeline to scrub through, the diff of each change, and restoring a version (a new change, so it can be undone). Pinned versions (`pin`), such as "draft sent", which history compaction keeps.
-- [ ] Markdown: a live preview beside the text (headings, lists, emphasis, links, code); links to other documents as `$link`, so backlinks work; images stored as blobs.
-- [ ] Writing comfort: monospace or serif modes through the app's `style.css`, a focus mode that hides the toolbar, and the Emacs and macOS text keys.
+- [x] Find and replace, with match case and whole word. Text widgets report their caret and selection to apps that listen (`select`), and apps can select text, focus a field and add their own change sets to its undo history.
+- [x] Word and character counts, and the caret's line and column.
+- [x] Version history sidebar using the history API: a timeline to scrub through, the diff of each change, and restoring a version (a new change, so it can be undone). Pinned versions (`pin`), such as "draft sent", which history compaction keeps. Apps may now pin versions of documents they may change; names are kept in the document's `pins`.
+- [x] Markdown: a live preview beside the text (headings, lists, emphasis, links, code); links to other documents as `$link`, so backlinks work; images stored as blobs. Emphasis shows as plain text until styled runs exist.
+- [x] Writing comfort: monospace or serif modes through the app's `style.css`, a focus mode that hides the toolbar, and the Emacs and macOS text keys. New: Command-Z and Command-Shift-Z (through db's change sets), Option-Up and -Down by paragraph, Page Up and Down, and Command-Up staying in a text area.
 
 Later:
 

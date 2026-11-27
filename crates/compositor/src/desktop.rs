@@ -21,7 +21,7 @@ use protocol::{BusError, Clipboard, Commit, NodeId, NodeKind, OpenWindowParams, 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::apps::{Apps, Reply};
+use crate::apps::{Apps, Asked, Reply};
 use crate::cursor::Shape;
 use crate::demo::TOP_BAR;
 use crate::draw::FIELD_PAD;
@@ -32,6 +32,7 @@ use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
 use crate::terminal;
 use crate::textedit::{Edit, Move, Splice};
+use crate::texthistory::{Kind, TextHistory};
 use crate::theme;
 use crate::wm::{self, WindowManager};
 
@@ -131,8 +132,10 @@ struct Cached {
 enum Pending {
     /// The document behind a bound text field.
     Bind(NodeId),
-    /// An edit to a bound text field's document.
-    Splice(NodeId),
+    /// An edit to a bound text field's document, in its undo history's group.
+    Splice { node: NodeId, group: u64 },
+    /// Undoing one of a bound text field's change sets (Command-Z, or redo).
+    Undo { node: NodeId, group: u64 },
     /// The installed apps, for the launcher menu.
     Launcher,
 }
@@ -273,6 +276,10 @@ pub struct Desktop {
     /// meanwhile. Text that arrives while edits are in flight can be older than
     /// what's shown, so it waits until they're answered.
     follows: HashMap<NodeId, Follow>,
+    /// Bound text fields' undo histories (see `texthistory`).
+    histories: HashMap<NodeId, TextHistory>,
+    /// The caret and selection each text widget last told its app, as [anchor, caret].
+    selects_told: HashMap<NodeId, (usize, usize)>,
     drag: Option<Drag>,
     /// The control the pointer is over, which shows its `:hover` style.
     hovered: Option<NodeId>,
@@ -347,6 +354,8 @@ impl Desktop {
             focus: None,
             edits: HashMap::new(),
             follows: HashMap::new(),
+            histories: HashMap::new(),
+            selects_told: HashMap::new(),
             drag: None,
             hovered: None,
             hovered_title: None,
@@ -1245,6 +1254,7 @@ impl Desktop {
         let splice = f(e);
         let text = e.text().to_owned();
         if let Some(s) = splice {
+            let kind = Kind::of(&s);
             self.set(node, json!({"_value": text.clone()}));
             self.apps.reported(node, &text);
             self.event(node, "change", json!(text));
@@ -1255,7 +1265,8 @@ impl Desktop {
                 let mut params =
                     json!({"id": doc, "path": path, "at": s.at, "delete": s.delete, "insert": s.insert});
                 self.act_for(node, &mut params);
-                self.request(Some(Pending::Splice(node)), "db", "splice", params);
+                let group = self.histories.entry(node).or_default().edit(kind, Instant::now());
+                self.request(Some(Pending::Splice { node, group }), "db", "splice", params);
                 if let Some(f) = self.follows.get_mut(&node) {
                     f.in_flight += 1;
                 }
@@ -1264,10 +1275,53 @@ impl Desktop {
         self.show_caret(node);
     }
 
+    /// Undo (or redo) bound text field `node`'s newest group of edits, through
+    /// db: each change set is undone with a new one, which redo undoes in turn.
+    fn undo_text(&mut self, node: NodeId, redo: bool) {
+        let Some(h) = self.histories.get_mut(&node) else { return };
+        let Some((sets, group)) = (if redo { h.redo() } else { h.undo() }) else { return };
+        for set in sets {
+            let mut params = json!({"change_set": set});
+            self.act_for(node, &mut params);
+            self.request(Some(Pending::Undo { node, group }), "db", "undo", params);
+        }
+    }
+
+    /// Do what an app asked of its widget `node`: select text in it, focus it,
+    /// or add its own change sets to the widget's undo history.
+    /// Focus moves only within the frontmost window, so an app behind can't take
+    /// the keyboard.
+    fn do_asked(&mut self, node: NodeId, asked: Asked) {
+        if !matches!(self.kind(node), Some(NodeKind::TextField | NodeKind::TextArea)) {
+            return;
+        }
+        match asked {
+            Asked::Select(anchor, caret) => self.edit(node, |e| {
+                e.select_range(anchor, caret);
+                None
+            }),
+            Asked::Undoable(sets) => self.histories.entry(node).or_default().add(sets),
+            Asked::Focus => {
+                let mut at = Some(node);
+                while let Some(n) = at {
+                    if Some(n) == self.top_window() {
+                        return self.set_focus(Some(node));
+                    }
+                    at = self.scene.parent(n);
+                }
+            }
+        }
+    }
+
     /// Put text widget `node`'s caret and selection on screen, scrolling to keep
     /// the caret in view.
     fn show_caret(&mut self, node: NodeId) {
         let Some(e) = self.edits.get(&node).cloned() else { return };
+        let told = (e.anchor(), e.caret());
+        if self.apps.listens_for_select(node) && self.selects_told.get(&node) != Some(&told) {
+            self.selects_told.insert(node, told);
+            self.event(node, "select", json!([told.0, told.1]));
+        }
         let Some(rect) = self.scene.layout_rect(node).or_else(|| self.scene.local_rect(node)) else { return };
         let multiline = self.kind(node) == Some(NodeKind::TextArea);
         let font = self.font_of(node);
@@ -1394,8 +1448,13 @@ impl Desktop {
         match key {
             // Command (Super on a PC keyboard) for the clipboard and select-all;
             // Ctrl works for the clipboard too.
-            Key::Char(c) if mods.logo || (mods.ctrl && matches!(c.to_ascii_lowercase(), 'c' | 'x' | 'v')) => {
+            Key::Char(c)
+                if mods.logo || (mods.ctrl && matches!(c.to_ascii_lowercase(), 'c' | 'x' | 'v' | 'z')) =>
+            {
                 match c.to_ascii_lowercase() {
+                    // Command-Z undoes, Command-Shift-Z redoes (bound fields: db
+                    // keeps their changes).
+                    'z' => self.undo_text(node, mods.shift),
                     'a' => self.edit(node, |e| {
                         e.select_all();
                         None
@@ -1478,6 +1537,15 @@ impl Desktop {
                 e.move_caret(if mods.primary() { Move::End } else { Move::LineEnd }, extend);
                 None
             }),
+            // Option-Up and -Down: by paragraph.
+            Key::Up if mods.alt => self.edit(node, |e| {
+                e.move_caret(Move::ParagraphUp, extend);
+                None
+            }),
+            Key::Down if mods.alt => self.edit(node, |e| {
+                e.move_caret(Move::ParagraphDown, extend);
+                None
+            }),
             // Command-Up and -Down: the start and end of the text.
             Key::Up if mods.logo => self.edit(node, |e| {
                 e.move_caret(Move::Home, extend);
@@ -1487,7 +1555,7 @@ impl Desktop {
                 e.move_caret(Move::End, extend);
                 None
             }),
-            Key::Up | Key::Down if multiline => {
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown if multiline => {
                 let Some(e) = self.edits.get(&node).cloned() else { return };
                 // Wrapped as drawn: a text area outside a layout container has
                 // only its own rect.
@@ -1497,7 +1565,14 @@ impl Desktop {
                 let font = self.font_of(node);
                 let width = Some((rect.w - 2.0 * FIELD_PAD).max(1.0));
                 let (cx, cy, ch) = self.layout.caret_at(node, e.text(), &font, width, e.caret());
-                let ty = if key == Key::Up { cy - ch / 2.0 } else { cy + ch * 1.5 };
+                // Page Up and Down go a view's height, less a row to keep in sight.
+                let page = ((rect.h - 8.0) - ch).max(ch);
+                let ty = match key {
+                    Key::Up => cy - ch / 2.0,
+                    Key::Down => cy + ch * 1.5,
+                    Key::PageUp => (cy - page).max(0.0) + ch / 2.0,
+                    _ => cy + page + ch / 2.0,
+                };
                 let at = self.layout.index_at(node, e.text(), &font, width, cx, ty);
                 self.edit(node, |e| {
                     e.move_caret(Move::To(at), extend);
@@ -1545,7 +1620,10 @@ impl Desktop {
             }
             return Effect::default();
         }
-        if mods.logo && key == Key::Up {
+        // Command-Up maximizes, except in a text area, which takes it as the
+        // start of its text (Ctrl-Alt-Up maximizes from anywhere).
+        let in_text_area = self.focus.is_some_and(|f| self.kind(f) == Some(NodeKind::TextArea));
+        if mods.logo && key == Key::Up && !in_text_area {
             self.maximize_top();
             return Effect::default();
         }
@@ -2043,6 +2121,8 @@ impl Desktop {
         }
         let scene = &self.scene;
         self.edits.retain(|n, _| scene.node(*n).is_some());
+        self.histories.retain(|n, _| scene.node(*n).is_some());
+        self.selects_told.retain(|n, _| scene.node(*n).is_some());
         self.layout.forget(|n| scene.node(n).is_none());
         if self.focus.is_some_and(|f| scene.node(f).is_none()) {
             self.focus = None;
@@ -2116,6 +2196,9 @@ impl Desktop {
                     Ok(created) => {
                         self.forget_gone();
                         self.load_bound(&created);
+                        for (node, asked) in self.apps.take_asked() {
+                            self.do_asked(node, asked);
+                        }
                         if let Some(w) = window {
                             self.focus_dialog(w);
                         }
@@ -2568,9 +2651,34 @@ impl Desktop {
                     self.outbox.push(Out::Follow { node, params });
                 }
             }
-            (Pending::Splice(node), result) => {
-                if let Err(e) = result {
-                    log::warn!("couldn't save a bound field's edit: {}: {}", e.code, e.message);
+            (Pending::Undo { node, group }, result) => match result {
+                Ok(v) => {
+                    if let (Some(h), Some(set)) = (self.histories.get_mut(&node), v["change_set"].as_i64()) {
+                        h.record(group, set);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("couldn't undo a bound field's edit: {}: {}", e.code, e.message);
+                    if let Some(h) = self.histories.get_mut(&node) {
+                        h.forget(group);
+                    }
+                }
+            },
+            (Pending::Splice { node, group }, result) => {
+                match &result {
+                    Ok(v) => {
+                        if let (Some(h), Some(set)) =
+                            (self.histories.get_mut(&node), v["change_set"].as_i64())
+                        {
+                            h.record(group, set);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("couldn't save a bound field's edit: {}: {}", e.code, e.message);
+                        if let Some(h) = self.histories.get_mut(&node) {
+                            h.forget(group);
+                        }
+                    }
                 }
                 let Some(f) = self.follows.get_mut(&node) else { return };
                 f.in_flight = f.in_flight.saturating_sub(1);
@@ -2844,6 +2952,21 @@ mod tests {
         assert!(x < 60.0, "near the row's start: {x}");
         key(&mut d, Key::Up);
         assert_eq!(caret(&d).1, 0.0);
+        // Page Down goes most of a view down.
+        key(&mut d, Key::PageDown);
+        let (_, y, _) = caret(&d);
+        assert!(y >= 200.0 - 8.0 - 2.0 * row && y <= 200.0, "about a view down: {y} (rows are {row})");
+        // Option-Down: the paragraph's end; Option-Up: its start, then the one before's.
+        let alt = Mods { alt: true, ..Mods::default() };
+        let at = |d: &Desktop| d.edits[&area].caret();
+        let chars: Vec<char> = d.edits[&area].text().chars().collect();
+        d.input(Input::Key { key: Key::Down, mods: alt });
+        assert_eq!(chars[at(&d)], '\n', "at a paragraph's end");
+        d.input(Input::Key { key: Key::Up, mods: alt });
+        let start = at(&d);
+        assert!(start > 0 && chars[start - 1] == '\n', "at its start");
+        d.input(Input::Key { key: Key::Up, mods: alt });
+        assert_eq!(at(&d), start - para.chars().count() - 1, "the paragraph before");
     }
 
     #[test]
@@ -3256,6 +3379,126 @@ mod tests {
         let ops = json!([{"op": "destroy", "id": 2}]);
         let out = d.call(request(9, "commit", json!({"window": window, "ops": ops}), false));
         assert!(out.contains(&Out::Detach { node: area }), "{out:?}");
+    }
+
+    /// Apps that listen hear where the caret and selection are, and can select
+    /// text and focus a field; Command-Up stays in a text area.
+    #[test]
+    fn apps_hear_and_move_the_caret_and_selection() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"padding": 8, "gap": 8}},
+                {"op": "create", "id": 3, "type": "text_area", "props": {"value": "hello world", "w": 300, "h": 120}},
+                {"op": "create", "id": 4, "type": "text_field", "props": {}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0},
+                {"op": "insert", "parent": 2, "child": 4, "index": 1},
+                {"op": "listen", "id": 3, "events": ["select"]}
+            ]),
+        );
+        let (area, field) = (global(&d, w, 3), global(&d, w, 4));
+        let commit = |d: &mut Desktop, ops: Value| {
+            d.call(request(9, "commit", json!({"window": w, "ops": ops}), false))
+        };
+        let out = commit(&mut d, json!([{"op": "set", "id": 3, "props": {"undo_group": "x"}}]));
+        assert!(matches!(out.last(), Some(Out::Respond { result: Err(_), .. })), "{out:?}");
+        let selects = |out: &[Out]| -> Vec<Value> {
+            events(out).into_iter().filter(|(_, e, _)| e == "select").map(|(_, _, v)| v).collect()
+        };
+        let out = commit(&mut d, json!([{"op": "set", "id": 3, "props": {"selection": [6, 11]}}]));
+        assert_eq!(selects(&out), [json!([6, 11])]);
+        assert_eq!(d.edits[&area].selected_text(), "world");
+        assert_eq!(
+            prop(&d, area, "_sel").as_array().map(Vec::len),
+            Some(1),
+            "highlighted, though not focused"
+        );
+        assert_eq!(prop(&d, area, "selection"), Value::Null, "a request, not a prop");
+        // The same selection again is no news; a key that moves the caret is.
+        assert!(
+            selects(&commit(&mut d, json!([{"op": "set", "id": 3, "props": {"selection": [6, 11]}}])))
+                .is_empty()
+        );
+        commit(&mut d, json!([{"op": "set", "id": 3, "props": {"focus": true}}]));
+        assert_eq!(d.focus, Some(area));
+        let out = d.input(Input::Key { key: Key::Up, mods: Mods { logo: true, ..Mods::default() } }).1;
+        assert_eq!(selects(&out), [json!([0, 0])], "Command-Up: the text's start");
+        assert!(
+            d.apps.frame_of(w).is_some_and(|f| prop(&d, f, "w").as_f64() != Some(1280.0)),
+            "not maximized"
+        );
+        // A field that doesn't listen says nothing; focus moves to it on request.
+        commit(&mut d, json!([{"op": "set", "id": 4, "props": {"focus": true}}]));
+        assert_eq!(d.focus, Some(field));
+        assert!(selects(&typed(&mut d, "hi")).is_empty());
+        let out = commit(&mut d, json!([{"op": "set", "id": 3, "props": {"selection": "all"}}]));
+        assert!(matches!(out.last(), Some(Out::Respond { result: Err(_), .. })), "{out:?}");
+    }
+
+    /// Command-Z undoes a bound field's last run of typing through db, by its
+    /// change sets; Command-Shift-Z undoes the undos.
+    #[test]
+    fn command_z_undoes_a_bound_fields_edits_through_db() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "text_area", "props": {"bind": {"doc": "d1", "path": "body"}, "w": 300, "h": 120}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0}
+            ]),
+        );
+        let area = global(&d, w, 2);
+        let requests = |out: &[Out], m: &str| -> Vec<(u64, Value)> {
+            out.iter()
+                .filter_map(|o| match o {
+                    Out::Request { token, method, params, .. } if method == m => {
+                        Some((*token, params.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let at = center(&mut d, area);
+        click(&mut d, at);
+        let typing = requests(&typed(&mut d, "ab"), "splice");
+        assert_eq!(typing.len(), 2);
+        for (i, (token, _)) in typing.iter().enumerate() {
+            d.call(Call::Reply { token: *token, result: Ok(json!({"change_set": 10 + i})) });
+        }
+        let cmd = |shift| Mods { logo: true, shift, ..Mods::default() };
+        let undos = requests(&d.input(Input::Key { key: Key::Char('z'), mods: cmd(false) }).1, "undo");
+        assert_eq!(
+            undos.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
+            [
+                json!({"change_set": 11, "as": "org.example.test"}),
+                json!({"change_set": 10, "as": "org.example.test"})
+            ],
+            "the run of typing, newest first, as the app"
+        );
+        for (i, (token, _)) in undos.iter().enumerate() {
+            d.call(Call::Reply { token: *token, result: Ok(json!({"change_set": 20 + i})) });
+        }
+        assert!(
+            requests(&d.input(Input::Key { key: Key::Char('z'), mods: cmd(false) }).1, "undo").is_empty()
+        );
+        // The app's own change sets (a replace, say) undo as a step too.
+        let ops = json!([{"op": "set", "id": 2, "props": {"undo_group": [30, 31]}}]);
+        d.call(request(9, "commit", json!({"window": w, "ops": ops}), false));
+        let undos = requests(&d.input(Input::Key { key: Key::Char('z'), mods: cmd(false) }).1, "undo");
+        let sets: Vec<Value> = undos.iter().map(|(_, p)| p["change_set"].clone()).collect();
+        assert_eq!(sets, [json!(31), json!(30)]);
+        // Redo waits for db to answer the undo.
+        assert!(requests(&d.input(Input::Key { key: Key::Char('Z'), mods: cmd(true) }).1, "undo").is_empty());
+        for (i, (token, _)) in undos.iter().enumerate() {
+            d.call(Call::Reply { token: *token, result: Ok(json!({"change_set": 40 + i})) });
+        }
+        let redos = requests(&d.input(Input::Key { key: Key::Char('Z'), mods: cmd(true) }).1, "undo");
+        let sets: Vec<Value> = redos.iter().map(|(_, p)| p["change_set"].clone()).collect();
+        assert_eq!(sets, [json!(41), json!(40)], "redo undoes the undos");
     }
 
     #[test]

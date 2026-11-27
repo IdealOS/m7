@@ -5,17 +5,20 @@
 //
 // On the left, the documents, most recently changed first, with a search (every
 // word must match, anywhere in the title or body) and filters by format and tag.
-// On the right, the one chosen. Deleting can be undone: db keeps the document's
-// history, and undoing the delete's change set brings it back.
+// On the right, the one chosen (pane.ts): find and replace, counts, version
+// history, a Markdown preview, writing modes and a focus mode. Deleting can be
+// undone: db keeps the document's history, and undoing the delete's change set
+// brings it back.
 
 import style from "./style.css";
-import { button, db, each, effect, hstack, label, memo, openWindow, scroll, select, signal, split, textArea, textField, vstack } from "@idealos/sdk";
-import { allTags, formatName, formatNamed, formatOf, FORMATS, nextAfter, parseTags, shown, tagsOf, titleOf, TYPE, type Format } from "./library.ts";
+import { button, db, each, effect, hstack, label, memo, openWindow, scroll, select, signal, split, textField, vstack } from "@idealos/sdk";
+import { allTags, formatName, formatNamed, FORMATS, nextAfter, shown, titleOf, TYPE, type Format } from "./library.ts";
+import { documentPane, type Mode, type Panel } from "./pane.ts";
 
 const ANY_FORMAT = "Any format";
 const ANY_TAG = "Any tag";
 
-await openWindow({ title: "Editor", width: 960, height: 640, style }, () => {
+await openWindow({ title: "Editor", width: 1100, height: 700, style }, () => {
   const docs = db.live({ type: TYPE, orderBy: [["$updated", "desc"]], limit: 1000 });
   const [selected, setSelected] = signal<string | null>(null);
   const [words, setWords] = signal("");
@@ -24,6 +27,10 @@ await openWindow({ title: "Editor", width: 960, height: 640, style }, () => {
   const [tag, setTag] = signal<string | null>(null);
   const [deleted, setDeleted] = signal<{ title: string; id: string; changeSet: number } | null>(null);
   const [problem, setProblem] = signal("");
+  // How the editor looks, kept as documents change.
+  const [mode, setMode] = signal<Mode>("sans");
+  const [panel, setPanel] = signal<Panel>("none");
+  const [focusMode, setFocusMode] = signal(false);
 
   const visible = memo(() => shown(docs(), { found: found(), format: format(), tag: tag() }));
   const current = () => docs().find((d) => d.id === selected());
@@ -79,7 +86,7 @@ await openWindow({ title: "Editor", width: 960, height: 640, style }, () => {
   };
 
   const sidebar = vstack(
-    { gap: 8, padding: 10 },
+    { gap: 8, padding: 10, hidden: focusMode },
     hstack(
       { gap: 8 },
       button({ label: "New", class: "primary", onClick: () => void create().catch(fail) }),
@@ -132,41 +139,10 @@ await openWindow({ title: "Editor", width: 960, height: 640, style }, () => {
     }),
   );
 
-  // One pane per open document, so its fields are bound to it from the start.
-  const pane = (id: string) =>
-    vstack(
-      { gap: 8, padding: 12, grow: 1 },
-      hstack(
-        { gap: 8, align: "center" },
-        textField({ bind: { doc: id, path: "title" }, placeholder: "Untitled", size: 18, grow: 1 }),
-        select({
-          options: FORMATS.map(([, name]) => name),
-          value: () => {
-            const d = current();
-            return formatName(d ? formatOf(d) : "plain");
-          },
-          onChange: (v) => {
-            const f = formatNamed(v);
-            if (f) void db.update(id, { format: f }).catch(fail);
-          },
-        }),
-        button({ label: "Delete", onClick: () => void remove(id).catch(fail) }),
-      ),
-      textField({
-        placeholder: "Tags, separated by commas (Enter sets them)",
-        value: () => {
-          const d = current();
-          return d ? tagsOf(d).join(", ") : "";
-        },
-        onSubmit: (v) => void db.update(id, { tags: parseTags(v) }).catch(fail),
-      }),
-      textArea({ bind: { doc: id, path: "body" }, placeholder: "Write here. It's saved as you go.", class: "body", h: "fill" }),
-    );
-
   const main = vstack(
     { grow: 1 },
     hstack(
-      { gap: 8, align: "center", padding: [6, 12], hidden: () => !deleted() },
+      { gap: 8, align: "center", padding: [6, 12], hidden: () => !deleted() || focusMode() },
       label({ text: () => `Deleted “${deleted()?.title ?? ""}”`, grow: 1 }),
       button({ label: "Undo", onClick: () => void restore().catch(fail) }),
       button({ label: "Dismiss", onClick: () => setDeleted(null) }),
@@ -178,7 +154,21 @@ await openWindow({ title: "Editor", width: 960, height: 640, style }, () => {
         return d ? [d.id] : [];
       },
       (id) => id,
-      (id) => pane(id()),
+      (id) =>
+        documentPane({
+          id: id(),
+          doc: current,
+          docs,
+          mode,
+          setMode,
+          panel,
+          setPanel,
+          focusMode,
+          setFocusMode,
+          remove: (doc) => void remove(doc).catch(fail),
+          open: setSelected,
+          fail,
+        }),
       { grow: 1 },
     ),
     label({

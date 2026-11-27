@@ -1,3 +1,15 @@
-/* The editor's own look. */
-.body { font-size: 15px; }
+/* The editor's own look. The body is written in one of three modes, larger in
+   focus mode (a class each, as a selector names one class). */
+.write-sans { font-size: 15px; }
+.write-serif { font-family: "DejaVu Serif", "Georgia", "Times New Roman", "Times", serif; font-size: 17px; }
+.write-mono { font-family: "DejaVu Sans Mono", monospace; font-size: 14px; }
+.write-sans-big { font-size: 18px; }
+.write-serif-big { font-family: "DejaVu Serif", "Georgia", "Times New Roman", "Times", serif; font-size: 20px; }
+.write-mono-big { font-family: "DejaVu Sans Mono", monospace; font-size: 16px; }
+
+.mono { font-family: "DejaVu Sans Mono", monospace; font-size: 13px; }
+.version { font-size: 13px; }
 .err { color: var(--danger); }
+.removed { color: var(--danger); }
+.added { color: #16a34a; }
+@dark { .added { color: #4ade80; } }

@@ -116,7 +116,7 @@ async fn an_app_without_grants_gets_permission_denied() {
     ));
     assert!(denied(call(&app, "snapshots", Value::Null).await));
     assert!(call(&app, "compact", Value::Null).await.is_err(), "only the system compacts");
-    assert!(call(&app, "pin", json!({"id": note.id, "change_set": 1})).await.is_err());
+    assert!(denied(call(&app, "pin", json!({"id": note.id, "change_set": 1})).await));
     assert!(query(&app, json!({"type": "Note"})).await.is_empty(), "queries see nothing");
     let hits: DocsResult =
         serde_json::from_value(call(&app, "search", json!({"text": "private"})).await.unwrap()).unwrap();
@@ -151,6 +151,15 @@ async fn grants_cover_types_and_filters_and_apps_own_what_they_create() {
     assert!(denied(create(&app, "Photo", json!({"album": "Work"})).await.map(|_| Value::Null)));
     let mine = create(&app, "Photo", json!({"album": "Family", "by": "me"})).await.unwrap();
     call(&app, "update", json!({"id": mine.id, "patch": {"album": "Holiday"}})).await.unwrap();
+    // It may pin versions of what it may change, and only those.
+    let first =
+        call(&app, "history", json!({"id": mine.id})).await.unwrap()["versions"][0]["change_set"].clone();
+    call(&app, "pin", json!({"id": mine.id, "change_set": first})).await.unwrap();
+    assert_eq!(call(&app, "history", json!({"id": mine.id})).await.unwrap()["versions"][0]["pinned"], true);
+    assert!(
+        denied(call(&app, "pin", json!({"id": family.id, "change_set": first})).await),
+        "read isn't write"
+    );
     assert_eq!(query(&app, json!({"type": "Photo", "orderBy": [["by", "asc"]]})).await.len(), 2);
     // Another app sees none of it.
     let other = s.bus.app("org.example.other").await;

@@ -23,6 +23,8 @@ import {
   root,
   setClipboard,
   signal,
+  textArea,
+  textControl,
   textField,
   virtualList,
   vstack,
@@ -239,6 +241,36 @@ test("widgets hand their values to handlers, and the window follows resizes", as
   assert.deepEqual(win.size(), { width: 300, height: 200 });
   host.streams[0].part({ kind: "resized", width: 640, height: 480 });
   assert.deepEqual(win.size(), { width: 640, height: 480 });
+});
+
+test("text widgets report selections to apps that listen, and a control selects and focuses", async () => {
+  const host = fresh();
+  const seen: unknown[] = [];
+  const find = textControl();
+  const opened = openWindow({ title: "Find" }, () =>
+    textArea({ value: "hello world", control: find, onSelect: (v) => seen.push(v) }),
+  );
+  host.streams[0].part({ kind: "opened", window: 3, width: 300, height: 200 });
+  await opened;
+  await tick();
+  const [first] = host.commits();
+  const area = first.find((op) => op.op === "create") as { id: number; props: Record<string, unknown> };
+  assert.ok(!("control" in area.props) && !("onSelect" in area.props), "both stay in the app");
+  assert.ok(first.some((op) => op.op === "listen" && op.id === area.id && op.events.includes("select")));
+  host.streams[0].part({ kind: "event", node: area.id, event: "select", value: [6, 11] });
+  assert.deepEqual(seen, [[6, 11]]);
+  find.select(6, 11);
+  find.select(6, 11);
+  find.focus();
+  find.addUndo([7, 8]);
+  find.addUndo([]);
+  await tick();
+  assert.deepEqual(host.commits()[1], [
+    { op: "set", id: area.id, props: { selection: [6, 11] } },
+    { op: "set", id: area.id, props: { selection: [6, 11] } },
+    { op: "set", id: area.id, props: { focus: true } },
+    { op: "set", id: area.id, props: { undo_group: [7, 8] } },
+  ], "each call is sent, repeats too (an empty undo group isn't)");
 });
 
 test("a virtual list makes rows as they come into view and drops them as they leave", async () => {

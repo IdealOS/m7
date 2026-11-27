@@ -12,8 +12,15 @@
 //! theirs through [`Apps::event`]. Windows can be resized and maximized, which
 //! tells the app its new content size. No I/O here: the bus side feeds requests in
 //! and sends the replies out.
+//!
+//! Text widgets whose app listens for `select` report where their caret and
+//! selection are. An app moves them by setting `selection: [anchor, caret]`,
+//! focuses a widget by setting `focus: true`, and adds change sets it made to a
+//! bound field's undo history with `undo_group: [change sets]`; those are
+//! requests, not props kept on the node, handed to the desktop through
+//! [`Apps::take_asked`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use protocol::scene::{CONTENT, MAX_WINDOW_NODES};
 use protocol::{Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, Sender, WindowEvent};
@@ -28,6 +35,18 @@ const DEFAULT_SIZE: (u32, u32) = (360, 240);
 /// Space around and between placed windows.
 const MARGIN: f32 = 60.0;
 const GAP: f32 = 24.0;
+
+/// Something an app asked of one of its widgets in a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asked {
+    /// Select from `anchor` to `caret` (character indexes) in a text widget.
+    Select(usize, usize),
+    /// Take the keyboard focus.
+    Focus,
+    /// Change sets the app made to a bound field's document, to undo with the
+    /// field's own edits (Command-Z), as one step.
+    Undoable(Vec<i64>),
+}
 
 /// A window event for the app whose request opened the window.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +106,10 @@ pub struct Apps {
     /// Text each text widget reported to its app (`change` events) that the app
     /// hasn't sent back yet, oldest first. See [`Apps::reported`].
     reported: HashMap<NodeId, std::collections::VecDeque<String>>,
+    /// Text widgets whose app listens for `select`.
+    selects: HashSet<NodeId>,
+    /// What apps asked of their widgets in commits, not yet done.
+    asked: Vec<(NodeId, Asked)>,
 }
 
 /// How many unanswered reports a text widget remembers.
@@ -377,6 +400,7 @@ impl Apps {
         }
         let mut ops = Vec::with_capacity(commit.ops.len());
         let mut listens = Vec::new();
+        let mut asked = Vec::new();
         let mut result = Ok(());
         let mut created = Vec::new();
         for op in commit.ops {
@@ -389,6 +413,30 @@ impl Apps {
                                 && self.is_echo(*id, &v)
                             {
                                 props.remove("_value");
+                            }
+                            if let Some(v) = props.remove("selection") {
+                                let at = |i: usize| v.get(i).and_then(Value::as_u64).map(|n| n as usize);
+                                match (at(0), at(1)) {
+                                    (Some(a), Some(c)) => asked.push((*id, Asked::Select(a, c))),
+                                    _ => {
+                                        result = Err("selection is [anchor, caret]".to_owned());
+                                        break;
+                                    }
+                                }
+                            }
+                            if props.remove("focus") == Some(Value::Bool(true)) {
+                                asked.push((*id, Asked::Focus));
+                            }
+                            if let Some(v) = props.remove("undo_group") {
+                                let sets: Option<Vec<i64>> =
+                                    v.as_array().and_then(|a| a.iter().map(Value::as_i64).collect());
+                                match sets {
+                                    Some(sets) => asked.push((*id, Asked::Undoable(sets))),
+                                    None => {
+                                        result = Err("undo_group is a list of change sets".to_owned());
+                                        break;
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -414,7 +462,13 @@ impl Apps {
                 } else {
                     self.targets.remove(&global);
                 }
+                if events.iter().any(|e| e == "select") {
+                    self.selects.insert(global);
+                } else {
+                    self.selects.remove(&global);
+                }
             }
+            self.asked.extend(asked);
         }
         // Forget ids whose nodes are gone: destroyed, or allocated by a commit that
         // was refused.
@@ -482,6 +536,17 @@ impl Apps {
         self.targets.retain(|g, _| scene.node(*g).is_some());
         self.owners.retain(|g, _| scene.node(*g).is_some());
         self.reported.retain(|g, _| scene.node(*g).is_some());
+        self.selects.retain(|g| scene.node(*g).is_some());
+    }
+
+    /// Whether `node`'s app listens for its `select` events.
+    pub fn listens_for_select(&self, node: NodeId) -> bool {
+        self.selects.contains(&node)
+    }
+
+    /// What apps asked of their widgets since this was last called, in order.
+    pub fn take_asked(&mut self) -> Vec<(NodeId, Asked)> {
+        std::mem::take(&mut self.asked)
     }
 
     /// The app's request `request` ended (cancelled, answered, or its connection
@@ -492,6 +557,7 @@ impl Apps {
         scene.apply(SceneOp::Destroy { id: w.frame });
         self.targets.retain(|g, _| scene.node(*g).is_some());
         self.owners.retain(|g, _| scene.node(*g).is_some());
+        self.selects.retain(|g| scene.node(*g).is_some());
         if self.pressed.is_some_and(|p| scene.node(p).is_none()) {
             self.pressed = None;
         }

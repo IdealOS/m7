@@ -36,6 +36,10 @@ pub enum Move {
     /// The start and end of the caret's line (lines end at `\n`).
     LineStart,
     LineEnd,
+    /// The start of the caret's paragraph, or of the one before if it's there
+    /// already; the end of it, or of the next (Option-Up and -Down on a Mac).
+    ParagraphUp,
+    ParagraphDown,
     /// To a character index (a click, or up and down in a text area).
     To(usize),
 }
@@ -52,6 +56,19 @@ impl Edit {
 
     pub fn caret(&self) -> usize {
         self.caret
+    }
+
+    /// The selection's other end: the caret when nothing is selected.
+    pub fn anchor(&self) -> usize {
+        self.anchor.unwrap_or(self.caret)
+    }
+
+    /// Select from `anchor` to `caret` (an app asking, as find does), each kept
+    /// within the text.
+    pub fn select_range(&mut self, anchor: usize, caret: usize) {
+        let len = self.len();
+        self.caret = caret.min(len);
+        self.anchor = Some(anchor.min(len)).filter(|&a| a != self.caret);
     }
 
     fn len(&self) -> usize {
@@ -147,6 +164,26 @@ impl Edit {
                 i
             }
             Move::To(i) => i.min(len),
+            Move::ParagraphUp => {
+                let mut i = self.caret;
+                if i > 0 && chars[i - 1] == '\n' {
+                    i -= 1;
+                }
+                while i > 0 && chars[i - 1] != '\n' {
+                    i -= 1;
+                }
+                i
+            }
+            Move::ParagraphDown => {
+                let mut i = self.caret;
+                if i < len && chars[i] == '\n' {
+                    i += 1;
+                }
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+                i
+            }
             Move::WordLeft => {
                 let mut i = self.caret;
                 while i > 0 && chars[i - 1].is_whitespace() {
@@ -279,6 +316,24 @@ fn moved_through(i: usize, prefix: usize, old_end: usize, new_end: usize) -> usi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apps_select_ranges_and_option_arrows_go_by_paragraph() {
+        let mut e = Edit::new("one\ntwo three\nfour");
+        e.select_range(4, 7);
+        assert_eq!((e.anchor(), e.caret(), e.selected_text()), (4, 7, "two".into()));
+        e.select_range(99, 99);
+        assert_eq!((e.anchor(), e.caret(), e.selection()), (18, 18, None), "kept within the text");
+        e.move_caret(Move::To(8), false);
+        e.move_caret(Move::ParagraphUp, false);
+        assert_eq!(e.caret(), 4, "to its paragraph's start");
+        e.move_caret(Move::ParagraphUp, false);
+        assert_eq!(e.caret(), 0, "already there: the one before");
+        e.move_caret(Move::ParagraphDown, false);
+        assert_eq!(e.caret(), 3);
+        e.move_caret(Move::ParagraphDown, true);
+        assert_eq!((e.caret(), e.selected_text()), (13, "\ntwo three".into()));
+    }
+
     use super::*;
 
     #[test]

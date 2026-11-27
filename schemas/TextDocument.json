@@ -2,13 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "idealos:schema/TextDocument",
   "title": "TextDocument",
-  "description": "A piece of writing, edited in the Editor. The body (and the title) become collaborative text the first time they're spliced, so edits from several writers merge.",
+  "description": "A piece of writing, edited in the Editor. The body (and the title) become collaborative text the first time they're spliced, so edits from several writers merge. links and images list what a Markdown body links to ([text](doc:<id>)) and shows (![alt](blob:<sha-256>)), so backlinks work and the blobs are kept.",
   "type": "object",
   "properties": {
     "title": { "type": "string" },
     "body": { "type": "string" },
     "format": { "enum": ["plain", "markdown"], "default": "plain" },
-    "tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["draft", "letters"]] }
+    "tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "examples": [["draft", "letters"]] },
+    "links": { "type": "array", "items": { "x-kind": "link" } },
+    "images": { "type": "array", "items": { "x-kind": "blob" } },
+    "pins": { "type": "object", "description": "Names of pinned versions, by change set.", "examples": [{ "1042": "draft sent" }] }
   },
   "x-indexes": ["title", "format"]
 }

@@ -42,7 +42,11 @@ const HANDLERS: Record<string, string> = {
   onCancel: "cancel",
   onRange: "range",
   onChoose: "choose",
+  onSelect: "select",
 };
+
+/** Events the compositor sends only to apps that ask (`listen`). */
+const LISTENED = new Set(["click", "select"]);
 
 type Handler = (value: unknown) => void;
 
@@ -122,11 +126,10 @@ export function node(kind: NodeKind, props: Record<string, unknown> = {}, childr
       w.send({ op: "set", id, props: { [k]: value } });
     });
   }
-  for (const [event, handler] of handlers) {
-    w.on(id, event, handler);
-    // Buttons only report clicks to apps that listen; other widgets always report.
-    if (event === "click") w.send({ op: "listen", id, events: ["click"] });
-  }
+  for (const [event, handler] of handlers) w.on(id, event, handler);
+  // Clicks and selections are only reported to apps that listen; the rest always are.
+  const listened = handlers.map(([event]) => event).filter((e) => LISTENED.has(e));
+  if (listened.length > 0) w.send({ op: "listen", id, events: listened });
   if (handlers.length > 0) onCleanup(() => w.handlers.delete(id));
   children.forEach((child, index) => w.send({ op: "insert", parent: id, child: child.id, index }));
   return { id };
@@ -300,6 +303,59 @@ export interface TextProps extends Common {
   bind?: { doc: string; path: string };
   size?: Prop<number>;
   onChange?: (value: string) => void;
+  /** Where the caret and selection are, `[anchor, caret]` (equal when nothing is
+   * selected), each time they move. Positions count characters (code points, as
+   * `Array.from(text)` does), as db's text does. */
+  onSelect?: (selection: [number, number]) => void;
+  /** Moves this widget's selection and focus from code (see `textControl`). */
+  control?: TextControl;
+}
+
+/**
+ * Selects text in, and focuses, the text widget it's given to as `control`:
+ * `const find = textControl(); textArea({ control: find }); ... find.select(4, 9)`.
+ * Each call is sent, even when it repeats the last one.
+ */
+export interface TextControl {
+  /** Select from `anchor` to `caret` (characters, as in `onSelect`), scrolled into view. */
+  select(anchor: number, caret?: number): void;
+  /** Take the keyboard focus (only within the frontmost window). */
+  focus(): void;
+  /** For a bound widget: change sets the app made to its document (`db.splice`
+   * and the like), undone together by Command-Z after the widget's own edits. */
+  addUndo(changeSets: number[]): void;
+}
+
+const ATTACH = Symbol("attach");
+
+class Control implements TextControl {
+  private target: { w: Win; id: number } | null = null;
+  select(anchor: number, caret = anchor) {
+    this.send({ selection: [anchor, caret] });
+  }
+  focus() {
+    this.send({ focus: true });
+  }
+  addUndo(changeSets: number[]) {
+    if (changeSets.length > 0) this.send({ undo_group: changeSets });
+  }
+  [ATTACH](w: Win, id: number) {
+    this.target = { w, id };
+  }
+  private send(props: Record<string, unknown>) {
+    if (this.target) this.target.w.send({ op: "set", id: this.target.id, props });
+  }
+}
+
+export function textControl(): TextControl {
+  return new Control();
+}
+
+function textNode(kind: "text_field" | "text_area", props: TextProps): UiNode {
+  const { control, ...rest } = props;
+  const n = node(kind, { ...rest });
+  if (control instanceof Control) control[ATTACH](win(), n.id);
+  return n;
 }
 
 /**
@@ -307,12 +363,12 @@ export interface TextProps extends Common {
  * the clipboard; `onChange` still hears the text.
  */
 export function textField(props: TextProps & { onSubmit?: (value: string) => void; secret?: boolean }): UiNode {
-  return node("text_field", { ...props });
+  return textNode("text_field", props);
 }
 
 /** Several lines of editable text. */
 export function textArea(props: TextProps): UiNode {
-  return node("text_area", { ...props });
+  return textNode("text_area", props);
 }
 
 export interface RectProps extends Common {

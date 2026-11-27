@@ -68,7 +68,8 @@ lives in blobs, named by their SHA-256.
 | `pin` | `{id, change_set, pinned?}` | null: history compaction keeps that version |
 | `compact` | none | `{versions, change_sets, blobs, blob_bytes}`: what it removed |
 
-`restore`, `pin` and `compact` are for system services and tools; `stats` and
+`restore` and `compact` are for system services and tools (an app may `pin`
+versions of documents it may change); `stats` and
 the snapshot methods need the `storage` capability.
 
 **Queries** look like `{"type": "Email", "where": {"from.address": "a@x"},
@@ -247,7 +248,18 @@ to the database. The field follows its document with a live query, read as the
 app: another window, a restore or any other writer changes the shown text too,
 with the caret kept on its character. Changes that arrive while the field's own
 edits are on their way wait until db has taken them, so typing never jumps back.
-The app hears each change as `change`, as if typed.
+The app hears each change as `change`, as if typed. Command-Z undoes a bound
+field's last run of typing (Command-Shift-Z redoes it) through db: each edit is a
+change set, and undoing one is a new change set.
+
+An app that listens for `select` on a text widget (`{"op": "listen", "id": 3,
+"events": ["select"]}`) hears `[anchor, caret]` each time the caret or
+selection moves, in characters (code points). Setting `selection: [anchor,
+caret]` selects text and scrolls it into view, `focus: true` takes the keyboard
+focus (within the frontmost window only), and `undo_group: [change sets]` adds
+change sets the app made to a bound field's document (a replace, say) to its
+undo history as one step. Those three are requests, not props kept on the node,
+so setting the same value again does it again.
 
 ### Style sheets
 
@@ -365,8 +377,10 @@ await openWindow({ title: "Counter", width: 300, height: 200, style }, () => {
 - **Bus**: `request(to, method, params?, {timeoutMs?})`, `stream(to, method,
   params, onPart, onEnd)` (returns a cancel function), `exit(code?)`.
 - **Database** (`db.`): `query(q)`, `get(id)`, `put(type, data)`, `update(id,
-  patch)`, `remove(id)` (giving the change set), `undo(changeSet)`, `search(text,
-  {type?, limit?})`, and `live(q)`: a
+  patch)`, `remove(id)` (giving the change set), `undo(changeSet)`, `splice(id,
+  path, at, del, insert)`, `history(id)`, `at(id, changeSet)`, `pin(id,
+  changeSet, pinned?)`, `links(id)`, `search(text, {type?, limit?})`, and
+  `live(q)`: a
   signal of the query's result that stays current (`ready()`, `error()`,
   `close()`).
 - **Signals**: `signal(initial)` gives `[get, set]`; `effect(fn)`, `memo(fn)`,
@@ -378,8 +392,10 @@ await openWindow({ title: "Counter", width: 300, height: 200, style }, () => {
   `grid`, `scroll`, `split`, `dialog`, `label`, `button`, `checkbox`, `toggle`,
   `slider`, `select`, `menu`, `textField`, `textArea`, `image`, `rect`,
   `virtualList`, `terminal`, and `each(list, key, render)` for lists. Widgets
-  report through `onClick`, `onChange`, `onSubmit`, `onCancel`, `onChoose` and
-  `onRange`.
+  report through `onClick`, `onChange`, `onSubmit`, `onCancel`, `onChoose`,
+  `onRange` and (text widgets) `onSelect`. A text widget given a `control` from
+  `textControl()` can be told to `select(anchor, caret)`, `focus()` and
+  `addUndo(changeSets)` from code.
 - **Permissions** (`permissions.`): `request(rules, reason?)` asks the user;
   `granted()` lists the app's grants.
 - **Terminals** (`pty.`): `open(cols?, rows?, onTitle?)` gives a session to show
