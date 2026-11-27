@@ -124,6 +124,38 @@ secrets or Wi-Fi passwords, and aren't encrypted yet.
 Shorthands: `osctl backup status`, `setup DRIVE`, `now DRIVE`, `list DRIVE`,
 `restore DRIVE NAME`.
 
+## import: files into the database
+
+`importd` copies files in as typed documents, their bytes as blobs. Apps need
+`service:import`; importd writes with its own rights.
+
+| method | params | result |
+| --- | --- | --- |
+| `login` | `{host, user, password}` | null: the password is kept in secretsd |
+| `browse` | `{source, path?}` | `{entries}`: `{name, kind, size}`, folders first |
+| `import` | `{source, paths}` | the status: the import has started |
+| `status` | none | `{running, source?, total, done, imported, skipped, failed, ignored, current?, errors?}` |
+
+A source is `{"share": {host, share, user, port?}}`, an SMB share by address,
+mounted read-only only while it's browsed or imported from, or `{"dir": {path}}`,
+a folder inside the root importd was started with (`--dir`, for development;
+none on the device). `.txt` and `.md` files become `TextDocument`s; PNG, JPEG,
+GIF, HEIC and WebP files become `Image`s, with their size where the header
+gives it; music (MP3, FLAC, AAC/M4A, Ogg, Opus, WAV, AIFF) becomes `Track`s with
+what their tags say (read with lofty), their length, and their embedded cover as
+an `artwork` blob, stored once however many tracks share it. A music file without
+tags it can read comes in by its name. Other files are counted as `ignored`. Each document
+has `source: {from, path, hash, imported}`; a file whose hash is already there
+is skipped, so an interrupted import resumes cheaply. A file that can't be read
+or stored fails alone. One import runs at a time. A Mac shares over SMB once
+Windows File Sharing is ticked for the account (Sharing > File Sharing > Options).
+Error codes: `not_found`,
+`unreachable`, `busy`.
+
+Shorthands: `osctl import login HOST USER` (the password from standard input),
+`browse SOURCE [PATH]`, `run SOURCE PATH... [--detach yes]`, `status`, with a
+source written `smb://user@host[:port]/share` or `dir:/path`.
+
 ## net: networking
 
 `netd` wraps NetworkManager. Apps need `service:net`.

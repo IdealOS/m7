@@ -42,9 +42,12 @@ fn create_get_update_delete() {
 #[test]
 fn queries_can_order_by_when_documents_changed_and_were_made() {
     let mut s = Store::open_in_memory().unwrap();
+    // Apart in time, so neither creation nor the update ties (ties keep creation order).
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
     let a = s.create("Note", &obj(json!({"n": 1})), "t").unwrap();
+    pause();
     let b = s.create("Note", &obj(json!({"n": 2})), "t").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(3));
+    pause();
     s.update(&a.id, &obj(json!({"n": 3})), "t").unwrap();
     let ordered = |s: &Store, key: &str, dir| {
         let mut q = Query::all("Note");

@@ -425,6 +425,38 @@
         }
       ]
     },
+    "BrowseParams": {
+      "description": "Params of `browse`: what's in folder `path` of `source` (`\"\"` is its top).",
+      "properties": {
+        "path": {
+          "default": "",
+          "description": "A path inside the source, folders separated by `/`; no `..`.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
+    "BrowseResult": {
+      "description": "Result of `browse`: the folder's entries, folders first, then by name.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/Entry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
     "BusError": {
       "description": "Why a request failed. `code` is one of the broker's codes or a service's own.",
       "properties": {
@@ -913,6 +945,29 @@
       ],
       "type": "object"
     },
+    "Entry": {
+      "description": "One entry of a folder.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "description": "Bytes (0 for a folder).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "size"
+      ],
+      "type": "object"
+    },
     "FieldChangeInfo": {
       "description": "One field that differs. Objects are compared field by field, arrays and other\nvalues as a whole.",
       "properties": {
@@ -1104,6 +1159,98 @@
       ],
       "type": "object"
     },
+    "ImportParams": {
+      "description": "Params of `import`: copy in `paths` of `source`, files and whole folders.",
+      "properties": {
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "source",
+        "paths"
+      ],
+      "type": "object"
+    },
+    "ImportStatus": {
+      "description": "What importd is doing, or last did.",
+      "properties": {
+        "current": {
+          "description": "The file being imported now.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "done": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "errors": {
+          "description": "Why files failed, the most recent last (at most `MAX_ERRORS`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ignored": {
+          "description": "Files not imported for their kind.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "imported": {
+          "description": "Of those: new documents, ones already there, and ones that failed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "description": "Whether an import is running.",
+          "type": "boolean"
+        },
+        "skipped": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "description": "The source of the running (or last) import, as `name` gives it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total": {
+          "description": "Files found to import, and how many have been dealt with.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "running",
+        "total",
+        "done",
+        "imported",
+        "skipped",
+        "failed",
+        "ignored"
+      ],
+      "type": "object"
+    },
     "InfoResult": {
       "description": "Result of `info`: about this device and system.",
       "properties": {
@@ -1145,6 +1292,37 @@
         "services"
       ],
       "type": "object"
+    },
+    "Kind": {
+      "description": "What a file is, by its name, and so what importing it makes.",
+      "oneOf": [
+        {
+          "enum": [
+            "folder"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "`.txt` and `.md`: a `TextDocument`.",
+          "type": "string"
+        },
+        {
+          "const": "image",
+          "description": "An `Image`.",
+          "type": "string"
+        },
+        {
+          "const": "audio",
+          "description": "Music: a `Track`.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Anything else, not imported.",
+          "type": "string"
+        }
+      ]
     },
     "LinkInfo": {
       "description": "A link out of a document.",
@@ -1228,6 +1406,26 @@
       },
       "required": [
         "names"
+      ],
+      "type": "object"
+    },
+    "LoginParams": {
+      "description": "Params of `login`: keep `password` for `user` on computer `host`.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "user",
+        "password"
       ],
       "type": "object"
     },
@@ -1685,6 +1883,35 @@
         }
       ],
       "type": "array"
+    },
+    "Origin": {
+      "description": "Where an imported document came from: its `source` field.",
+      "properties": {
+        "from": {
+          "description": "The source, as `name` gives it.",
+          "type": "string"
+        },
+        "hash": {
+          "description": "The file's SHA-256, in hex.",
+          "type": "string"
+        },
+        "imported": {
+          "description": "When it was imported, in milliseconds since the Unix epoch.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file's path in the source.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "path",
+        "hash",
+        "imported"
+      ],
+      "type": "object"
     },
     "PinParams": {
       "description": "Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version\nafter change set `change_set`, so history compaction keeps it.",
@@ -2454,6 +2681,73 @@
       ],
       "type": "object"
     },
+    "Source": {
+      "description": "Where files come from.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A share on another computer, over SMB: macOS File Sharing, Windows, a NAS.",
+          "properties": {
+            "share": {
+              "properties": {
+                "host": {
+                  "description": "The computer's address (or a name it resolves to).",
+                  "type": "string"
+                },
+                "port": {
+                  "description": "The SMB port, if not 445.",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "share": {
+                  "description": "The share's name (a shared folder on a Mac).",
+                  "type": "string"
+                },
+                "user": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "host",
+                "share",
+                "user"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "share"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A directory on this machine, under the root importd was started with\n(`--dir`); for development and tests.",
+          "properties": {
+            "dir": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "dir"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SpliceParams": {
       "description": "Params of `splice`: edit the text at field `path` (dotted, such as `body` or\n`notes.summary`) of document `id`: at character `at`, delete `delete`\ncharacters, then insert `insert`. The field becomes collaborative text (it reads\nas a plain string everywhere), so concurrent edits merge and each splice is its\nown change in history. Positions count Unicode characters, not bytes.",
       "properties": {
@@ -2999,6 +3293,10 @@
     "GRANTS_TOPIC": {
       "description": "Where permd publishes every grant whenever they change.",
       "value": "perm.grants"
+    },
+    "IMPORT_SERVICE": {
+      "description": "The name importd claims.",
+      "value": "import"
     },
     "MAX_BLOB_BYTES": {
       "description": "Largest blob `put_blob` takes.",

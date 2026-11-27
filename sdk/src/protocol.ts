@@ -33,6 +33,9 @@ export const DEFAULT_TIMEOUT_MS = 30000;
 /** Where permd publishes every grant whenever they change. */
 export const GRANTS_TOPIC = "perm.grants";
 
+/** The name importd claims. */
+export const IMPORT_SERVICE = "import";
+
 /** Largest blob `put_blob` takes. */
 export const MAX_BLOB_BYTES = 4294967296;
 
@@ -243,6 +246,16 @@ export type BrokerErrorCode =
    */
   | "limit_exceeded";
 
+/** Params of `browse`: what's in folder `path` of `source` (`""` is its top). */
+export type BrowseParams = {
+  source: Source;
+  /** A path inside the source, folders separated by `/`; no `..`. */
+  path?: string;
+};
+
+/** Result of `browse`: the folder's entries, folders first, then by name. */
+export type BrowseResult = { entries: Entry[] };
+
 /** Why a request failed. `code` is one of the broker's codes or a service's own. */
 export type BusError = { code: string; message: string };
 
@@ -387,6 +400,14 @@ export type Drive = {
 /** Params naming a drive. */
 export type DriveParams = { drive: string };
 
+/** One entry of a folder. */
+export type Entry = {
+  name: string;
+  kind: Kind;
+  /** Bytes (0 for a folder). */
+  size: number;
+};
+
 /**
  * One field that differs. Objects are compared field by field, arrays and other
  * values as a whole.
@@ -457,6 +478,30 @@ export type IdParams = { id: string };
 /** Params of `attach`. */
 export type IdParams2 = { id: string };
 
+/** Params of `import`: copy in `paths` of `source`, files and whole folders. */
+export type ImportParams = { source: Source; paths: string[] };
+
+/** What importd is doing, or last did. */
+export type ImportStatus = {
+  /** Whether an import is running. */
+  running: boolean;
+  /** Files found to import, and how many have been dealt with. */
+  total: number;
+  done: number;
+  /** Of those: new documents, ones already there, and ones that failed. */
+  imported: number;
+  skipped: number;
+  failed: number;
+  /** Files not imported for their kind. */
+  ignored: number;
+  /** The file being imported now. */
+  current?: string | null;
+  /** Why files failed, the most recent last (at most `MAX_ERRORS`). */
+  errors?: string[];
+  /** The source of the running (or last) import, as `name` gives it. */
+  source?: string | null;
+};
+
 /** Result of `info`: about this device and system. */
 export type InfoResult = {
   /** idealos's version. */
@@ -471,6 +516,18 @@ export type InfoResult = {
   /** Services session is running, by name. */
   services: string[];
 };
+
+/** What a file is, by its name, and so what importing it makes. */
+export type Kind =
+  | "folder"
+  /** `.txt` and `.md`: a `TextDocument`. */
+  | "text"
+  /** An `Image`. */
+  | "image"
+  /** Music: a `Track`. */
+  | "audio"
+  /** Anything else, not imported. */
+  | "other";
 
 /** A link out of a document. */
 export type LinkInfo = {
@@ -495,6 +552,9 @@ export type ListResult = {
 
 /** Result of `list`: the names of the caller's secrets. */
 export type ListResult2 = { names: string[] };
+
+/** Params of `login`: keep `password` for `user` on computer `host`. */
+export type LoginParams = { host: string; user: string; password: string };
 
 /** One bus frame's JSON. */
 export type Message =
@@ -638,6 +698,18 @@ export type OpenWindowParams = {
  * written `["date", "desc"]`.
  */
 export type OrderBy = [string, Direction];
+
+/** Where an imported document came from: its `source` field. */
+export type Origin = {
+  /** The source, as `name` gives it. */
+  from: string;
+  /** The file's path in the source. */
+  path: string;
+  /** The file's SHA-256, in hex. */
+  hash: string;
+  /** When it was imported, in milliseconds since the Unix epoch. */
+  imported: number;
+};
 
 /**
  * Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version
@@ -826,6 +898,26 @@ export type SnapshotInfo = {
 
 /** Result of `snapshots`, newest first. */
 export type SnapshotsResult = { snapshots: SnapshotInfo[] };
+
+/** Where files come from. */
+export type Source =
+  /** A share on another computer, over SMB: macOS File Sharing, Windows, a NAS. */
+  | {
+    share: {
+      /** The computer's address (or a name it resolves to). */
+      host: string;
+      /** The share's name (a shared folder on a Mac). */
+      share: string;
+      user: string;
+      /** The SMB port, if not 445. */
+      port?: number | null;
+    };
+  }
+  /**
+   * A directory on this machine, under the root importd was started with
+   * (`--dir`); for development and tests.
+   */
+  | { dir: { path: string } };
 
 /**
  * Params of `splice`: edit the text at field `path` (dotted, such as `body` or

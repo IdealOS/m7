@@ -24,6 +24,9 @@ CONFIG_USB_STORAGE=y
 CONFIG_EXFAT_FS=y
 CONFIG_NLS_UTF8=y
 
+# Imports (M14): shares on other computers (SMB), mounted read-only by importd
+CONFIG_CIFS=y
+
 # Read-only root with a writable /opt/idealos overlay in dev images
 CONFIG_EXT4_FS=y
 CONFIG_OVERLAY_FS=y

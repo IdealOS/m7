@@ -46,6 +46,10 @@
 //! osctl [--socket PATH] style get [TARGET]           a sheet's edits (TARGET: system, app:ID, or builtin)
 //! osctl [--socket PATH] style set TARGET FILE         check FILE (- for standard input), then make it TARGET's edits
 //! osctl [--socket PATH] style check FILE              check a sheet; says where any mistake is
+//! osctl [--socket PATH] import login HOST USER        keep a share's password (read from standard input)
+//! osctl [--socket PATH] import browse SOURCE [PATH]   list a folder of smb://user@host[:port]/share (or dir:/path)
+//! osctl [--socket PATH] import run SOURCE PATH...     import files and folders, following progress
+//! osctl [--socket PATH] import status
 //! osctl [--socket PATH] style reset TARGET            remove TARGET's edits
 //! osctl [--socket PATH] backup status                 drives, and any backup or restore in progress
 //! osctl [--socket PATH] backup setup DRIVE            make a drive (sda1) a backup drive
@@ -63,6 +67,7 @@
 mod apps;
 mod bench;
 mod commands;
+mod import;
 mod style;
 
 use std::io::Write;
@@ -81,6 +86,7 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
        osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])
        osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)
+       osctl [--socket PATH] import (login HOST USER | browse SOURCE [PATH] | run SOURCE PATH... [--detach yes] | status)
        osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)";
 
 fn main() {
@@ -117,7 +123,7 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if ["bus", "db", "app", "perm", "backup", "style"].contains(&g.as_str()) => g,
+        Some(g) if ["bus", "db", "app", "perm", "backup", "import", "style"].contains(&g.as_str()) => g,
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
@@ -225,6 +231,9 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
             other => return Err(format!("unknown style subcommand {other}")),
         };
         return Ok((socket, command));
+    }
+    if group == "import" {
+        return Ok((socket, Command::Import(import::parse(&sub, &positional, &flags)?)));
     }
     if group == "backup" {
         allowed(&[])?;

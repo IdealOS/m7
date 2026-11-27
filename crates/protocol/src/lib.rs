@@ -9,6 +9,7 @@ pub mod backup;
 pub mod broker;
 pub mod bus;
 pub mod db;
+pub mod import;
 pub mod net;
 pub mod perm;
 pub mod pty;

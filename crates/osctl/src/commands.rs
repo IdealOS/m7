@@ -74,6 +74,8 @@ pub enum Command {
         hash: String,
         out: Option<std::path::PathBuf>,
     },
+    /// Drive importd.
+    Import(crate::import::Import),
 }
 
 /// `path` is the broker's socket, for commands that open a second connection.
@@ -84,6 +86,7 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
             let list = bus.list().await.map_err(|e| e.to_string())?;
             write_list(&list, out).map_err(w)
         }
+        Command::Import(what) => crate::import::run(bus, what, out).await,
         Command::Hello => {
             let hello = bus.hello().await.map_err(|e| e.to_string())?;
             writeln!(out, "{}", json!(hello)).map_err(w)

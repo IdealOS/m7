@@ -81,6 +81,9 @@ export const GUEST_SCRIPT = [
   `osctl backup setup vdb >/dev/null 2>&1; osctl db create SmokeBackup '{"k":"kept"}' >/dev/null; B=; i=0; while [ -z "$B" ] && [ $i -lt 30 ]; do B=$(osctl backup now vdb 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4); [ -z "$B" ] && sleep 1; i=$((i+1)); done; echo SMOKE backup-now $(echo "$B" | grep -c '/backup-')`,
   `osctl db create SmokeBackup '{"k":"after"}' >/dev/null; osctl backup restore vdb "$B" >/dev/null 2>&1; echo SMOKE backup-restore $(osctl db query '{"type":"SmokeBackup"}' 2>&1 | grep -o '"k":"[a-z]*"' | tr '\\n' ' ')`,
   "echo SMOKE backup-unmounted $(grep -c /run/idealos/backup /proc/mounts)",
+  // M14: importd is on the bus, and the kernel can mount shares.
+  "echo SMOKE import-service $(osctl bus list 2>&1 | grep -c '^import ')",
+  "echo SMOKE cifs $(grep -c cifs /proc/filesystems)",
   // session keeps what it and the services print in /data/log/session.log (for
   // reading over SSH), stamped like dmesg; the console shell keeps the terminal.
   String.raw`grep -q "^\[ *[0-9]*\.[0-9]*\] session: started compositor" /data/log/session.log && grep -q "^\[.*\] .*kms: first frame on screen" /data/log/session.log && echo SMOKE session-log ok`,
@@ -190,6 +193,8 @@ export function evaluate(log: string): Check[] {
     fact("backup-now", "1", "backupd backed up to it"),
     fact("backup-restore", '"k":"kept"', "restoring the backup put the database back as it was"),
     fact("backup-unmounted", "0", "the drive is unmounted while backupd isn't using it"),
+    fact("import-service", "1", "importd is on the bus"),
+    fact("cifs", "1", "the kernel can mount SMB shares"),
     fact("session-log", "ok", "session kept the services' output in /data/log/session.log, stamped"),
     fact("console-tty", "ok", "the console shell writes to the terminal, not the log"),
     {

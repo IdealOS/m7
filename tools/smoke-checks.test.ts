@@ -57,6 +57,8 @@ const GOOD = [
   "SMOKE backup-now 1",
   'SMOKE backup-restore "k":"kept"',
   "SMOKE backup-unmounted 0",
+  "SMOKE import-service 1",
+  "SMOKE cifs 1",
   "SMOKE session-log ok",
   "SMOKE console-tty ok",
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
