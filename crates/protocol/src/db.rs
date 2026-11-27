@@ -127,6 +127,10 @@ pub struct CreateParams {
     pub doc_type: String,
     #[serde(default)]
     pub data: Map<String, Value>,
+    /// Add the creation to this change set, one the caller made (and nobody has
+    /// undone), so they undo together: everything an import brought in, say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_set: Option<i64>,
 }
 
 /// Params of `get` and `delete`.

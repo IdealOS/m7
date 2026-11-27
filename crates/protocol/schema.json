@@ -751,6 +751,14 @@
     "CreateParams": {
       "description": "Params of `create`.",
       "properties": {
+        "change_set": {
+          "description": "Add the creation to this change set, one the caller made (and nobody has\nundone), so they undo together: everything an import brought in, say.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "data": {
           "additionalProperties": true,
           "default": {},
@@ -1181,6 +1189,14 @@
     "ImportStatus": {
       "description": "What importd is doing, or last did.",
       "properties": {
+        "change_set": {
+          "description": "The change set holding everything this import made, once it's made something.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "current": {
           "description": "The file being imported now.",
           "type": [

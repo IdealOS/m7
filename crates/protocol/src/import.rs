@@ -37,13 +37,17 @@ pub const MAX_TEXT_BYTES: u64 = 512 * 1024;
 /// | `browse` | [`BrowseParams`]  | [`BrowseResult`] |
 /// | `import` | [`ImportParams`]  | [`ImportStatus`]: the import has started |
 /// | `status` | none              | [`ImportStatus`] |
+/// | `undo`   | [`crate::db::UndoParams`] | [`crate::db::UndoResult`]: an import taken back |
 ///
-/// One import runs at a time; `status` follows it.
+/// One import runs at a time; `status` follows it. Everything one import makes is
+/// one change set ([`ImportStatus::change_set`]), which `undo` takes back (an
+/// app can't undo importd's change sets through db itself).
 pub mod method {
     pub const LOGIN: &str = "login";
     pub const BROWSE: &str = "browse";
     pub const IMPORT: &str = "import";
     pub const STATUS: &str = "status";
+    pub const UNDO: &str = "undo";
 }
 
 /// Error codes importd sends, besides the broker's.
@@ -190,6 +194,9 @@ pub struct ImportStatus {
     pub failed: u64,
     /// Files not imported for their kind.
     pub ignored: u64,
+    /// The change set holding everything this import made, once it's made something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_set: Option<i64>,
     /// The file being imported now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,

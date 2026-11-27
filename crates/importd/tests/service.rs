@@ -182,11 +182,25 @@ async fn files_come_in_once_as_documents_and_blobs() {
     let untagged = &tracks.iter().find(|t| t.data["title"] == "song").expect("imported by its name").data;
     assert!(untagged.get("artist").is_none() && untagged.get("artwork").is_none(), "{untagged:?}");
 
+    // The import is one change set; undoing it takes every document back.
+    let set = s.change_set.expect("the import's change set");
+    for t in ["TextDocument", "Image", "Track"] {
+        for d in docs(&c, t).await {
+            let h = c.request(protocol::db::SERVICE, "history", json!({"id": d.id})).await.unwrap();
+            assert_eq!(h["versions"][0]["change_set"], set, "{} is in the import's change set", d.id);
+        }
+    }
+
     // Again: everything's there already.
     call(&c, "import", json!({"source": source, "paths": [""]})).await.unwrap();
     let s = finished(&c).await;
     assert_eq!((s.imported, s.skipped, s.failed, s.ignored), (0, 6, 1, 1), "{s:?}");
+    assert_eq!(s.change_set, None, "nothing new, no change set");
     assert_eq!(docs(&c, "TextDocument").await.len(), 2);
+    call(&c, "undo", json!({"change_set": set})).await.unwrap();
+    for t in ["TextDocument", "Image", "Track"] {
+        assert!(docs(&c, t).await.is_empty(), "undoing the import took its {t}s back");
+    }
 
     // A share needs its password first; then it's kept, and mounting is tried.
     let share = json!({"share": {"host": "127.0.0.1", "share": "Music", "user": "test", "port": 1}});

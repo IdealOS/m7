@@ -341,7 +341,15 @@ export type Connection = {
 };
 
 /** Params of `create`. */
-export type CreateParams = { type: string; data?: Record<string, unknown> };
+export type CreateParams = {
+  type: string;
+  /**
+   * Add the creation to this change set, one the caller made (and nobody has
+   * undone), so they undo together: everything an import brought in, say.
+   */
+  change_set?: number | null;
+  data?: Record<string, unknown>;
+};
 
 /** Access to documents of one type. */
 export type DataRule = {
@@ -494,6 +502,8 @@ export type ImportStatus = {
   failed: number;
   /** Files not imported for their kind. */
   ignored: number;
+  /** The change set holding everything this import made, once it's made something. */
+  change_set?: number | null;
   /** The file being imported now. */
   current?: string | null;
   /** Why files failed, the most recent last (at most `MAX_ERRORS`). */

@@ -9,6 +9,8 @@
 //! cover art stored as a blob of its own, shared by tracks with the same picture). Each file's SHA-256 goes in its document's `source`, so a
 //! file imported before is found and skipped, and a blob already stored isn't sent
 //! again. A file that can't be read or stored fails alone; the import carries on.
+//! Every document one import makes goes in one change set (the first one's), so
+//! `undo` takes the whole import back in one step.
 //! The share stays mounted until the import ends.
 
 pub mod audio;
@@ -25,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bus_client::{CallError, Client, Incoming};
 use protocol::BusError;
 use protocol::bus::code as bus_code;
-use protocol::db::{self, BlobInfo, Doc, DocsResult};
+use protocol::db::{self, BlobInfo, Doc, DocsResult, HistoryResult, UndoParams};
 use protocol::import::{
     BrowseParams, BrowseResult, ImportParams, ImportStatus, Kind, LoginParams, MAX_ERRORS, MAX_TEXT_BYTES,
     Origin, SOURCE_FIELD, Source, code, method,
@@ -92,6 +94,12 @@ impl Service {
                 Ok(to_value(BrowseResult { entries }))
             }
             method::IMPORT => self.start(parse(params)?).await.map(to_value),
+            method::UNDO => {
+                // Apps may only undo their own change sets; an import's are importd's.
+                let p: UndoParams = parse(params)?;
+                let v = self.ask(db::SERVICE, db::method::UNDO, json!({"change_set": p.change_set})).await?;
+                Ok(v)
+            }
             method::STATUS => Ok(to_value(self.status.lock().expect("status").clone())),
             other => Err(fail(bus_code::BAD_REQUEST, format!("import has no method {other:?}"))),
         }
@@ -164,9 +172,13 @@ impl Service {
         let (this, from) = (self.clone(), p.source.name());
         tokio::spawn(async move {
             log::info!("importd: importing {} files from {from}", files.len());
+            let mut set = None;
             for file in files {
                 this.update(|s| s.current = Some(file.path.clone()));
-                let outcome = this.import_one(&from, &file).await;
+                let outcome = this.import_one(&from, &file, &mut set).await;
+                if set.is_some() {
+                    this.update(|s| s.change_set = set);
+                }
                 this.update(|s| {
                     s.done += 1;
                     match outcome {
@@ -204,7 +216,8 @@ impl Service {
     }
 
     /// Make a document of one file, unless it's there already.
-    async fn import_one(&self, from: &str, file: &File) -> Result<Outcome, String> {
+    /// `set` is the import's change set, once its first document has made one.
+    async fn import_one(&self, from: &str, file: &File, set: &mut Option<i64>) -> Result<Outcome, String> {
         let doc_type = match file.kind {
             Kind::Text => "TextDocument",
             Kind::Image => "Image",
@@ -278,7 +291,15 @@ impl Service {
                 image
             }
         };
-        let _: Doc = self.db(db::method::CREATE, json!({"type": doc_type, "data": data})).await?;
+        let mut create = json!({"type": doc_type, "data": data});
+        if let Some(s) = *set {
+            create["change_set"] = json!(s);
+        }
+        let doc: Doc = self.db(db::method::CREATE, create).await?;
+        if set.is_none() {
+            let versions: HistoryResult = self.db(db::method::HISTORY, json!({"id": doc.id})).await?;
+            *set = versions.versions.first().map(|v| v.change_set);
+        }
         Ok(Outcome::Imported)
     }
 

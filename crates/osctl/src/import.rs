@@ -27,6 +27,10 @@ pub enum Import {
         detach: bool,
     },
     Status,
+    /// Take an import back: its change set.
+    Undo {
+        change_set: i64,
+    },
 }
 
 /// `osctl import SUB ARGS...`.
@@ -47,7 +51,13 @@ pub fn parse(sub: &str, positional: &[String], flags: &[(String, String)]) -> Re
             Ok(Import::Run { source: source(s)?, paths: paths.to_vec(), detach })
         }
         ("status", []) => Ok(Import::Status),
-        ("login" | "browse" | "run" | "status", _) => Err(format!("wrong arguments for import {sub}")),
+        ("undo", [n]) => n
+            .parse()
+            .map(|change_set| Import::Undo { change_set })
+            .map_err(|_| format!("a change set is a number, not {n}")),
+        ("login" | "browse" | "run" | "status" | "undo", _) => {
+            Err(format!("wrong arguments for import {sub}"))
+        }
         (other, _) => Err(format!("unknown import subcommand {other}")),
     }
 }
@@ -96,9 +106,17 @@ pub async fn run(bus: &Client, what: Import, out: &mut impl Write) -> Result<(),
                     for e in &s.errors {
                         writeln!(out, "  failed: {e}").map_err(w)?;
                     }
+                    if let Some(set) = s.change_set {
+                        writeln!(out, "change set {set} (osctl import undo {set} takes it back)")
+                            .map_err(w)?;
+                    }
                     return Ok(());
                 }
             }
+        }
+        Import::Undo { change_set } => {
+            let v = call(bus, method::UNDO, json!({"change_set": change_set})).await?;
+            writeln!(out, "{v}").map_err(w)
         }
         Import::Status => {
             let s: ImportStatus = serde_json::from_value(call(bus, method::STATUS, Value::Null).await?)
@@ -188,6 +206,8 @@ mod tests {
         assert!(parse("run", &args(&["smb://me@10.0.2.2/Music"]), &[]).is_err(), "nothing to import");
         assert!(parse("browse", &args(&["smb://nobody/x"]), &[]).is_err());
         assert!(parse("status", &[], &[("detach".into(), "yes".into())]).is_err());
+        assert_eq!(parse("undo", &args(&["42"]), &[]), Ok(Import::Undo { change_set: 42 }));
+        assert!(parse("undo", &args(&["x"]), &[]).is_err());
         assert_eq!(size(1536), "1.5 KB");
     }
 }

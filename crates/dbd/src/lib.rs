@@ -141,7 +141,7 @@ fn handle_app(store: &mut Store, scope: &Scope, method: &str, params: Value) -> 
             let Some(filter) = scope.create(&p.doc_type) else {
                 return Err(denied(format!("{app} may not create {} documents", p.doc_type)));
             };
-            reply(store.guarded(filter, |s| s.create(&p.doc_type, &p.data, app)))
+            reply(store.guarded(filter, |s| s.create_in(&p.doc_type, &p.data, app, p.change_set)))
         }
         method::UPDATE => {
             let p: UpdateParams = parse(params)?;
@@ -257,7 +257,7 @@ fn handle_system(store: &mut Store, origin: &str, method: &str, params: Value) -
     match method {
         method::CREATE => {
             let p: CreateParams = parse(params)?;
-            reply(store.create(&p.doc_type, &p.data, origin))
+            reply(store.create_in(&p.doc_type, &p.data, origin, p.change_set))
         }
         method::GET => reply(store.get(&parse::<IdParams>(params)?.id)),
         method::UPDATE => {

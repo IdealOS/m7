@@ -40,6 +40,25 @@ fn create_get_update_delete() {
 }
 
 #[test]
+fn creations_can_join_a_change_set_and_undo_together() {
+    let mut s = Store::open_in_memory().unwrap();
+    let a = s.create("Photo", &obj(json!({"n": 1})), "import").unwrap();
+    let set = s.history(&a.id).unwrap()[0].change_set;
+    let b = s.create_in("Photo", &obj(json!({"n": 2})), "import", Some(set)).unwrap();
+    let c = s.create_in("Song", &obj(json!({"n": 3})), "import", Some(set)).unwrap();
+    assert_eq!(s.history(&c.id).unwrap()[0].change_set, set);
+    // Only its maker may add to it, and not to an undo.
+    assert!(s.create_in("Photo", &Map::new(), "someone", Some(set)).is_err());
+    assert!(s.create_in("Photo", &Map::new(), "import", Some(set + 1000)).is_err());
+    let undo = s.undo(set, "import").unwrap();
+    for id in [&a.id, &b.id, &c.id] {
+        assert!(matches!(s.get(id), Err(Error::NotFound(_))), "{id} went with the undo");
+    }
+    assert!(s.create_in("Photo", &Map::new(), "import", Some(undo)).is_err(), "an undo");
+    assert!(s.create_in("Photo", &Map::new(), "import", Some(set)).is_err(), "undone");
+}
+
+#[test]
 fn queries_can_order_by_when_documents_changed_and_were_made() {
     let mut s = Store::open_in_memory().unwrap();
     // Apart in time, so neither creation nor the update ties (ties keep creation order).

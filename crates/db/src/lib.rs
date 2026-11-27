@@ -235,6 +235,19 @@ impl Store {
 
     /// Create a document of `doc_type` holding `data`.
     pub fn create(&mut self, doc_type: &str, data: &Map<String, Value>, origin: &str) -> Result<Doc> {
+        self.create_in(doc_type, data, origin, None)
+    }
+
+    /// Create a document as part of change set `join` (if given), one `origin`
+    /// made and nobody has undone, so undoing it undoes them together: everything
+    /// one import brought in, say.
+    pub fn create_in(
+        &mut self,
+        doc_type: &str,
+        data: &Map<String, Value>,
+        origin: &str,
+        join: Option<i64>,
+    ) -> Result<Doc> {
         if !valid_type(doc_type) {
             return invalid(format!("not a document type: {doc_type:?}"));
         }
@@ -255,7 +268,10 @@ impl Store {
             "INSERT INTO doc_state (doc, snapshot) VALUES (?1, ?2)",
             params![row, doc.export(ExportMode::Snapshot)?],
         )?;
-        let set = change_set(&tx, now, origin, None)?;
+        let set = match join {
+            Some(set) => joinable(&tx, set, origin)?,
+            None => change_set(&tx, now, origin, None)?,
+        };
         record_version(&tx, row, set, Kind::Create, &Frontiers::default(), &doc.oplog_frontiers())?;
         write_views(&tx, row, doc_type, &json, false)?;
         retention::record_blobs(&tx, row, set)?;
@@ -581,6 +597,25 @@ fn check_guard(tx: &Transaction, row: i64, doc_type: &str, guard: Option<&Map<St
         Ok(())
     } else {
         Err(Error::Denied(format!("the {doc_type} would be outside what this app may write")))
+    }
+}
+
+/// Change set `set`, if `origin` may add to it: it made it, it isn't an undo,
+/// and it hasn't been undone.
+fn joinable(tx: &Transaction, set: i64, origin: &str) -> Result<i64> {
+    let found: Option<(String, Option<i64>)> = tx
+        .query_row("SELECT origin, undoes FROM change_sets WHERE id = ?1", [set], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    let undone: bool =
+        tx.query_row("SELECT EXISTS (SELECT 1 FROM change_sets WHERE undoes = ?1)", [set], |r| r.get(0))?;
+    match found {
+        None => invalid(format!("no change set {set}")),
+        Some((by, _)) if by != origin => invalid(format!("change set {set} is {by}'s, not {origin}'s")),
+        Some((_, Some(_))) => invalid(format!("change set {set} is an undo")),
+        Some(_) if undone => invalid(format!("change set {set} has been undone")),
+        Some(_) => Ok(set),
     }
 }
 

@@ -45,7 +45,7 @@ lives in blobs, named by their SHA-256.
 
 | method | params | result |
 | --- | --- | --- |
-| `create` | `{type, data}` | the new document |
+| `create` | `{type, data, change_set?}` | the new document; with `change_set`, it joins that change set (one the caller made, not undone), so they undo together |
 | `get` | `{id}` | the document |
 | `update` | `{id, patch}` (a JSON merge patch) | the document |
 | `splice` | `{id, path, at, delete, insert}` | `{change_set}`: an edit to a text field, as collaborative text |
@@ -134,7 +134,8 @@ Shorthands: `osctl backup status`, `setup DRIVE`, `now DRIVE`, `list DRIVE`,
 | `login` | `{host, user, password}` | null: the password is kept in secretsd |
 | `browse` | `{source, path?}` | `{entries}`: `{name, kind, size}`, folders first |
 | `import` | `{source, paths}` | the status: the import has started |
-| `status` | none | `{running, source?, total, done, imported, skipped, failed, ignored, current?, errors?}` |
+| `status` | none | `{running, source?, total, done, imported, skipped, failed, ignored, change_set?, current?, errors?}` |
+| `undo` | `{change_set}` | `{change_set}`: an import taken back |
 
 A source is `{"share": {host, share, user, port?}}`, an SMB share by address,
 mounted read-only only while it's browsed or imported from, or `{"dir": {path}}`,
@@ -147,13 +148,15 @@ an `artwork` blob, stored once however many tracks share it. A music file withou
 tags it can read comes in by its name. Other files are counted as `ignored`. Each document
 has `source: {from, path, hash, imported}`; a file whose hash is already there
 is skipped, so an interrupted import resumes cheaply. A file that can't be read
-or stored fails alone. One import runs at a time. A Mac shares over SMB once
+or stored fails alone. One import runs at a time, and everything it makes is one
+change set (`change_set` in the status), which `undo` takes back in one step. A Mac shares over SMB once
 Windows File Sharing is ticked for the account (Sharing > File Sharing > Options).
 Error codes: `not_found`,
 `unreachable`, `busy`.
 
 Shorthands: `osctl import login HOST USER` (the password from standard input),
-`browse SOURCE [PATH]`, `run SOURCE PATH... [--detach yes]`, `status`, with a
+`browse SOURCE [PATH]`, `run SOURCE PATH... [--detach yes]`, `status`, `undo
+CHANGE_SET`, with a
 source written `smb://user@host[:port]/share` or `dir:/path`.
 
 ## net: networking

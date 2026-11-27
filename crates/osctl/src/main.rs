@@ -50,6 +50,7 @@
 //! osctl [--socket PATH] import browse SOURCE [PATH]   list a folder of smb://user@host[:port]/share (or dir:/path)
 //! osctl [--socket PATH] import run SOURCE PATH...     import files and folders, following progress
 //! osctl [--socket PATH] import status
+//! osctl [--socket PATH] import undo CHANGE_SET        take an import back
 //! osctl [--socket PATH] style reset TARGET            remove TARGET's edits
 //! osctl [--socket PATH] backup status                 drives, and any backup or restore in progress
 //! osctl [--socket PATH] backup setup DRIVE            make a drive (sda1) a backup drive
@@ -86,7 +87,7 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] app (install DIR [--watch] | list | launch ID | stop ID)
        osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])
        osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)
-       osctl [--socket PATH] import (login HOST USER | browse SOURCE [PATH] | run SOURCE PATH... [--detach yes] | status)
+       osctl [--socket PATH] import (login HOST USER | browse SOURCE [PATH] | run SOURCE PATH... [--detach yes] | status | undo CHANGE_SET)
        osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)";
 
 fn main() {
