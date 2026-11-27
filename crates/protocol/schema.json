@@ -130,6 +130,81 @@
       ],
       "type": "object"
     },
+    "AudioStatus": {
+      "description": "Result of most methods, and each part of `watch`.\n\nWhere the current track is: `position` seconds at `at` (milliseconds since the\nUnix epoch). While playing, add the time since `at`; watchers aren't sent a\npart for every second that passes.",
+      "properties": {
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "current": {
+          "description": "The index in `queue` of the track playing, paused, or to play next when\nstopped.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration": {
+          "description": "The current track's length in seconds, from its audio once it's playing.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "The last thing that went wrong, such as a track that couldn't be played\n(and was skipped). Cleared by the next `play`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "The sound output in use, or none when there's nowhere to play.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "format": "double",
+          "type": "number"
+        },
+        "queue": {
+          "description": "In play order.",
+          "items": {
+            "$ref": "#/$defs/QueueItem"
+          },
+          "type": "array"
+        },
+        "repeat": {
+          "$ref": "#/$defs/Repeat"
+        },
+        "shuffle": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/PlayState"
+        },
+        "volume": {
+          "description": "0 (silent) to 1.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "state",
+        "queue",
+        "position",
+        "at",
+        "volume",
+        "shuffle",
+        "repeat"
+      ],
+      "type": "object"
+    },
     "AuditAction": {
       "description": "What happened, in an audit entry.",
       "oneOf": [
@@ -953,6 +1028,25 @@
       ],
       "type": "object"
     },
+    "EnqueueParams": {
+      "description": "Params of `enqueue`: add `tracks` at the end of the queue, or right after the\ncurrent track with `next`.",
+      "properties": {
+        "next": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tracks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tracks"
+      ],
+      "type": "object"
+    },
     "Entry": {
       "description": "One entry of a folder.",
       "properties": {
@@ -1264,6 +1358,20 @@
         "skipped",
         "failed",
         "ignored"
+      ],
+      "type": "object"
+    },
+    "IndexParams": {
+      "description": "Params of `jump` and `remove`: an index into the queue.",
+      "properties": {
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index"
       ],
       "type": "object"
     },
@@ -1950,6 +2058,46 @@
       ],
       "type": "object"
     },
+    "PlayParams": {
+      "description": "Params of `play`: replace the queue with `tracks` and play from `start`.",
+      "properties": {
+        "start": {
+          "default": 0,
+          "description": "Which of them to start with (default 0, the first).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tracks": {
+          "description": "`Track` document ids.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tracks"
+      ],
+      "type": "object"
+    },
+    "PlayState": {
+      "description": "Whether music is playing.",
+      "oneOf": [
+        {
+          "enum": [
+            "playing",
+            "paused"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "Nothing playing: never started, stopped, or the queue ran out.",
+          "type": "string"
+        }
+      ]
+    },
     "PromptParams": {
       "description": "Params of `prompt`: app `app` (called `name`) asks for these things, each in\nwords (see `describe`), for `reason`.",
       "properties": {
@@ -2046,6 +2194,82 @@
       },
       "required": [
         "type"
+      ],
+      "type": "object"
+    },
+    "QueueItem": {
+      "description": "One entry of the queue: a track and what to show for it.",
+      "properties": {
+        "album": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artist": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artwork": {
+          "description": "Its cover's blob hash.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration": {
+          "description": "Seconds, from its tags.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The `Track` document's id.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Repeat": {
+      "description": "What happens at the end of the queue, or of a track.",
+      "oneOf": [
+        {
+          "const": "off",
+          "description": "Stop after the last track.",
+          "type": "string"
+        },
+        {
+          "const": "all",
+          "description": "Start the queue again after the last track.",
+          "type": "string"
+        },
+        {
+          "const": "one",
+          "description": "Play the current track again and again.",
+          "type": "string"
+        }
+      ]
+    },
+    "RepeatParams": {
+      "description": "Params of `repeat`.",
+      "properties": {
+        "repeat": {
+          "$ref": "#/$defs/Repeat"
+        }
+      },
+      "required": [
+        "repeat"
       ],
       "type": "object"
     },
@@ -2534,6 +2758,19 @@
       ],
       "type": "object"
     },
+    "SeekParams": {
+      "description": "Params of `seek`: seconds from the start of the current track.",
+      "properties": {
+        "position": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "position"
+      ],
+      "type": "object"
+    },
     "Sender": {
       "description": "Who sent a message, as stamped by the broker.",
       "oneOf": [
@@ -2650,6 +2887,18 @@
           "type": "object"
         }
       ]
+    },
+    "ShuffleParams": {
+      "description": "Params of `shuffle`.",
+      "properties": {
+        "on": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "on"
+      ],
+      "type": "object"
     },
     "SnapshotInfo": {
       "description": "A snapshot of the database.",
@@ -3043,6 +3292,20 @@
       ],
       "type": "object"
     },
+    "VolumeParams": {
+      "description": "Params of `volume`.",
+      "properties": {
+        "volume": {
+          "description": "0 (silent) to 1; values outside are clamped.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "volume"
+      ],
+      "type": "object"
+    },
     "WatchEvent": {
       "description": "A part of `watch`'s streamed answer.\n\nTo keep a list up to date: drop the `removed` ids, replace the `changed`\ndocuments, append the `added` ones, and then, if `order` is present, sort the\nlist to match it.",
       "oneOf": [
@@ -3282,6 +3545,10 @@
   "description": "Bus frames are a 4-byte big-endian length followed by one UTF-8 JSON `Message`.",
   "title": "idealos wire protocol",
   "x-constants": {
+    "AUDIO_SERVICE": {
+      "description": "The name audiod claims.",
+      "value": "audio"
+    },
     "BACKUP_SERVICE": {
       "description": "The name backupd claims.",
       "value": "backup"
@@ -3336,6 +3603,10 @@
     },
     "MAX_QUERY_LIMIT": {
       "description": "Most documents one query returns; a larger `limit` is an error.",
+      "value": 10000
+    },
+    "MAX_QUEUE": {
+      "description": "Most tracks audiod's queue holds.",
       "value": 10000
     },
     "MAX_STREAMS": {

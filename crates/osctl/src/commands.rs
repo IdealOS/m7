@@ -76,6 +76,7 @@ pub enum Command {
     },
     /// Drive importd.
     Import(crate::import::Import),
+    Audio(crate::audio::Audio),
 }
 
 /// `path` is the broker's socket, for commands that open a second connection.
@@ -87,6 +88,7 @@ pub async fn run(bus: &Client, path: &Path, command: Command, out: &mut impl Wri
             write_list(&list, out).map_err(w)
         }
         Command::Import(what) => crate::import::run(bus, what, out).await,
+        Command::Audio(what) => crate::audio::run(bus, what, out).await,
         Command::Hello => {
             let hello = bus.hello().await.map_err(|e| e.to_string())?;
             writeln!(out, "{}", json!(hello)).map_err(w)

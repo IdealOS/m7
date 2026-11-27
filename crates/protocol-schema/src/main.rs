@@ -83,6 +83,14 @@ fn document() -> Value {
     g.subschema_for::<net::ConnectParams>();
     g.subschema_for::<net::SsidParams>();
     g.subschema_for::<net::WifiParams>();
+    g.subschema_for::<protocol::audio::AudioStatus>();
+    g.subschema_for::<protocol::audio::PlayParams>();
+    g.subschema_for::<protocol::audio::EnqueueParams>();
+    g.subschema_for::<protocol::audio::IndexParams>();
+    g.subschema_for::<protocol::audio::SeekParams>();
+    g.subschema_for::<protocol::audio::VolumeParams>();
+    g.subschema_for::<protocol::audio::ShuffleParams>();
+    g.subschema_for::<protocol::audio::RepeatParams>();
     g.subschema_for::<backup::BackupStatus>();
     g.subschema_for::<backup::DriveParams>();
     g.subschema_for::<backup::BackedUp>();
@@ -135,6 +143,8 @@ fn document() -> Value {
         "NET_SERVICE": constant(net::SERVICE.into(), "The name netd claims."),
         "BACKUP_SERVICE": constant(backup::SERVICE.into(), "The name backupd claims."),
         "IMPORT_SERVICE": constant(protocol::import::SERVICE.into(), "The name importd claims."),
+        "AUDIO_SERVICE": constant(protocol::audio::SERVICE.into(), "The name audiod claims."),
+        "MAX_QUEUE": constant(protocol::audio::MAX_QUEUE.into(), "Most tracks audiod's queue holds."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

@@ -31,6 +31,9 @@ use crate::{Error, Result};
 const MAX_DEPTH: usize = 16;
 /// Most predicates (fields, operators, `$in` items) one filter may hold.
 const MAX_TERMS: usize = 256;
+/// Most ids one `$id` list may hold: as many as a query returns. They count as
+/// one term, since they're one indexed lookup.
+const MAX_ID_LIST: usize = MAX_QUERY_LIMIT as usize;
 
 pub struct Compiled {
     pub sql: String,
@@ -217,14 +220,27 @@ impl Compiler {
                     format!("(d.creator = {who})")
                 }
                 // The document with this id, to follow one document with a live query
-                // (a bound text field does).
+                // (a bound text field does), or any of a list of ids.
                 "$id" => {
                     self.term()?;
-                    let Value::String(id) = v else {
-                        return bad("$id takes a document id");
-                    };
-                    let id = self.bind(Sql::Text(id.clone()));
-                    format!("(d.id = {id})")
+                    match v {
+                        Value::String(id) => {
+                            let id = self.bind(Sql::Text(id.clone()));
+                            format!("(d.id = {id})")
+                        }
+                        Value::Array(ids) if !ids.is_empty() && ids.len() <= MAX_ID_LIST => {
+                            let mut binds = Vec::with_capacity(ids.len());
+                            for id in ids {
+                                let Value::String(id) = id else {
+                                    return bad("$id takes a document id or a list of them");
+                                };
+                                binds.push(self.bind(Sql::Text(id.clone())));
+                            }
+                            format!("(d.id IN ({}))", binds.join(", "))
+                        }
+                        Value::Array(_) => return bad(format!("$id takes 1 to {MAX_ID_LIST} ids")),
+                        _ => return bad("$id takes a document id or a list of them"),
+                    }
                 }
                 k if k.starts_with('$') => return bad(format!("unknown filter operator {k}")),
                 field => self.field(field, v)?,

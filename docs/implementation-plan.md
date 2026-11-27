@@ -381,20 +381,20 @@ Goal: your music library on the Pi, playing without a skip. Playback lives in `a
 
 System work first:
 
-- [ ] **Audio in the image:** PipeWire and the Pi's audio drivers (headphone jack, HDMI, USB audio), with the output chosen in Settings. Nothing plays sound today.
+- [ ] **Audio in the image:** ALSA (alsa-lib) and the Pi's audio drivers (headphone jack, HDMI, USB audio), with the output chosen in Settings; virtio-snd in QEMU, played through the Mac. No PipeWire: audiod is the only thing that makes sound, and it does its own mixing (its mixer is where system sounds would join). Nothing plays sound on the device today; audiod plays silently, keeping time.
 - [ ] **A media control the compositor draws** in the top bar (play, pause, next, what's playing) and media keys, so playback can be controlled from anywhere. Trusted chrome, like the prompt.
 - [ ] **Finding files on USB drives:** the start of M14's `importd`, sharing backupd's drive detection and mounting.
 
 `audiod`:
 
-- [ ] Decoding with symphonia (MP3, FLAC, AAC, Vorbis, WAV), playing through PipeWire, gapless between tracks.
-- [ ] Play, pause, next, previous, seek and volume; a queue it owns (play next, add to queue, shuffle, repeat); ReplayGain from the tags.
-- [ ] A `watch` stream of what's playing, for the app and the top bar.
+- [x] Decoding with symphonia (MP3, AAC, ALAC, FLAC, Vorbis, WAV, AIFF; not Opus), playing through ALSA with cpal (CoreAudio on a Mac: `make audio`), gapless between tracks. Each track's blob comes from db as an open file. One output rate, so sources can be mixed: tracks at other rates go through audiod's own windowed-sinc resampler, which keeps its state across tracks, so consecutive tracks join sample-exactly. Played on a Mac through its speakers: an album's tracks rolled into each other with no underrun.
+- [x] Play, pause, next, previous, seek and volume; a queue it owns (play next, add to queue, shuffle, repeat). Pausing and volume changes fade over 10 ms. `osctl audio` drives it. Still to do: ReplayGain from the tags (importd doesn't keep them yet).
+- [x] A `watch` stream of what's playing, for the app and the top bar. The position is sent with the time it was true, so watchers count on their own rather than getting a part every second.
 
 The library:
 
-- [ ] An importer: tags read with lofty become `Track` documents; audio files and cover art become blobs, stored once (duplicates are skipped, since blobs are named by hash), with progress shown.
-- [ ] Ratings, play counts and last played on each `Track`.
+- [x] An importer: tags read with lofty become `Track` documents; audio files and cover art become blobs, stored once (duplicates are skipped, since blobs are named by hash), with progress shown. Built as part of `importd` (M14), from a share or a folder; from USB drives is still to do.
+- [ ] Ratings, play counts and last played on each `Track`. Play counts and last played are done (audiod sets them when a track is heard to its end); ratings aren't.
 - [ ] `Playlist` documents linking to tracks, and smart playlists as live queries ("rated 4+", "added this month", "never played") that keep themselves current.
 
 The player app:

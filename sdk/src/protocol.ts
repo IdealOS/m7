@@ -6,6 +6,9 @@
 //
 // Integers are 64-bit on the wire; ids and counts stay well below 2^53.
 
+/** The name audiod claims. */
+export const AUDIO_SERVICE = "audio";
+
 /** The name backupd claims. */
 export const BACKUP_SERVICE = "backup";
 
@@ -56,6 +59,9 @@ export const MAX_PENDING_REQUESTS = 1024;
 
 /** Most documents one query returns; a larger `limit` is an error. */
 export const MAX_QUERY_LIMIT = 10000;
+
+/** Most tracks audiod's queue holds. */
+export const MAX_QUEUE = 10000;
 
 /**
  * Most streamed requests one connection may have open at once; they don't count against
@@ -137,6 +143,39 @@ export type AtParams = { id: string; change_set: number };
 
 /** Result of `at`. */
 export type AtResult = { data: Record<string, unknown> };
+
+/**
+ * Result of most methods, and each part of `watch`.
+ *
+ * Where the current track is: `position` seconds at `at` (milliseconds since the
+ * Unix epoch). While playing, add the time since `at`; watchers aren't sent a
+ * part for every second that passes.
+ */
+export type AudioStatus = {
+  state: PlayState;
+  /** In play order. */
+  queue: QueueItem[];
+  position: number;
+  at: number;
+  /** 0 (silent) to 1. */
+  volume: number;
+  shuffle: boolean;
+  repeat: Repeat;
+  /**
+   * The index in `queue` of the track playing, paused, or to play next when
+   * stopped.
+   */
+  current?: number | null;
+  /** The current track's length in seconds, from its audio once it's playing. */
+  duration?: number | null;
+  /**
+   * The last thing that went wrong, such as a track that couldn't be played
+   * (and was skipped). Cleared by the next `play`.
+   */
+  error?: string | null;
+  /** The sound output in use, or none when there's nowhere to play. */
+  output?: string | null;
+};
 
 /** What happened, in an audit entry. */
 export type AuditAction =
@@ -408,6 +447,12 @@ export type Drive = {
 /** Params naming a drive. */
 export type DriveParams = { drive: string };
 
+/**
+ * Params of `enqueue`: add `tracks` at the end of the queue, or right after the
+ * current track with `next`.
+ */
+export type EnqueueParams = { tracks: string[]; next?: boolean };
+
 /** One entry of a folder. */
 export type Entry = {
   name: string;
@@ -511,6 +556,9 @@ export type ImportStatus = {
   /** The source of the running (or last) import, as `name` gives it. */
   source?: string | null;
 };
+
+/** Params of `jump` and `remove`: an index into the queue. */
+export type IndexParams = { index: number };
 
 /** Result of `info`: about this device and system. */
 export type InfoResult = {
@@ -727,6 +775,20 @@ export type Origin = {
  */
 export type PinParams = { id: string; change_set: number; pinned?: boolean };
 
+/** Params of `play`: replace the queue with `tracks` and play from `start`. */
+export type PlayParams = {
+  /** `Track` document ids. */
+  tracks: string[];
+  /** Which of them to start with (default 0, the first). */
+  start?: number;
+};
+
+/** Whether music is playing. */
+export type PlayState =
+  | "playing" | "paused"
+  /** Nothing playing: never started, stopped, or the queue ran out. */
+  | "stopped";
+
 /**
  * Params of `prompt`: app `app` (called `name`) asks for these things, each in
  * words (see `describe`), for `reason`.
@@ -761,6 +823,31 @@ export type Query = {
    */
   where?: Record<string, unknown>;
 };
+
+/** One entry of the queue: a track and what to show for it. */
+export type QueueItem = {
+  /** The `Track` document's id. */
+  id: string;
+  title: string;
+  album?: string | null;
+  artist?: string | null;
+  /** Its cover's blob hash. */
+  artwork?: string | null;
+  /** Seconds, from its tags. */
+  duration?: number | null;
+};
+
+/** What happens at the end of the queue, or of a track. */
+export type Repeat =
+  /** Stop after the last track. */
+  | "off"
+  /** Start the queue again after the last track. */
+  | "all"
+  /** Play the current track again and again. */
+  | "one";
+
+/** Params of `repeat`. */
+export type RepeatParams = { repeat: Repeat };
 
 /** Params of `request`: what the app would like, and why, in its own words. */
 export type RequestParams = { rules: Rule[]; reason?: string | null };
@@ -871,6 +958,9 @@ export type SearchParams = {
   type?: string | null;
 };
 
+/** Params of `seek`: seconds from the start of the current track. */
+export type SeekParams = { position: number };
+
 /** Who sent a message, as stamped by the broker. */
 export type Sender =
   /** A system service that claimed a well-known name such as `db`. */
@@ -894,6 +984,9 @@ export type SessionEvent =
    * The stream ends after this.
    */
   | { event: "exited"; code: number };
+
+/** Params of `shuffle`. */
+export type ShuffleParams = { on: boolean };
 
 /** A snapshot of the database. */
 export type SnapshotInfo = {
@@ -1017,6 +1110,12 @@ export type VersionInfo = {
   pinned?: boolean;
   /** The change set this one undid, if it was an undo. */
   undoes?: number | null;
+};
+
+/** Params of `volume`. */
+export type VolumeParams = {
+  /** 0 (silent) to 1; values outside are clamped. */
+  volume: number;
 };
 
 /**

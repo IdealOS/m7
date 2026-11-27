@@ -52,6 +52,12 @@
 //! osctl [--socket PATH] import status
 //! osctl [--socket PATH] import undo CHANGE_SET        take an import back
 //! osctl [--socket PATH] style reset TARGET            remove TARGET's edits
+//! osctl [--socket PATH] audio status                  what's playing, and the queue
+//! osctl [--socket PATH] audio watch                   a line for each change
+//! osctl [--socket PATH] audio play ID... [--start N]  play tracks (or --album NAME [--artist NAME])
+//! osctl [--socket PATH] audio enqueue ID... [--next yes]
+//! osctl [--socket PATH] audio pause|resume|toggle|stop|next|previous|clear
+//! osctl [--socket PATH] audio jump N | remove N | seek SECS | volume V | shuffle on|off | repeat off|all|one
 //! osctl [--socket PATH] backup status                 drives, and any backup or restore in progress
 //! osctl [--socket PATH] backup setup DRIVE            make a drive (sda1) a backup drive
 //! osctl [--socket PATH] backup now DRIVE              back up to it now
@@ -66,6 +72,7 @@
 //! can't be reached, 2 for bad usage.
 
 mod apps;
+mod audio;
 mod bench;
 mod commands;
 mod import;
@@ -88,7 +95,10 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] perm (list [APP] | grant APP RULE... | revoke ID... | revoke --app APP | audit [--limit N])
        osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)
        osctl [--socket PATH] import (login HOST USER | browse SOURCE [PATH] | run SOURCE PATH... [--detach yes] | status | undo CHANGE_SET)
-       osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)";
+       osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)
+       osctl [--socket PATH] audio (status | watch | play (ID... | --album NAME [--artist NAME]) [--start N] \
+| enqueue (ID... | --album NAME) [--next yes] | pause | resume | toggle | stop | next | previous | clear \
+| jump N | remove N | seek SECS | volume V | shuffle on|off | repeat off|all|one)";
 
 fn main() {
     let (socket, command) = match parse(std::env::args().skip(1).collect()) {
@@ -124,7 +134,11 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
         socket = Some(args.next().ok_or("--socket needs a path")?.into());
     }
     let group = match args.next() {
-        Some(g) if ["bus", "db", "app", "perm", "backup", "import", "style"].contains(&g.as_str()) => g,
+        Some(g)
+            if ["bus", "db", "app", "perm", "backup", "import", "style", "audio"].contains(&g.as_str()) =>
+        {
+            g
+        }
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("missing command".into()),
     };
@@ -235,6 +249,9 @@ fn parse(args: Vec<String>) -> Result<(Option<PathBuf>, Command), String> {
     }
     if group == "import" {
         return Ok((socket, Command::Import(import::parse(&sub, &positional, &flags)?)));
+    }
+    if group == "audio" {
+        return Ok((socket, Command::Audio(audio::parse(&sub, &positional, &flags)?)));
     }
     if group == "backup" {
         allowed(&[])?;

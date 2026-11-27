@@ -1,0 +1,25 @@
+[package]
+name = "audiod"
+description = "The audio service: plays Track documents from the database, and owns the queue."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+protocol.workspace = true
+bus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio.workspace = true
+symphonia = { version = "0.6", features = ["all"] }
+cpal = "0.18"
+rtrb = "0.4"
+
+[dev-dependencies]
+busd = { path = "../busd" }
+dbd = { path = "../dbd" }
+db = { path = "../db" }

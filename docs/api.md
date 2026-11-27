@@ -77,7 +77,7 @@ the snapshot methods need the `storage` capability.
 `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$exists`, `$and`, `$or`,
 `$not`, and for links `$linksTo` and `$linkedFrom`; `$createdBy` matches the app
 that made a document, and `$id` one document by its id (to follow it with
-`watch`). `orderBy` takes field paths, and `$updated` and `$created` for when a
+`watch`) or a list of up to 10,000 ids. `orderBy` takes field paths, and `$updated` and `$created` for when a
 document last changed and when it was made.
 
 **Links and blobs** live in document data: `{"$link": "<id>"}` and `{"$blob":
@@ -158,6 +158,41 @@ Shorthands: `osctl import login HOST USER` (the password from standard input),
 `browse SOURCE [PATH]`, `run SOURCE PATH... [--detach yes]`, `status`, `undo
 CHANGE_SET`, with a
 source written `smb://user@host[:port]/share` or `dir:/path`.
+
+## audio: playing music
+
+`audiod` plays `Track` documents and owns the queue, so music keeps playing when
+the app that started it closes. Apps need `service:audio`; tracks are read as the
+app that asked, so an app can queue only the tracks it may read.
+
+| method | params | result |
+| --- | --- | --- |
+| `status` | none | `{state, queue, current?, position, at, duration?, volume, shuffle, repeat, output?, error?}` |
+| `watch` | none, streamed | the status now, then each change |
+| `play` | `{tracks, start?}` | the status: the queue replaced by these `Track` ids, playing from `start` |
+| `enqueue` | `{tracks, next?}` | the status: added at the end, or after the current track |
+| `pause`, `resume`, `toggle`, `stop` | none | the status |
+| `next`, `previous` | none | the status; `previous` goes back to the start of a track more than 3 s in |
+| `jump`, `remove` | `{index}` | the status |
+| `clear` | none | the status: stopped, nothing queued |
+| `seek` | `{position}` | the status (seconds) |
+| `volume` | `{volume}` | the status (0 to 1) |
+| `shuffle` | `{on}` | the status: what follows the current track shuffled, or put back in order |
+| `repeat` | `{repeat}` | the status: `off`, `all` or `one` |
+
+`state` is `playing`, `paused` or `stopped`. `queue` is in play order, each entry
+`{id, title, artist?, album?, duration?, artwork?}` (the cover's blob hash). The
+current track is `position` seconds in at `at` (milliseconds since the epoch):
+while playing, add the time since, as watchers aren't sent a part every second.
+Tracks follow each other without a gap. When one is heard to its end, its
+`playCount` goes up by one and `lastPlayed` is set. A track that can't be played
+is skipped, and said in `error`. Formats: MP3, AAC (M4A), ALAC, FLAC, Vorbis, WAV
+and AIFF (not Opus). Error codes: `not_found`, `empty`, `too_many`.
+
+Shorthands: `osctl audio status`, `watch`, `play ID... | --album NAME [--artist
+NAME] [--start N]`, `enqueue ID... [--next yes]`, `pause`, `resume`, `toggle`,
+`stop`, `next`, `previous`, `clear`, `jump N`, `remove N`, `seek SECS`, `volume V`,
+`shuffle on|off`, `repeat off|all|one`.
 
 ## net: networking
 

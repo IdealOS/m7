@@ -16,7 +16,9 @@
     "genre": { "type": "string" },
     "duration": { "type": "number", "minimum": 0, "description": "Seconds." },
     "audio": { "x-kind": "blob" },
-    "artwork": { "x-kind": "blob" }
+    "artwork": { "x-kind": "blob" },
+    "playCount": { "type": "integer", "minimum": 0, "description": "Times played to the end." },
+    "lastPlayed": { "type": "integer", "description": "When it last played to the end, in milliseconds since the Unix epoch." }
   },
   "x-indexes": ["artist", "album"]
 }

@@ -1353,6 +1353,14 @@ fn creators_are_recorded_and_backfilled_by_the_migration() {
     // One document by its id, as a bound field follows it.
     assert_eq!(ids(&s.query(&query("Note", json!({"$id": new.id}))).unwrap()), std::slice::from_ref(&new.id));
     assert!(s.query(&query("Note", json!({"$id": 7}))).is_err());
+    // Or any of a list, as audiod reads a queue's tracks.
+    let both = s.query(&query("Note", json!({"$id": [new.id, old, "no-such-id"]}))).unwrap();
+    assert_eq!(both.len(), 2);
+    assert!(s.query(&query("Note", json!({"$id": []}))).is_err());
+    assert!(s.query(&query("Note", json!({"$id": [new.id, 7]}))).is_err());
+    let many: Vec<String> = (0..10_001).map(|i| format!("id{i}")).collect();
+    assert!(s.query(&query("Note", json!({"$id": many}))).is_err());
+    assert!(s.query(&query("Note", json!({"$id": &many[..10_000]}))).unwrap().is_empty());
     assert_eq!(ids(&mine), std::slice::from_ref(&new.id));
     assert!(s.query(&query("Note", json!({"$createdBy": 3}))).is_err());
     drop(s);

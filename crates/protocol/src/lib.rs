@@ -5,6 +5,7 @@
 //! exports them to `schema.json`, and `sdk/src/protocol.ts` is generated from that
 //! (`make protocol`). A test fails when either is out of date.
 
+pub mod audio;
 pub mod backup;
 pub mod broker;
 pub mod bus;
