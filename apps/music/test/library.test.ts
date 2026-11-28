@@ -12,9 +12,11 @@ import {
   artistsOf,
   coverColor,
   fold,
+  genresOf,
   initials,
   matches,
   queueFrom,
+  shelfMatches,
   songsOf,
   sortName,
   trackOf,
@@ -22,6 +24,7 @@ import {
   UNKNOWN_ALBUM,
   VARIOUS,
   words,
+  yearsOf,
   type Track,
 } from "../src/library.ts";
 
@@ -135,6 +138,55 @@ test("artists group their albums; various artists come last", () => {
       [VARIOUS, 1],
     ],
   );
+});
+
+test("genres hold the albums with a track in them, one genre however it's spelled", () => {
+  const albums = albumsOf([
+    t({ title: "Orinoco Flow", artist: "Enya", album: "Watermark", genre: "New Age" }),
+    t({ title: "Storms in Africa", artist: "Enya", album: "Watermark", genre: "new age" }),
+    t({ title: "Criminal", artist: "Fiona Apple", album: "Tidal", genre: "Rock" }),
+    t({ title: "Shadowboxer", artist: "Fiona Apple", album: "Tidal", genre: "Pop" }),
+    t({ title: "Untagged", artist: "Nobody", album: "Nothing" }),
+    t({ title: "Électro", artist: "Air", album: "Moon Safari", genre: " Électronique " }),
+  ]);
+  const genres = genresOf(albums);
+  assert.deepEqual(
+    genres.map((g) => [g.name, g.albums.map((a) => a.title)]),
+    [
+      ["Électronique", ["Moon Safari"]],
+      ["New Age", ["Watermark"]],
+      ["Pop", ["Tidal"]],
+      ["Rock", ["Tidal"]],
+    ],
+    "by name without accents; an album once per genre, and on each of its genres; untagged on none",
+  );
+});
+
+test("years hold their albums, newest first", () => {
+  const albums = albumsOf([
+    t({ title: "a", artist: "Enya", album: "Shepherd Moons", year: 1991 }),
+    t({ title: "b", artist: "Enya", album: "Watermark", year: 1988 }),
+    t({ title: "c", artist: "Fiona Apple", album: "When the Pawn", year: 1999 }),
+    t({ title: "d", artist: "Air", album: "Premiers Symptômes", year: 1999 }),
+    t({ title: "e", artist: "Nobody", album: "Undated" }),
+  ]);
+  assert.deepEqual(
+    yearsOf(albums).map((y) => [y.name, y.albums.map((a) => a.title)]),
+    [
+      ["1999", ["Premiers Symptômes", "When the Pawn"]],
+      ["1991", ["Shepherd Moons"]],
+      ["1988", ["Watermark"]],
+    ],
+    "albums in a year keep the library's order; undated ones are on no year",
+  );
+});
+
+test("a search finds a shelf by its name or by an album on it", () => {
+  const [newAge] = genresOf(albumsOf([t({ title: "Orinoco Flow", artist: "Enya", album: "Watermark", genre: "New Age" })]));
+  assert.equal(shelfMatches(newAge, words("new age")), true, "its name");
+  assert.equal(shelfMatches(newAge, words("orinoco")), true, "a track on one of its albums");
+  assert.equal(shelfMatches(newAge, words("rock")), false);
+  assert.equal(shelfMatches(newAge, []), true);
 });
 
 test("search matches every word, without case or accents", () => {

@@ -21,7 +21,7 @@ import {
 } from "@idealos/sdk";
 import { clock, totals } from "./clock.ts";
 import type { Collection } from "./collection.ts";
-import { coverColor, initials, queueFrom, type Album, type Artist, type Track } from "./library.ts";
+import { coverColor, initials, queueFrom, type Album, type Shelf, type Track } from "./library.ts";
 import type { Player } from "./player.ts";
 import { RATING_OPTIONS, ratingFrom, stars, storedMove, type Playlist } from "./playlists.ts";
 
@@ -335,17 +335,17 @@ export function smartPage(
   );
 }
 
-/** The artists, each opening their albums. */
-export function artistList(artists: () => Artist[], open: (a: Artist) => void): UiNode {
-  return virtualList({ count: () => artists().length, rowHeight: ROW, grow: 1 }, (i) => {
-    const artist = () => artists()[i];
+/** Artists, genres or years, each opening its albums. */
+export function shelfList(shelves: () => Shelf[], open: (s: Shelf) => void): UiNode {
+  return virtualList({ count: () => shelves().length, rowHeight: ROW, grow: 1 }, (i) => {
+    const shelf = () => shelves()[i];
     return hstack(
-      { gap: 12, align: "center", padding: [0, 16], h: ROW, hidden: () => artist() === undefined },
-      button({ label: () => artist()?.name ?? "", class: "flat", onClick: () => artist() && open(artist()!) }),
+      { gap: 12, align: "center", padding: [0, 16], h: ROW, hidden: () => shelf() === undefined },
+      button({ label: () => shelf()?.name ?? "", class: "flat", onClick: () => shelf() && open(shelf()!) }),
       label({ text: "", grow: 1 }),
       label({
         text: () => {
-          const n = artist()?.albums.length ?? 0;
+          const n = shelf()?.albums.length ?? 0;
           return `${n} album${n === 1 ? "" : "s"}`;
         },
         color: "$muted",
@@ -355,8 +355,14 @@ export function artistList(artists: () => Artist[], open: (a: Artist) => void): 
   });
 }
 
+/** The queue item playing (or paused) now, if any. */
+function playingItem(p: Player) {
+  const s = p.status();
+  return s?.current !== undefined && s?.current !== null ? s.queue[s.current] : undefined;
+}
+
 /** What's playing and what comes after, from audiod's queue. */
-export function upNext(p: Player): UiNode {
+function upNext(p: Player): UiNode {
   const queue = () => p.status()?.queue ?? [];
   return virtualList({ count: () => queue().length, rowHeight: ROW, grow: 1 }, (i) => {
     const item = () => queue()[i];
@@ -366,7 +372,12 @@ export function upNext(p: Player): UiNode {
       label({ text: () => (current() ? marker(p) : String(i + 1)), w: 36, color: () => (current() ? "$accent" : "$muted") }),
       button({ label: () => item()?.title ?? "", class: () => (current() ? "flat current" : "flat"), onClick: () => p.jump(i) }),
       label({ text: "", grow: 1 }),
-      label({ text: () => [item()?.artist, item()?.album].filter(Boolean).join(" — "), color: "$muted", size: 13, max_w: 360 }),
+      label({
+        text: () => [item()?.artist, item()?.album].filter(Boolean).join(" — "),
+        color: "$muted",
+        size: 13,
+        max_w: 200,
+      }),
       label({ text: () => clock(item()?.duration), w: 48, color: "$muted", size: 13 }),
       button({ label: "Remove", onClick: () => p.remove(i) }),
     );
@@ -379,31 +390,46 @@ const REPEATS: [Repeat, string][] = [
   ["one", "Repeat one"],
 ];
 
+/** Where the track playing is: its time so far, a slider that seeks, and its length. */
+function progress(p: Player, opts: { size: number; time: number }): UiNode {
+  const idle = () => playingItem(p) === undefined;
+  const duration = () => p.status()?.duration ?? playingItem(p)?.duration ?? 0;
+  return hstack(
+    { gap: 8, align: "center" },
+    label({ text: () => (idle() ? "" : clock(p.position())), w: opts.time, color: "$muted", size: opts.size }),
+    slider({ value: p.position, min: 0, max: () => Math.max(1, duration()), step: 1, grow: 1, onChange: p.seek }),
+    label({ text: () => (idle() ? "" : clock(duration())), w: opts.time, color: "$muted", size: opts.size }),
+  );
+}
+
+/** Previous, play or pause, and next. */
+function transport(p: Player): UiNode {
+  return hstack(
+    { gap: 8, justify: "center" },
+    button({ label: "Previous", onClick: p.previous }),
+    button({ label: () => (p.status()?.state === "playing" ? "Pause" : "Play"), class: "primary", w: 80, onClick: p.toggle }),
+    button({ label: "Next", onClick: p.next }),
+  );
+}
+
 /** The bar along the bottom: what's playing, where it is, and the controls.
- * `albumOf` finds a track's album in the library, to show and open. */
+ * Its cover opens the Now Playing page (`show`); `albumOf` finds a track's
+ * album in the library, for the cover. */
 export function nowPlaying(
   p: Player,
   c: Collection,
   trackOf: (id: string) => Track | undefined,
   albumOf: (id: string) => Album | undefined,
-  open: (a: Album) => void,
+  show: () => void,
 ): UiNode {
-  const item = () => {
-    const s = p.status();
-    return s?.current !== undefined && s?.current !== null ? s.queue[s.current] : undefined;
-  };
-  const duration = () => p.status()?.duration ?? item()?.duration ?? 0;
-  const idle = () => item() === undefined;
+  const item = () => playingItem(p);
   const album = () => {
     const it = item();
     return it ? albumOf(it.id) : undefined;
   };
   return toolbar(
     { padding: [8, 16], gap: 16, align: "center" },
-    cover(album, 52, () => {
-      const a = album();
-      if (a) open(a);
-    }),
+    cover(album, 52, show),
     vstack(
       { gap: 2, w: 230 },
       label({ text: () => item()?.title ?? "Not playing", weight: "bold", max_w: 230 }),
@@ -418,21 +444,7 @@ export function nowPlaying(
         return it ? trackOf(it.id) : undefined;
       }),
     ),
-    vstack(
-      { gap: 4, grow: 1 },
-      hstack(
-        { gap: 8, justify: "center" },
-        button({ label: "Previous", onClick: p.previous }),
-        button({ label: () => (p.status()?.state === "playing" ? "Pause" : "Play"), class: "primary", w: 80, onClick: p.toggle }),
-        button({ label: "Next", onClick: p.next }),
-      ),
-      hstack(
-        { gap: 8, align: "center" },
-        label({ text: () => (idle() ? "" : clock(p.position())), w: 52, color: "$muted", size: 12 }),
-        slider({ value: p.position, min: 0, max: () => Math.max(1, duration()), step: 1, grow: 1, onChange: p.seek }),
-        label({ text: () => (idle() ? "" : clock(duration())), w: 52, color: "$muted", size: 12 }),
-      ),
-    ),
+    vstack({ gap: 4, grow: 1 }, transport(p), progress(p, { size: 12, time: 52 })),
     vstack(
       { gap: 6 },
       hstack(
@@ -449,6 +461,69 @@ export function nowPlaying(
         label({ text: "Volume", color: "$muted", size: 12 }),
         slider({ value: p.volume, min: 0, max: 1, step: 0.01, w: 130, onChange: p.setVolume }),
       ),
+    ),
+  );
+}
+
+/** How wide the Now Playing page's cover is. */
+export const BIG_COVER = 320;
+
+/** Now Playing: the track playing large, with its cover, where it is and the
+ * controls, and Up Next beside it. Its album's name opens the album. */
+export function nowPlayingPage(
+  p: Player,
+  c: Collection,
+  trackOf: (id: string) => Track | undefined,
+  albumOf: (id: string) => Album | undefined,
+  open: (a: Album) => void,
+): UiNode {
+  const item = () => playingItem(p);
+  const track = () => {
+    const it = item();
+    return it ? trackOf(it.id) : undefined;
+  };
+  const album = () => {
+    const it = item();
+    return it ? albumOf(it.id) : undefined;
+  };
+  const queued = () => p.status()?.queue.length ?? 0;
+  return hstack(
+    { grow: 1, gap: 28, padding: [18, 16, 8, 24], align: "start" },
+    vstack(
+      { gap: 8, w: BIG_COVER, align: "start" },
+      cover(album, BIG_COVER),
+      vstack({ padding: [8, 0, 0, 0] }, label({ text: () => item()?.title ?? "Not playing", size: 22, weight: "bold", w: BIG_COVER })),
+      label({ text: () => item()?.artist ?? "", size: 16, w: BIG_COVER, hidden: () => !item()?.artist }),
+      button({
+        label: () => album()?.title ?? item()?.album ?? "",
+        class: "flat",
+        max_w: BIG_COVER,
+        size: 14,
+        hidden: () => album() === undefined,
+        onClick: () => {
+          const a = album();
+          if (a) open(a);
+        },
+      }),
+      label({
+        text: () => [track()?.genre, album()?.year].filter(Boolean).join(" · "),
+        color: "$muted",
+        size: 13,
+        hidden: () => !track()?.genre && album()?.year === undefined,
+      }),
+      ratingMenu(c, track),
+      vstack({ gap: 10, padding: [10, 0, 0, 0], w: BIG_COVER, hidden: () => item() === undefined }, progress(p, { size: 13, time: 56 }), transport(p)),
+      label({ text: "Play an album or a song, and it shows here.", color: "$muted", hidden: () => item() !== undefined }),
+    ),
+    vstack(
+      { grow: 1, gap: 6, align: "stretch" },
+      hstack(
+        { gap: 10, align: "center", padding: [0, 16] },
+        label({ text: "Up Next", size: 17, weight: "bold", grow: 1 }),
+        button({ label: "Clear", hidden: () => queued() === 0, onClick: p.clear }),
+      ),
+      hstack({ padding: [0, 16], hidden: () => queued() > 0 }, label({ text: "Nothing up next.", color: "$muted" })),
+      upNext(p),
     ),
   );
 }

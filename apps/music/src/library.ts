@@ -42,8 +42,7 @@ export interface Album {
   tracks: Track[];
 }
 
-export interface Artist {
-  name: string;
+export interface Artist extends Shelf {
   /** In year, then title order. */
   albums: Album[];
 }
@@ -164,6 +163,53 @@ export function artistsOf(albums: Album[]): Artist[] {
   return [...byArtist.values()].sort((a, b) =>
     a.name === VARIOUS ? 1 : b.name === VARIOUS ? -1 : byName(a.name, b.name),
   );
+}
+
+/** Albums gathered under a name: an artist's, a genre's or a year's. */
+export interface Shelf {
+  name: string;
+  albums: Album[];
+}
+
+/**
+ * The genres of the library's tracks, by name, each with the albums that have a
+ * track in it (an album of several genres is on each). Spellings that differ only
+ * in case or accents are one genre, named as it's first spelled.
+ */
+export function genresOf(albums: Album[]): Shelf[] {
+  const byGenre = new Map<string, Shelf>();
+  for (const al of albums) {
+    const seen = new Set<string>();
+    for (const t of al.tracks) {
+      if (t.genre === undefined) continue;
+      const k = fold(t.genre);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const g = byGenre.get(k);
+      if (g) g.albums.push(al);
+      else byGenre.set(k, { name: t.genre.trim(), albums: [al] });
+    }
+  }
+  return [...byGenre.values()].sort((a, b) => byName(a.name, b.name));
+}
+
+/** The years albums came out, newest first. Albums with no year aren't on one. */
+export function yearsOf(albums: Album[]): Shelf[] {
+  const byYear = new Map<number, Album[]>();
+  for (const al of albums) {
+    if (al.year === undefined) continue;
+    const y = byYear.get(al.year);
+    if (y) y.push(al);
+    else byYear.set(al.year, [al]);
+  }
+  return [...byYear.entries()].sort(([a], [b]) => b - a).map(([year, albums]) => ({ name: String(year), albums }));
+}
+
+/** Whether every word is in the shelf's name, or one of its albums matches. */
+export function shelfMatches(s: Shelf, ws: string[]): boolean {
+  if (ws.length === 0) return true;
+  const name = fold(s.name);
+  return ws.every((w) => name.includes(w)) || s.albums.some((al) => albumMatches(al, ws));
 }
 
 /** Every track, by title, then artist. */
