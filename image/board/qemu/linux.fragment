@@ -5,3 +5,8 @@ CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_NET=y
 CONFIG_VIRTIO_INPUT=y
 CONFIG_HW_RANDOM_VIRTIO=y
+# Sound (M11): audiod plays through ALSA to virtio-snd. Built in: the QEMU image
+# loads no modules. (The Pi 4's kernel has sound as modules, which udev loads.)
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_VIRTIO=y

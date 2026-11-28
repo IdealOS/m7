@@ -7,6 +7,7 @@ import {
   evaluate,
   evaluateDeploy,
   evaluateInput,
+  evaluateRecording,
   evaluateReport,
   facts,
   inputPlan,
@@ -59,6 +60,10 @@ const GOOD = [
   "SMOKE backup-unmounted 0",
   "SMOKE import-service 1",
   "SMOKE cifs 1",
+  "SMOKE audio-service 1",
+  "SMOKE sound-card 1",
+  "SMOKE audio-output 1",
+  'SMOKE audio-played "playCount":1',
   "SMOKE session-log ok",
   "SMOKE console-tty ok",
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
@@ -407,4 +412,20 @@ test("wgpu starting OpenGL is reported", () => {
   const log = GOOD.replace("Starting syslogd: OK", "Starting syslogd: OK\nlibEGL warning: DRI2: failed to create screen");
   const failed = evaluate(log).filter((c) => !c.ok).map((c) => c.name);
   assert.deepEqual(failed, ["compositor didn't start OpenGL"]);
+});
+
+test("the recording must hold sound, not silence", () => {
+  const wav = (samples: number[]) => {
+    const b = Buffer.alloc(44 + samples.length * 2);
+    b.write("RIFF", 0);
+    b.write("WAVEfmt ", 8);
+    b.write("data", 36); // sizes left at 0, as when QEMU is killed
+    samples.forEach((s, i) => b.writeInt16LE(s, 44 + i * 2));
+    return b;
+  };
+  assert.equal(evaluateRecording(undefined).ok, false);
+  assert.equal(evaluateRecording(wav(Array(50_000).fill(0))).ok, false);
+  assert.equal(evaluateRecording(wav(Array(50_000).fill(3))).ok, false); // dither, not sound
+  const noise = wav(Array.from({ length: 50_000 }, (_, i) => (i % 2 ? 9000 : -9000)));
+  assert.deepEqual(evaluateRecording(noise), { name: "the sound card played sound", ok: true, detail: "50000 loud samples" });
 });

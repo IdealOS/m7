@@ -381,7 +381,7 @@ Goal: your music library on the Pi, playing without a skip. Playback lives in `a
 
 System work first:
 
-- [ ] **Audio in the image:** ALSA (alsa-lib) and the Pi's audio drivers (headphone jack, HDMI, USB audio), with the output chosen in Settings; virtio-snd in QEMU, played through the Mac. No PipeWire: audiod is the only thing that makes sound, and it does its own mixing (its mixer is where system sounds would join). Nothing plays sound on the device today; audiod plays silently, keeping time.
+- [ ] **Audio in the image:** ALSA (alsa-lib) and the Pi's audio drivers (headphone jack, HDMI, USB audio), with the output chosen in Settings; virtio-snd in QEMU, played through the Mac. No PipeWire: audiod is the only thing that makes sound, and it does its own mixing (its mixer is where system sounds would join). Done: alsa-lib and audiod are in the image and session starts audiod; QEMU has virtio-snd (output only), which `tools/run-qemu` plays through the Mac and the smoke test records to a WAV file to check that a Track's sound comes out. The Pi 4 has `dtparam=audio=on` for the headphone jack and HDMI audio through vc4, both loaded as modules, but is untested on hardware. Left: choosing the output (it's ALSA's default device today) in Settings, and USB audio checked on the Pi.
 - [ ] **A media control the compositor draws** in the top bar (play, pause, next, what's playing) and media keys, so playback can be controlled from anywhere. Trusted chrome, like the prompt.
 - [ ] **Finding files on USB drives:** the start of M14's `importd`, sharing backupd's drive detection and mounting.
 

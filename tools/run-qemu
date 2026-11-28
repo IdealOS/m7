@@ -1,6 +1,7 @@
 #!/bin/sh
 # Boot the image from `tools/build-image qemu`. The serial console (with the
-# session shell) is this terminal; the virtio-gpu display opens in a window.
+# session shell) is this terminal; the virtio-gpu display opens in a window, and
+# virtio-snd plays through the Mac's sound output.
 # SSH: ssh -p 2222 root@localhost
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,5 +20,6 @@ exec qemu-system-aarch64 \
 	-device virtio-gpu-pci \
 	-display cocoa \
 	-device virtio-keyboard-pci -device virtio-tablet-pci \
+	-audiodev coreaudio,id=snd0 -device virtio-sound-pci,audiodev=snd0,streams=1 \
 	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0 \
 	-serial mon:stdio

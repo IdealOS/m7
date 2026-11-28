@@ -84,6 +84,15 @@ export const GUEST_SCRIPT = [
   // M14: importd is on the bus, and the kernel can mount shares.
   "echo SMOKE import-service $(osctl bus list 2>&1 | grep -c '^import ')",
   "echo SMOKE cifs $(grep -c cifs /proc/filesystems)",
+  // M11: audiod is on the bus and plays to the sound card (virtio-snd, which the
+  // host records to a WAV file: see evaluateRecording). One second of noise, as a
+  // 48 kHz mono WAV, goes in as a Track and plays to its end.
+  "echo SMOKE audio-service $(osctl bus list 2>&1 | grep -c '^audio ')",
+  "echo SMOKE sound-card $(grep -ci '^ *[0-9].*virtio' /proc/asound/cards)",
+  `echo SMOKE audio-output $(osctl bus call audio status '{}' 2>&1 | grep -c '"output":"')`,
+  String.raw`printf 'RIFF\044\167\001\000WAVEfmt \020\000\000\000\001\000\001\000\200\273\000\000\000\167\001\000\002\000\020\000data\000\167\001\000' > /run/smoke.wav; head -c 96000 /dev/urandom >> /run/smoke.wav`,
+  `TH=$(osctl db put-blob /run/smoke.wav | grep -o '"hash":"[0-9a-f]*"' | cut -d'"' -f4); TID=$(osctl db create Track '{"title":"Smoke","audio":{"$blob":"'$TH'"}}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/')`,
+  `osctl audio play "$TID" >/dev/null 2>&1; i=0; while [ $i -lt 10 ] && ! osctl db get "$TID" 2>/dev/null | grep -q playCount; do sleep 1; i=$((i+1)); done; echo SMOKE audio-played $(osctl db get "$TID" 2>&1 | grep -o '"playCount":[0-9]*')`,
   // session keeps what it and the services print in /data/log/session.log (for
   // reading over SSH), stamped like dmesg; the console shell keeps the terminal.
   String.raw`grep -q "^\[ *[0-9]*\.[0-9]*\] session: started compositor" /data/log/session.log && grep -q "^\[.*\] .*kms: first frame on screen" /data/log/session.log && echo SMOKE session-log ok`,
@@ -195,6 +204,10 @@ export function evaluate(log: string): Check[] {
     fact("backup-unmounted", "0", "the drive is unmounted while backupd isn't using it"),
     fact("import-service", "1", "importd is on the bus"),
     fact("cifs", "1", "the kernel can mount SMB shares"),
+    fact("audio-service", "1", "audiod is on the bus"),
+    fact("sound-card", "1", "the kernel found the virtio sound card"),
+    fact("audio-output", "1", "audiod opened a sound output (not silent)"),
+    fact("audio-played", '"playCount":1', "a Track played to its end"),
     fact("session-log", "ok", "session kept the services' output in /data/log/session.log, stamped"),
     fact("console-tty", "ok", "the console shell writes to the terminal, not the log"),
     {
@@ -395,7 +408,7 @@ export function shellPids(log: string): number[] {
 
 /** What session.conf starts through dev-exec, plus session itself: after a deploy,
  * each must run from the overlay (/opt/idealos/bin). */
-export const DEPLOYED_SERVICES = ["session", "busd", "permd", "dbd", "secretsd", "ptyd", "netd", "backupd", "compositor"];
+export const DEPLOYED_SERVICES = ["session", "busd", "permd", "dbd", "secretsd", "ptyd", "netd", "backupd", "audiod", "compositor"];
 
 /** Shell command run over SSH after a deploy. `oldShell` is the pid of the shell the
  * first session started, which must be gone once session restarts. */
@@ -454,4 +467,19 @@ export function evaluateDeploy(log: string, exit: number | null, probe: string):
     },
     { name: "apps running after the restart", ok: running >= 2, detail: `${running} running` },
   ];
+}
+
+/** What QEMU's sound card played, recorded as a WAV file (16-bit PCM): some of it
+ * must be sound, not silence. The header's sizes are only filled in when QEMU exits
+ * cleanly, so everything after the "data" tag counts. */
+export function evaluateRecording(wav: Uint8Array | undefined): Check {
+  const name = "the sound card played sound";
+  if (!wav) return { name, ok: false, detail: "no recording" };
+  const tag = Buffer.from(wav).indexOf("data");
+  if (tag < 0) return { name, ok: false, detail: `no data in ${wav.length} bytes` };
+  const samples = new DataView(wav.buffer, wav.byteOffset + tag + 8, Math.max(0, wav.length - tag - 8));
+  let loud = 0;
+  for (let i = 0; i + 1 < samples.byteLength; i += 2) if (Math.abs(samples.getInt16(i, true)) > 256) loud++;
+  // A second of noise at 0.8 volume is ~70,000 loud samples (stereo, 44.1 kHz).
+  return { name, ok: loud > 10_000, detail: `${loud} loud samples` };
 }

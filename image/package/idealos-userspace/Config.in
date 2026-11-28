@@ -7,6 +7,8 @@ config BR2_PACKAGE_IDEALOS_USERSPACE
 	select BR2_PACKAGE_LIBXKBCOMMON
 	# Keymaps; libxkbcommon can't compile one without this data.
 	select BR2_PACKAGE_XKEYBOARD_CONFIG
+	# audiod plays through ALSA (cpal links alsa-lib).
+	select BR2_PACKAGE_ALSA_LIB
 	help
 	  Rust userspace from this repository: session, compositor and
 	  (later) the bus, database and system services.

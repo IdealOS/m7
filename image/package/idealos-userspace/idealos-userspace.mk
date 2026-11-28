@@ -10,8 +10,9 @@ IDEALOS_USERSPACE_SITE_METHOD = local
 IDEALOS_USERSPACE_LICENSE = MIT or Apache-2.0
 
 # The compositor's KMS backend links libinput (which finds devices through udev)
-# and libxkbcommon; the udev crate finds libudev with pkg-config.
-IDEALOS_USERSPACE_DEPENDENCIES = host-pkgconf libinput libxkbcommon libudev
+# and libxkbcommon; the udev crate finds libudev with pkg-config. audiod's sound
+# output (cpal) links alsa-lib, also found with pkg-config.
+IDEALOS_USERSPACE_DEPENDENCIES = host-pkgconf libinput libxkbcommon libudev alsa-lib
 # The pkg-config crate refuses to cross-compile unless told to. Buildroot's
 # pkg-config (PKG_CONFIG, set by TARGET_CONFIGURE_OPTS) already points at staging.
 IDEALOS_USERSPACE_CARGO_ENV = PKG_CONFIG_ALLOW_CROSS=1
@@ -20,9 +21,9 @@ IDEALOS_USERSPACE_CARGO_ENV = PKG_CONFIG_ALLOW_CROSS=1
 # backend. `session`, `busd` and `osctl` have no features. kms-probe, db-bench and
 # js-bench (Spikes A/B, C and D) and store-bench (the db crate's benchmark) are dev
 # tools that hw-report runs to measure new hardware.
-IDEALOS_USERSPACE_BINS = session busd dbd permd secretsd ptyd netd backupd importd import-reader osctl app-host compositor kms-probe db-bench js-bench store-bench
+IDEALOS_USERSPACE_BINS = session busd dbd permd secretsd ptyd netd backupd importd import-reader audiod osctl app-host compositor kms-probe db-bench js-bench store-bench
 IDEALOS_USERSPACE_CARGO_BUILD_OPTS = \
-	-p session -p busd -p dbd -p permd -p secretsd -p ptyd -p netd -p backupd -p importd -p osctl -p db -p app-host \
+	-p session -p busd -p dbd -p permd -p secretsd -p ptyd -p netd -p backupd -p importd -p audiod -p osctl -p db -p app-host \
 	-p compositor --no-default-features --features kms \
 	-p kms-probe -p db-bench -p js-bench
 

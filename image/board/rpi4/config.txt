@@ -6,6 +6,8 @@ dtoverlay=vc4-kms-v3d-pi4
 max_framebuffers=2
 disable_overscan=1
 enable_uart=1
+# The headphone jack (bcm2835 audio). HDMI audio comes with the KMS overlay.
+dtparam=audio=on
 # Modes with a pixel clock over 340 MHz (4K at 60 Hz, 3440x1440 at 60 Hz) need a
 # faster core clock than the default; without it a 3440x1440 picture dropped out.
 # The Pi runs a little warmer for it.

@@ -11,7 +11,7 @@
 // The serial console is driven over a Unix socket and the display is captured
 // over QMP, so no window opens. Boots a scratch copy of the disk image.
 import { spawn, spawnSync } from "node:child_process";
-import { constants, copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -27,6 +27,7 @@ import {
   evaluate,
   evaluateDeploy,
   evaluateInput,
+  evaluateRecording,
   evaluateReport,
   inputPlan,
   screenSize,
@@ -105,6 +106,8 @@ const qemu = spawn(
     ...["-drive", `file=${backupDisk},if=virtio,format=raw`],
     ...["-device", "virtio-gpu-pci", "-display", "none"],
     ...["-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"],
+    // The sound card, recorded to a file for evaluateRecording.
+    ...["-audiodev", `wav,id=snd0,path=${join(work, "sound.wav")}`, "-device", "virtio-sound-pci,audiodev=snd0,streams=1"],
     ...["-netdev", `user,id=net0,hostfwd=tcp:127.0.0.1:${sshPort}-:22`, "-device", "virtio-net-pci,netdev=net0"],
     ...["-chardev", `socket,id=ser,path=${join(work, "serial")},server=on,wait=on`],
     ...["-serial", "chardev:ser"],
@@ -241,10 +244,11 @@ const timer = setTimeout(() => {
 
 function finish(): never {
   clearTimeout(timer);
+  const recording = existsSync(join(work, "sound.wav")) ? readFileSync(join(work, "sound.wav")) : undefined;
   qemu.kill();
   writeFileSync(join(REPO, "image/output/qemu/smoke-serial.log"), log);
   rmSync(work, { recursive: true, force: true });
-  const results = [...evaluate(log), ...evaluateInput(log, plan), ...deployResults, ...reportResults];
+  const results = [...evaluate(log), evaluateRecording(recording), ...evaluateInput(log, plan), ...deployResults, ...reportResults];
   if (deploy && deployResults.length === 0) {
     results.push({ name: "deploy", ok: false, detail: "did not finish" });
   }
