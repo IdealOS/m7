@@ -2626,7 +2626,7 @@ impl Desktop {
         // for someone else; a good one reuses them rather than decoding again.
         let img = result.and_then(|bytes| match self.images.get(&hash).and_then(|c| c.image.clone()) {
             Some(img) => Ok(img),
-            None => crate::image::decode_png(&bytes),
+            None => crate::image::decode(&bytes),
         });
         let img = match img {
             Ok(img) => img,

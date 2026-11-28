@@ -20,6 +20,8 @@ taffy = "0.16"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
+# Without rayon: covers and photos decode on one thread, with no other crates.
+jpeg-decoder = { version = "0.3", default-features = false }
 log = "0.4"
 env_logger = "0.11"
 loro = "1.18"

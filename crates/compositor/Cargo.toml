@@ -28,6 +28,7 @@ taffy.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 png.workspace = true
+jpeg-decoder.workspace = true
 log.workspace = true
 env_logger.workspace = true
 winit = { workspace = true, optional = true }
