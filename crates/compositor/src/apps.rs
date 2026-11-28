@@ -621,6 +621,16 @@ impl Apps {
         }
     }
 
+    /// Let go of a held press without a click: something else took the pointer
+    /// (dragging the row the button is in).
+    pub fn cancel_press(&mut self, scene: &mut Scene) {
+        if let Some(node) = self.pressed.take()
+            && scene.node(node).is_some()
+        {
+            scene.apply(SceneOp::Set { id: node, props: props(json!({"pressed": false})) });
+        }
+    }
+
     /// Whether a press is being held on one of the windows' nodes.
     pub fn pressing(&self) -> bool {
         self.pressed.is_some()

@@ -1919,7 +1919,7 @@
         },
         {
           "const": "vlist",
-          "description": "A virtual list: `count` rows of `row_height`, of which the app creates only\nthe visible ones (it hears which, as `range` events), each with an `index`.",
+          "description": "A virtual list: `count` rows of `row_height`, of which the app creates only\nthe visible ones (it hears which, as `range` events), each with an `index`.\nWith `reorder: true` its rows can be dragged to new places: the compositor\nruns the drag and sends one `reorder` event when a row is dropped.",
           "type": "string"
         },
         {
@@ -3460,7 +3460,7 @@
           "type": "object"
         },
         {
-          "description": "Something happened to node `node` (an id from the app's commits): `click`\n(a button it listens to), `change` (a widget's new value: a checkbox's or\ntoggle's boolean, a slider's number, a select's option, a text field's text),\n`submit` (Enter in a text field, with its text), `range` (a virtual list's\nvisible rows, as `[first, last]`), `choose` (a menu's chosen option), or\n`cancel` (Escape in a dialog).",
+          "description": "Something happened to node `node` (an id from the app's commits): `click`\n(a button it listens to), `change` (a widget's new value: a checkbox's or\ntoggle's boolean, a slider's number, a select's option, a text field's text),\n`submit` (Enter in a text field, with its text), `range` (a virtual list's\nvisible rows, as `[first, last]`), `reorder` (a virtual list's row dragged\nand dropped, as `[from, to]`: the row at `from` belongs at index `to`),\n`choose` (a menu's chosen option), or `cancel` (Escape in a dialog).",
           "properties": {
             "event": {
               "type": "string"

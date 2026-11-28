@@ -304,7 +304,10 @@ of it applies.
 **Node types**: primitives `group`, `rect`, `text`, `image`; containers
 `vstack`, `hstack`, `toolbar`, `grid`, `split`, `scroll`, `dialog`; widgets
 `label`, `button`, `checkbox`, `toggle`, `slider`, `select`, `menu`,
-`text_field`, `text_area`, `vlist` (a virtual list) and `terminal`.
+`text_field`, `text_area`, `vlist` (a virtual list) and `terminal`. A `vlist`
+with `reorder: true` lets its rows be dragged to new places: the compositor runs
+the drag (a line where the row would drop, scrolling near the list's edges,
+Escape to cancel) and sends one `reorder` event, `[from, to]`, on the drop.
 
 **Common props**: `x`, `y`, `w`, `h` (pixels, `"50%"` or `"fill"`), `grow`,
 `min_w`/`min_h`/`max_w`/`max_h`, `padding`, `gap`, `align`, `justify`,
@@ -464,7 +467,8 @@ await openWindow({ title: "Counter", width: 300, height: 200, style }, () => {
   `slider`, `select`, `menu`, `textField`, `textArea`, `image`, `rect`,
   `virtualList`, `terminal`, and `each(list, key, render)` for lists. Widgets
   report through `onClick`, `onChange`, `onSubmit`, `onCancel`, `onChoose`,
-  `onRange` and (text widgets) `onSelect`. A text widget given a `control` from
+  `onRange`, `onReorder` (a `virtualList`'s row dropped somewhere new, as
+  `from, to`) and (text widgets) `onSelect`. A text widget given a `control` from
   `textControl()` can be told to `select(anchor, caret)`, `focus()` and
   `addUndo(changeSets)` from code.
 - **Permissions** (`permissions.`): `request(rules, reason?)` asks the user;

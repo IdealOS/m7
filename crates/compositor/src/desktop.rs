@@ -29,6 +29,7 @@ use crate::input::{Effect, Input, Key, Mods, Seat, Shortcut};
 use crate::layout::{DIVIDER, Layout};
 use crate::media;
 use crate::prompt;
+use crate::reorder::{self, Reorder};
 use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
 use crate::terminal;
@@ -185,6 +186,8 @@ enum Drag {
     Menu {
         from: (f32, f32),
     },
+    /// A row of a reorderable virtual list held, then dragged (see `reorder`).
+    Reorder(Reorder),
 }
 
 /// Which edges of a window a resize moves.
@@ -255,6 +258,8 @@ fn is_blob_hash(s: &str) -> bool {
 /// Scene ids the desktop itself uses for overlays, above every other range.
 const MENU: NodeId = 1 << 40;
 const SWITCHER: NodeId = (1 << 40) + 10_000;
+/// The line showing where a dragged row would drop, and the outline on the row.
+const DROP: NodeId = (1 << 40) + 20_000;
 const ROW: f32 = 28.0;
 /// How long the window switcher stays up after Alt+Tab.
 const SWITCHER_SHOWS: Duration = Duration::from_millis(1200);
@@ -596,16 +601,31 @@ impl Desktop {
             ids
         });
         let allow = |id: NodeId| allowed.as_ref().is_none_or(|ids| ids.contains(&id));
+        let root = dialog.unwrap_or(window);
         if self.apps.press_where(&mut self.scene, window, x, y, allow) {
             if let Some(n) = self.apps_pressed_node(window, x, y)
                 && self.apps.owns(n)
             {
                 self.set_focus(Some(n));
             }
+            // A button in a reorderable list's row clicks if let go where it is,
+            // and drags the row if moved first.
+            self.drag =
+                self.reorder_at(root, x, y).map(|(list, row)| Drag::Reorder(Reorder::new(list, row, y)));
             return Effect::default();
         }
-        let root = dialog.unwrap_or(window);
-        if let Some((node, kind, rect)) = self.widget_at(root, x, y) {
+        let widget = self.widget_at(root, x, y);
+        // Anywhere else in a reorderable list's row that isn't a control holds the
+        // row, to drag it (a finger scrolls the list instead).
+        if matches!(widget, None | Some((_, NodeKind::Scroll | NodeKind::Vlist, _)))
+            && !self.touch
+            && let Some((list, row)) = self.reorder_at(root, x, y)
+        {
+            self.set_focus(None);
+            self.drag = Some(Drag::Reorder(Reorder::new(list, row, y)));
+            return Effect::default();
+        }
+        if let Some((node, kind, rect)) = widget {
             match kind {
                 NodeKind::Checkbox | NodeKind::Toggle => {
                     self.set_focus(Some(node));
@@ -688,6 +708,14 @@ impl Desktop {
         let (x, y) = self.seat.cursor();
         if let Some(win) = self.pressed_title.take() {
             self.set_title(win, "pressed", Value::Null);
+        }
+        if let Some(Drag::Reorder(r)) = self.drag {
+            self.drag = None;
+            if r.active {
+                self.drop_row(r);
+                return Effect::default();
+            }
+            // Never moved: a click, on the row's button if it was on one.
         }
         if self.apps.pressing() {
             let reply = self.apps.release(&mut self.scene, x, y);
@@ -1022,6 +1050,16 @@ impl Desktop {
                 self.hover();
                 return;
             }
+            Drag::Reorder(mut r) => {
+                if !r.active && r.starts_at(y) {
+                    // A drag, not a click: the button pressed lets go unclicked,
+                    // and loses the focus it took (its row will show another song).
+                    r.active = true;
+                    self.apps.cancel_press(&mut self.scene);
+                    self.set_focus(None);
+                }
+                if r.active { Drag::Reorder(self.track_reorder(r)) } else { Drag::Reorder(r) }
+            }
         });
     }
 
@@ -1095,6 +1133,100 @@ impl Desktop {
         if p.get("_range") != Some(&range) {
             self.set(id, json!({"_range": range.clone()}));
             self.event(id, "range", range);
+        }
+    }
+
+    // --- Reordering a list's rows ------------------------------------------------------
+
+    /// The reorderable virtual list under (`x`, `y`) in `root`, and the row there.
+    /// Not its scrollbar: that still scrolls.
+    fn reorder_at(&mut self, root: NodeId, x: f32, y: f32) -> Option<(NodeId, usize)> {
+        let (list, rect, _) = self.scene.paint_order(root).into_iter().rev().find(|&(id, rect, clip)| {
+            self.kind(id) == Some(NodeKind::Vlist) && rect.intersect(&clip).contains(x, y)
+        })?;
+        if self.prop(list, "reorder").and_then(Value::as_bool) != Some(true)
+            || (self.scroll_extent(list) > 0.0 && x >= rect.x + rect.w - THUMB_ZONE)
+        {
+            return None;
+        }
+        let p = &self.scene.node(list).expect("in the scene").props;
+        let (count, row) = (num(p, "count", 0.0).max(0.0) as usize, num(p, "row_height", 28.0));
+        let row = reorder::row_at(y - rect.y + num(p, "_scroll", 0.0), row, count)?;
+        Some((list, row))
+    }
+
+    /// Follow the pointer with a dragged row: the gap it's nearest, how fast the
+    /// list should scroll, and the drop line and outline that show them.
+    fn track_reorder(&mut self, mut r: Reorder) -> Reorder {
+        let (_, y) = self.seat.cursor();
+        let Some(&(rect, clip)) = self.scene.screen_rects().get(&r.list) else { return r };
+        let p = &self.scene.node(r.list).expect("has a rect").props;
+        let (count, row, scrolled) = (
+            num(p, "count", 0.0).max(0.0) as usize,
+            num(p, "row_height", 28.0).max(1.0),
+            num(p, "_scroll", 0.0),
+        );
+        let view = rect.intersect(&clip);
+        // The nearest gap that shows: at an edge, the nearest can be just out of view.
+        let top = scrolled + view.y - rect.y;
+        let (lo, hi) =
+            ((top / row).ceil() as usize, (((top + view.h) / row).floor().max(0.0) as usize).min(count));
+        r.gap = reorder::gap_at(y - rect.y + scrolled, row, count);
+        if lo <= hi {
+            r.gap = r.gap.clamp(lo, hi);
+        }
+        // Only scroll a list that can, and not past its ends.
+        let extent = self.scroll_extent(r.list);
+        let speed = reorder::edge_speed(y, view.y, view.h);
+        r.speed =
+            if (speed < 0.0 && scrolled > 0.0) || (speed > 0.0 && scrolled < extent) { speed } else { 0.0 };
+        // In the list's coordinates, clipped to what shows of it.
+        let (ox, oy) = (view.x - rect.x, view.y - rect.y);
+        let mut ops = vec![
+            SceneOp::Destroy { id: DROP },
+            create(
+                DROP,
+                NodeKind::Group,
+                json!({"x": view.x, "y": view.y, "w": view.w, "h": view.h, "clip": true}),
+            ),
+            create(
+                DROP + 1,
+                NodeKind::Rect,
+                json!({"x": 1.0 - ox, "y": r.from as f32 * row - scrolled - oy, "w": rect.w - 2.0, "h": row,
+                       "color": "transparent", "border_color": "$accent", "border_width": 1, "radius": theme::radius::S}),
+            ),
+            insert(DROP, DROP + 1),
+        ];
+        if r.result().is_some() {
+            let line_y = (r.gap as f32 * row - scrolled - oy - 1.0).clamp(0.0, (view.h - 2.0).max(0.0));
+            ops.push(create(
+                DROP + 2,
+                NodeKind::Rect,
+                json!({"x": 8.0 - ox, "y": line_y, "w": (rect.w - 16.0).max(0.0), "h": 2, "color": "$accent", "radius": 1}),
+            ));
+            ops.push(insert(DROP, DROP + 2));
+        }
+        ops.push(insert(ROOT, DROP));
+        self.scene.apply_all(ops);
+        r
+    }
+
+    /// Let go of a dragged row: the app hears where it went, if it moved.
+    fn drop_row(&mut self, r: Reorder) {
+        self.scene.apply(SceneOp::Destroy { id: DROP });
+        if let Some((from, to)) = r.result() {
+            self.event(r.list, "reorder", json!([from, to]));
+        }
+        self.hover();
+    }
+
+    /// Stop dragging a row, leaving it where it was: Escape, or its list went away.
+    fn cancel_reorder(&mut self) {
+        if matches!(self.drag, Some(Drag::Reorder(_))) {
+            self.drag = None;
+            self.apps.cancel_press(&mut self.scene);
+            self.scene.apply(SceneOp::Destroy { id: DROP });
+            self.hover();
         }
     }
 
@@ -1614,6 +1746,11 @@ impl Desktop {
     // --- Keys --------------------------------------------------------------------
 
     fn key(&mut self, key: Key, mods: Mods) -> Effect {
+        // Escape drops a dragged row back where it was, and nothing else hears it.
+        if key == Key::Escape && matches!(self.drag, Some(Drag::Reorder(_))) {
+            self.cancel_reorder();
+            return Effect::default();
+        }
         // Shortcuts the compositor keeps for itself.
         if key == Key::Tab && (mods.alt || mods.logo) {
             let effect =
@@ -2019,6 +2156,17 @@ impl Desktop {
             }
         }
         self.coasting = still;
+        // Holding a dragged row near a list's edge scrolls the list.
+        let mut reordering = false;
+        if let Some(Drag::Reorder(r)) = self.drag
+            && r.active
+            && r.speed != 0.0
+        {
+            self.scroll_by(r.list, r.speed * dt);
+            let r = self.track_reorder(r);
+            self.drag = Some(Drag::Reorder(r));
+            reordering = r.speed != 0.0;
+        }
         if self.switcher_until.is_some_and(|t| now >= t) {
             self.switcher_until = None;
             self.scene.apply(SceneOp::Destroy { id: SWITCHER });
@@ -2026,7 +2174,7 @@ impl Desktop {
         if self.scene.node(TOP_BAR).is_some() {
             shell::set_clock(&mut self.scene, &shell::clock_text(SystemTime::now()));
         }
-        moving || !self.coasting.is_empty()
+        moving || !self.coasting.is_empty() || reordering
     }
 
     /// Edits to style sheets arrived: apply each that parses, keeping the last good
@@ -2114,7 +2262,8 @@ impl Desktop {
 
     /// When [`Desktop::tick`] next has something to do.
     pub fn next_wake(&self, now: Instant) -> Instant {
-        if !self.coasting.is_empty() || self.scene.animating() {
+        let reordering = matches!(self.drag, Some(Drag::Reorder(r)) if r.active && r.speed != 0.0);
+        if !self.coasting.is_empty() || self.scene.animating() || reordering {
             return now + Duration::from_millis(16);
         }
         let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -2203,6 +2352,11 @@ impl Desktop {
             && scene.node(*n).is_none()
         {
             self.drag = None;
+        }
+        if let Some(Drag::Reorder(r)) = self.drag
+            && self.scene.node(r.list).is_none()
+        {
+            self.cancel_reorder();
         }
     }
 
@@ -3417,6 +3571,210 @@ mod tests {
         assert_eq!(d.workspace, 2);
         assert_eq!(prop(&d, frame, "hidden"), false);
         assert_eq!(d.apps.workspace, 2, "new windows open here");
+    }
+
+    /// A window with a reorderable list of 20 rows 20 high, 5 showing; rows 0 to 5
+    /// are made, each a button (id 100 + row, listened to) and a label. Returns
+    /// the window and the list's scene node.
+    fn reorderable(d: &mut Desktop) -> (u64, NodeId) {
+        // No window rising into place: the rows stay where they're measured.
+        d.scene.set_reduce_motion(true);
+        let mut ops = vec![
+            json!({"op": "create", "id": 3, "type": "vstack", "props": {"padding": 10}}),
+            json!({"op": "create", "id": 2, "type": "vlist", "props": {"count": 20, "row_height": 20, "h": 100, "reorder": true}}),
+            json!({"op": "insert", "parent": 1, "child": 3, "index": 0}),
+            json!({"op": "insert", "parent": 3, "child": 2, "index": 0}),
+        ];
+        for i in 0..6u64 {
+            ops.extend([
+                json!({"op": "create", "id": 10 + i, "type": "hstack", "props": {"index": i}}),
+                json!({"op": "create", "id": 100 + i, "type": "button", "props": {"label": format!("Song {i}")}}),
+                json!({"op": "create", "id": 200 + i, "type": "label", "props": {"text": "", "grow": 1}}),
+                json!({"op": "insert", "parent": 2, "child": 10 + i, "index": i}),
+                json!({"op": "insert", "parent": 10 + i, "child": 100 + i, "index": 0}),
+                json!({"op": "insert", "parent": 10 + i, "child": 200 + i, "index": 1}),
+                json!({"op": "listen", "id": 100 + i, "events": ["click"]}),
+            ]);
+        }
+        let w = open(d, 7, Value::Array(ops));
+        let list = global(d, w, 2);
+        d.relayout();
+        (w, list)
+    }
+
+    /// The list's rect on screen.
+    fn list_rect(d: &mut Desktop, list: NodeId) -> Rect {
+        d.relayout();
+        d.scene.screen_rects()[&list].0
+    }
+
+    /// Where the drop line is, on screen, if it shows.
+    fn drop_line(d: &mut Desktop) -> Option<Rect> {
+        d.relayout();
+        d.scene.screen_rects().get(&(DROP + 2)).map(|r| r.0)
+    }
+
+    fn press_at(d: &mut Desktop, (x, y): (f32, f32)) -> Vec<Out> {
+        let mut out = d.input(Input::MotionTo { x, y }).1;
+        out.extend(d.input(Input::Button { pressed: true }).1);
+        out
+    }
+
+    fn move_to(d: &mut Desktop, (x, y): (f32, f32)) -> Vec<Out> {
+        d.input(Input::MotionTo { x, y }).1
+    }
+
+    fn reorders(out: &[Out]) -> Vec<Value> {
+        events(out).into_iter().filter(|(_, e, _)| e == "reorder").map(|(_, _, v)| v).collect()
+    }
+
+    #[test]
+    fn dragging_a_lists_row_moves_it_and_the_app_hears_once_on_drop() {
+        let mut d = desk();
+        let (_, list) = reorderable(&mut d);
+        let r = list_rect(&mut d, list);
+        // Hold row 1 by its blank part, away from its button.
+        let x = r.x + r.w - 60.0;
+        let out = press_at(&mut d, (x, r.y + 30.0));
+        assert!(events(&out).is_empty(), "{out:?}");
+        // A small wobble is still a click, not a drag.
+        move_to(&mut d, (x, r.y + 32.0));
+        assert!(d.scene.node(DROP).is_none());
+        // Down past row 3's middle: the line shows below row 2, where the row will
+        // go, and the app hears nothing while the drag goes on.
+        let mut out = move_to(&mut d, (x, r.y + 50.0));
+        out.extend(move_to(&mut d, (x, r.y + 62.0)));
+        assert!(events(&out).is_empty(), "nothing to the app mid-drag: {out:?}");
+        let line = drop_line(&mut d).expect("the drop line shows");
+        assert!(
+            (line.y + line.h / 2.0 - (r.y + 60.0)).abs() < 0.5,
+            "between rows 2 and 3: {line:?} in {r:?}"
+        );
+        let outline = d.scene.screen_rects()[&(DROP + 1)].0;
+        assert_eq!((outline.y, outline.h), (r.y + 20.0, 20.0), "the row being dragged is outlined");
+        // Next to where it started, it wouldn't move: no line.
+        move_to(&mut d, (x, r.y + 38.0));
+        assert!(drop_line(&mut d).is_none());
+        assert!(d.scene.node(DROP + 1).is_some(), "still dragging");
+        // Up above row 0, and let go: one event, and the indicator goes.
+        move_to(&mut d, (x, r.y + 4.0));
+        let out = d.input(Input::Button { pressed: false }).1;
+        assert_eq!(reorders(&out), [json!([1, 0])]);
+        assert!(d.scene.node(DROP).is_none());
+        // Dropped next to itself: nothing to tell.
+        press_at(&mut d, (x, r.y + 50.0));
+        move_to(&mut d, (x, r.y + 58.0));
+        assert!(reorders(&d.input(Input::Button { pressed: false }).1).is_empty());
+    }
+
+    #[test]
+    fn a_rows_button_clicks_when_let_go_and_drags_the_row_when_moved() {
+        let mut d = desk();
+        let (w, list) = reorderable(&mut d);
+        let r = list_rect(&mut d, list);
+        let button = global(&d, w, 100);
+        let at = center(&mut d, button);
+        let out = click(&mut d, at);
+        assert_eq!(events(&out), [(100, "click".into(), Value::Null)], "a click is a click");
+        // Pressed, then dragged down to below row 3: the row moves; no click.
+        press_at(&mut d, at);
+        assert_eq!(prop(&d, button, "pressed"), true);
+        move_to(&mut d, (at.0, r.y + 50.0));
+        assert_eq!(prop(&d, button, "pressed"), false, "the drag took the press");
+        assert_eq!(d.focus, None, "and the focus the press gave the button");
+        move_to(&mut d, (at.0, r.y + 78.0));
+        let out = d.input(Input::Button { pressed: false }).1;
+        assert_eq!(events(&out), [(2, "reorder".into(), json!([0, 3]))]);
+    }
+
+    #[test]
+    fn escape_cancels_dragging_a_row_and_other_lists_dont_drag() {
+        let mut d = desk();
+        let (w, list) = reorderable(&mut d);
+        let r = list_rect(&mut d, list);
+        let x = r.x + r.w - 60.0;
+        press_at(&mut d, (x, r.y + 10.0));
+        move_to(&mut d, (x, r.y + 62.0));
+        assert!(drop_line(&mut d).is_some());
+        assert!(events(&key(&mut d, Key::Escape)).is_empty());
+        assert!(d.scene.node(DROP).is_none(), "the indicator goes");
+        // Moving on and letting go does nothing more.
+        let mut out = move_to(&mut d, (x, r.y + 90.0));
+        out.extend(d.input(Input::Button { pressed: false }).1);
+        assert!(reorders(&out).is_empty(), "{out:?}");
+        assert!(d.scene.node(DROP).is_none());
+        // A list that doesn't ask can't be reordered.
+        let set = json!([{"op": "set", "id": 2, "props": {"reorder": false}}]);
+        d.call(request(9, "commit", json!({"window": w, "ops": set}), false));
+        press_at(&mut d, (x, r.y + 10.0));
+        move_to(&mut d, (x, r.y + 62.0));
+        assert!(d.scene.node(DROP).is_none());
+        assert!(reorders(&d.input(Input::Button { pressed: false }).1).is_empty());
+        // A list that goes away mid-drag takes the drag with it.
+        let set = json!([{"op": "set", "id": 2, "props": {"reorder": true}}]);
+        d.call(request(10, "commit", json!({"window": w, "ops": set}), false));
+        press_at(&mut d, (x, r.y + 10.0));
+        move_to(&mut d, (x, r.y + 62.0));
+        assert!(drop_line(&mut d).is_some());
+        let gone = json!([{"op": "destroy", "id": 3}]);
+        d.call(request(11, "commit", json!({"window": w, "ops": gone}), false));
+        assert!(d.scene.node(DROP).is_none());
+        assert!(events(&d.input(Input::Button { pressed: false }).1).is_empty());
+    }
+
+    #[test]
+    fn holding_a_dragged_row_near_the_lists_edge_scrolls_it() {
+        let mut d = desk();
+        let (_, list) = reorderable(&mut d);
+        let r = list_rect(&mut d, list);
+        let x = r.x + r.w - 60.0;
+        press_at(&mut d, (x, r.y + 30.0));
+        move_to(&mut d, (x, r.y + 50.0));
+        let t0 = Instant::now();
+        assert!(!d.tick(t0), "in the middle, nothing scrolls");
+        assert_eq!(prop(&d, list, "_scroll"), Value::Null);
+        // At the bottom edge, it scrolls on every frame, telling the app new rows.
+        move_to(&mut d, (x, r.y + r.h - 1.0));
+        assert!(d.next_wake(t0) <= t0 + Duration::from_millis(16), "frames come while it scrolls");
+        let mut out = Vec::new();
+        let mut t = t0;
+        for _ in 0..10 {
+            t += Duration::from_millis(16);
+            assert!(d.tick(t));
+            out.extend(d.drain());
+        }
+        let scrolled = prop(&d, list, "_scroll").as_f64().unwrap();
+        assert!(scrolled > 50.0, "it scrolled: {scrolled}");
+        assert!(events(&out).iter().any(|(_, e, _)| e == "range"), "the app makes the rows coming into view");
+        assert!(reorders(&out).is_empty());
+        // The line follows: it stays under the pointer as the rows go by.
+        let line = drop_line(&mut d).expect("shows");
+        assert!(line.y > r.y + r.h - 25.0 && line.y + line.h <= r.y + r.h, "in view: {line:?} in {r:?}");
+        // Back in the middle, it stops.
+        move_to(&mut d, (x, r.y + 50.0));
+        t += Duration::from_millis(16);
+        d.tick(t);
+        let stopped = prop(&d, list, "_scroll").as_f64().unwrap();
+        t += Duration::from_millis(16);
+        d.tick(t);
+        assert_eq!(prop(&d, list, "_scroll").as_f64().unwrap(), stopped);
+        // Let go: the row goes to the gap nearest the pointer, scrolling counted.
+        let gap = ((50.0 + stopped) / 20.0).round() as u64;
+        let out = d.input(Input::Button { pressed: false }).1;
+        assert_eq!(reorders(&out), [json!([1, gap - 1])]);
+        // Up at the top edge, it scrolls back, and stops at the top.
+        press_at(&mut d, (x, r.y + 50.0));
+        move_to(&mut d, (x, r.y + 30.0));
+        move_to(&mut d, (x, r.y - 40.0));
+        for _ in 0..100 {
+            t += Duration::from_millis(16);
+            if !d.tick(t) {
+                break;
+            }
+        }
+        assert_eq!(prop(&d, list, "_scroll").as_f64().unwrap(), 0.0);
+        assert!(!d.tick(t + Duration::from_millis(16)), "at the top it stops asking for frames");
+        key(&mut d, Key::Escape);
     }
 
     #[test]

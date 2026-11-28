@@ -22,6 +22,7 @@ import {
   ruleOf,
   smartQuery,
   stars,
+  storedMove,
 } from "../src/playlists.ts";
 
 let next = 0;
@@ -111,6 +112,24 @@ test("removing and moving tracks in a playlist", () => {
   const same = ["a", "b"];
   assert.equal(move(same, 0, 5), same, "out of range: unchanged");
   assert.equal(move(same, 1, 1), same);
+});
+
+test("moving a shown entry moves its stored track past ones not shown", () => {
+  // "b" is gone from the library: the list shows a, c, d.
+  const tracks = ["a", "b", "c", "d"];
+  const entries = [{ at: 0 }, { at: 2 }, { at: 3 }];
+  const shown = (ids: string[]) => ids.filter((id) => id !== "b");
+  const moved = (from: number, to: number) => {
+    const m = storedMove(entries, from, to);
+    return m ? move(tracks, m[0], m[1]) : tracks;
+  };
+  assert.deepEqual(shown(moved(0, 2)), ["c", "d", "a"], "first to last");
+  assert.deepEqual(shown(moved(2, 0)), ["d", "a", "c"], "last to first");
+  assert.deepEqual(shown(moved(1, 2)), ["a", "d", "c"], "down one");
+  assert.deepEqual(shown(moved(1, 0)), ["c", "a", "d"], "up one, past the hidden track");
+  assert.equal(storedMove(entries, 1, 1), null);
+  assert.equal(storedMove(entries, 0, 3), null, "no such entry");
+  assert.equal(storedMove(entries, -1, 0), null);
 });
 
 test("new playlists get a name of their own", () => {

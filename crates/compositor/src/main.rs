@@ -11,7 +11,9 @@
 //!                                    # partway through, then render; --type TEXT
 //!                                    # and --key NAME (tab, enter, down, cmd+z,
 //!                                    # alt+up, ...) are
-//!                                    # steps too, spread over the time in order
+//!                                    # steps too, spread over the time in order;
+//!                                    # --press LABEL, --move DY and --release
+//!                                    # drag (a playlist's row, say)
 //! compositor --backend kms           # device backend (Linux, feature "kms")
 //! compositor --backend kms --card /dev/dri/card1
 //! compositor --backend kms --scanout copy
@@ -80,6 +82,11 @@ fn main() -> ExitCode {
                 serve_for = value("--serve-for").parse().unwrap_or_else(|_| usage("bad --serve-for"))
             }
             "--click" => steps.push(Step::Click(value("--click"))),
+            "--press" => steps.push(Step::Press(value("--press"))),
+            "--move" => {
+                steps.push(Step::Move(value("--move").parse().unwrap_or_else(|_| usage("bad --move"))))
+            }
+            "--release" => steps.push(Step::Release),
             "--type" => steps.push(Step::Type(value("--type"))),
             "--scroll" => {
                 steps.push(Step::Scroll(value("--scroll").parse().unwrap_or_else(|_| usage("bad --scroll"))))
@@ -123,6 +130,12 @@ fn main() -> ExitCode {
 enum Step {
     /// Press the button (or anything) whose text is this.
     Click(String),
+    /// Hold the button down on the text that's this, to drag it.
+    Press(String),
+    /// Move the pointer this many pixels down (up if negative), holding what's held.
+    Move(f32),
+    /// Let go of what's held.
+    Release,
     /// Type this text into whatever has focus.
     Type(String),
     /// A key, with modifiers.
@@ -232,17 +245,17 @@ fn serve(desktop: &mut Desktop, secs: f64, steps: &[Step]) -> Result<(), Box<dyn
             && start.elapsed() >= *at
         {
             let inputs: Vec<Input> = match step {
-                Step::Click(label) => {
+                Step::Click(label) | Step::Press(label) => {
                     let list = desktop.draw_list();
                     match list.layers.iter().flat_map(|l| &l.texts).find(|t| &t.text == label) {
                         Some(t) => {
                             let (x, y) = (t.rect.x + t.rect.w / 2.0, t.rect.y + t.rect.h / 2.0);
-                            log::info!("clicking {label:?} at ({x}, {y})");
-                            vec![
-                                Input::MotionTo { x, y },
-                                Input::Button { pressed: true },
-                                Input::Button { pressed: false },
-                            ]
+                            log::info!("pressing {label:?} at ({x}, {y})");
+                            let mut inputs = vec![Input::MotionTo { x, y }, Input::Button { pressed: true }];
+                            if matches!(step, Step::Click(_)) {
+                                inputs.push(Input::Button { pressed: false });
+                            }
+                            inputs
                         }
                         None => {
                             log::warn!("no {label:?} on screen");
@@ -250,6 +263,12 @@ fn serve(desktop: &mut Desktop, secs: f64, steps: &[Step]) -> Result<(), Box<dyn
                         }
                     }
                 }
+                Step::Move(dy) => {
+                    // In small steps, as a hand would.
+                    let (x, y) = desktop.seat.cursor();
+                    (1..=8).map(|i| Input::MotionTo { x, y: y + dy * i as f32 / 8.0 }).collect()
+                }
+                Step::Release => vec![Input::Button { pressed: false }],
                 Step::Type(text) => {
                     text.chars().map(|c| Input::Key { key: Key::Char(c), mods: Mods::default() }).collect()
                 }
@@ -273,7 +292,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--theme light|dark] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME | --key play-pause|next|previous|volume-up|volume-down|mute]...]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--theme light|dark] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --press LABEL | --move DY | --release | --type TEXT | --key NAME | --key play-pause|next|previous|volume-up|volume-down|mute]...]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

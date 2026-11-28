@@ -299,6 +299,35 @@ test("a virtual list makes rows as they come into view and drops them as they le
   assert.equal(host.commits().flat().filter((op) => op.op === "destroy").length, 6, "the first rows left");
 });
 
+test("a virtual list with onReorder asks for dragging and hears where rows were dropped", async () => {
+  const host = fresh();
+  const moves: [number, number][] = [];
+  const opened = openWindow({ title: "Order" }, () =>
+    vstack(
+      {},
+      virtualList({ count: 5, rowHeight: 20, onReorder: (from, to) => moves.push([from, to]) }, (i) => label({ text: `Row ${i}` })),
+      virtualList({ count: 5, rowHeight: 20 }, (i) => label({ text: `Fixed ${i}` })),
+    ),
+  );
+  host.streams[0].part({ kind: "opened", window: 3, width: 300, height: 200 });
+  await opened;
+  await tick();
+  const [list, fixed] = host.commits()[0].filter((op) => op.op === "create" && op.type === "vlist") as {
+    id: number;
+    props: Record<string, unknown>;
+  }[];
+  assert.equal(list.props.reorder, true, "the compositor is told the rows drag");
+  assert.equal(fixed.props.reorder, undefined, "a list without onReorder doesn't");
+  host.streams[0].part({ kind: "event", node: list.id, event: "reorder", value: [3, 1] });
+  assert.deepEqual(moves, [[3, 1]]);
+  // A malformed event is dropped, not passed on.
+  host.streams[0].part({ kind: "event", node: list.id, event: "reorder", value: [3] });
+  host.streams[0].part({ kind: "event", node: list.id, event: "reorder", value: ["a", 1] });
+  assert.deepEqual(moves, [[3, 1]]);
+  // reorder isn't one of the events an app must ask for: no listen op.
+  assert.ok(!host.commits().flat().some((op) => op.op === "listen" && op.id === list.id));
+});
+
 test("a virtual list's rows stop following signals when the list goes", async () => {
   const host = fresh();
   const [shown, setShown] = signal(true);

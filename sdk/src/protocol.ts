@@ -718,6 +718,8 @@ export type NodeKind =
   /**
    * A virtual list: `count` rows of `row_height`, of which the app creates only
    * the visible ones (it hears which, as `range` events), each with an `index`.
+   * With `reorder: true` its rows can be dragged to new places: the compositor
+   * runs the drag and sends one `reorder` event when a row is dropped.
    */
   | "vlist"
   /**
@@ -1173,8 +1175,9 @@ export type WindowEvent =
    * (a button it listens to), `change` (a widget's new value: a checkbox's or
    * toggle's boolean, a slider's number, a select's option, a text field's text),
    * `submit` (Enter in a text field, with its text), `range` (a virtual list's
-   * visible rows, as `[first, last]`), `choose` (a menu's chosen option), or
-   * `cancel` (Escape in a dialog).
+   * visible rows, as `[first, last]`), `reorder` (a virtual list's row dragged
+   * and dropped, as `[from, to]`: the row at `from` belongs at index `to`),
+   * `choose` (a menu's chosen option), or `cancel` (Escape in a dialog).
    */
   | { kind: "event"; node: number; event: string; value?: unknown }
   /** The window's content area changed size (the user resized or maximized it). */

@@ -23,7 +23,7 @@ import { clock, totals } from "./clock.ts";
 import type { Collection } from "./collection.ts";
 import { coverColor, initials, queueFrom, type Album, type Artist, type Track } from "./library.ts";
 import type { Player } from "./player.ts";
-import { RATING_OPTIONS, ratingFrom, stars, type Playlist } from "./playlists.ts";
+import { RATING_OPTIONS, ratingFrom, stars, storedMove, type Playlist } from "./playlists.ts";
 
 export const TILE = 150;
 export const GAP = 18;
@@ -269,7 +269,8 @@ function playlistHeading(
 /** Songs, with a total time: "12 songs, 48 min". */
 const songCount = (tracks: Track[]) => totals(tracks.map((t) => t.duration));
 
-/** A playlist the listener made: its tracks in their order, to play, reorder and remove. */
+/** A playlist the listener made: its tracks in their order, to play, reorder
+ * (by dragging a row, or Move up and Move down in its ⋯ menu) and remove. */
 export function playlistPage(
   p: Player,
   c: Collection,
@@ -280,25 +281,30 @@ export function playlistPage(
 ): UiNode {
   const ids = () => entries().map((e) => e.track.id);
   const about = () => (entries().length === 0 ? "No songs yet. Add them from a song's ⋯ menu." : songCount(entries().map((e) => e.track)));
+  // Dragging a row and its Move up and Move down make the same move: shown row
+  // `from` to shown place `to`, past tracks no longer in the library.
+  const moveRow = (from: number, to: number) => {
+    const pl = list();
+    const m = storedMove(entries(), from, to);
+    if (pl && m) c.move(pl, m[0], m[1]);
+  };
   return vstack(
     { grow: 1, gap: 12 },
     playlistHeading(p, list, ids, about, edit, remove),
-    virtualList({ count: () => entries().length, rowHeight: ROW, grow: 1 }, (i) => {
+    virtualList({ count: () => entries().length, rowHeight: ROW, grow: 1, onReorder: moveRow }, (i) => {
       const entry = () => entries()[i];
       const change = (fn: (pl: Playlist, at: number) => void) => () => {
         const pl = list();
         const e = entry();
         if (pl && e) fn(pl, e.at);
       };
-      // Moves past tracks no longer in the library, so a move is always visible.
-      const neighbour = (d: number) => entries()[i + d]?.at;
       return trackRow(p, c, () => entry()?.track, () => i, ids, {
         artist: (t) => t.artist,
         album: true,
         actions: () => {
           const actions: RowAction[] = [];
-          if (i > 0) actions.push([MOVE_UP, change((pl, at) => c.move(pl, at, neighbour(-1) ?? at))]);
-          if (i < entries().length - 1) actions.push([MOVE_DOWN, change((pl, at) => c.move(pl, at, neighbour(1) ?? at))]);
+          if (i > 0) actions.push([MOVE_UP, () => moveRow(i, i - 1)]);
+          if (i < entries().length - 1) actions.push([MOVE_DOWN, () => moveRow(i, i + 1)]);
           actions.push([REMOVE, change((pl, at) => c.removeAt(pl, at))]);
           return actions;
         },

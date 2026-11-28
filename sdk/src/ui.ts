@@ -11,7 +11,8 @@
 //
 // Widgets run in the compositor: typing, sliders, scrolling and menus happen
 // there without waiting for the app, which hears the results through `on*`
-// handlers (`onChange` with the new value, `onSubmit`, `onCancel`, `onRange`).
+// handlers (`onChange` with the new value, `onSubmit`, `onCancel`, `onRange`,
+// `onReorder`).
 // A window lasts as long as its `open_window` request: closing it cancels the
 // request, and the compositor removes the window when the app goes away.
 
@@ -43,6 +44,7 @@ const HANDLERS: Record<string, string> = {
   onRange: "range",
   onChoose: "choose",
   onSelect: "select",
+  onReorder: "reorder",
 };
 
 /** Events the compositor sends only to apps that ask (`listen`). */
@@ -413,6 +415,25 @@ export interface VirtualListProps extends Common {
   rowHeight: number;
   /** Rows to keep beyond the visible ones, so scrolling doesn't show gaps. */
   overscan?: number;
+  /**
+   * Makes the rows draggable to new places. The compositor runs the drag (a line
+   * shows where the row would go, the list scrolls near its edges, Escape
+   * cancels) and calls this once, when a row is dropped somewhere new: the row
+   * at `from` belongs at index `to`, as removing it and inserting it at `to`
+   * would put it. The list doesn't move rows itself; change what `count` and
+   * the rows show. Dragging needs a pointer, so offer the same moves another way
+   * too (Move up and Move down in a row's menu).
+   */
+  onReorder?: (from: number, to: number) => void;
+}
+
+/** A `reorder` event's `[from, to]`, passed on if it's two row indexes. */
+function reordered(value: unknown, onReorder: (from: number, to: number) => void) {
+  if (!Array.isArray(value) || value.length !== 2 || !value.every((n) => Number.isInteger(n) && n >= 0)) {
+    logError("a reorder event without [from, to]:", value);
+    return;
+  }
+  onReorder(value[0] as number, value[1] as number);
 }
 
 /**
@@ -422,12 +443,13 @@ export interface VirtualListProps extends Common {
  */
 export function virtualList(props: VirtualListProps, render: (index: number) => UiNode): UiNode {
   const w = win();
-  const { rowHeight, overscan = 3, ...rest } = props;
+  const { rowHeight, overscan = 3, onReorder, ...rest } = props;
   type Row = { node: UiNode; dispose: () => void };
   const rows = new Map<number, Row>();
   const list = node("vlist", {
     ...rest,
     row_height: rowHeight,
+    ...(onReorder ? { reorder: true, onReorder: (value: unknown) => reordered(value, onReorder) } : {}),
     onRange: (value: unknown) => {
       const [first, last] = value as [number, number];
       const count = untrack(() => (typeof props.count === "function" ? props.count() : props.count));

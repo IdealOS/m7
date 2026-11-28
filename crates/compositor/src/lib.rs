@@ -7,6 +7,7 @@
 //! - [`fonts`]: the built-in UI font (Inter).
 //! - [`wm`]: window stacking and dragging, handled without app round trips.
 //! - [`input`]: the pointer and keyboard both backends feed into the window manager.
+//! - [`reorder`]: dragging a virtual list's rows to reorder them.
 //! - [`media`]: the top bar's media control and the media keys, as audiod requests.
 //! - [`backend`]: hosted (winit) and KMS display backends.
 //! - [`headless`]: offscreen rendering for screenshots and golden-image tests.
@@ -29,6 +30,7 @@ pub mod media;
 pub mod paragraphs;
 pub mod prompt;
 pub mod render;
+pub mod reorder;
 pub mod scene;
 pub mod shell;
 pub mod stats;

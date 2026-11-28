@@ -172,6 +172,18 @@ export function entriesOf(p: Playlist, byId: Map<string, Track>): { at: number; 
   });
 }
 
+/**
+ * Moving shown entry `from` to shown place `to`, as stored indexes for `move`:
+ * the track goes to where the entry shown at `to` is stored, so it lands beside
+ * the same neighbours it's shown beside, past any tracks that aren't shown
+ * (gone from the library). Null if either isn't an entry, or it stays put.
+ */
+export function storedMove(entries: { at: number }[], from: number, to: number): [number, number] | null {
+  const a = entries[from]?.at;
+  const b = entries[to]?.at;
+  return a === undefined || b === undefined || a === b ? null : [a, b];
+}
+
 /** `ids` without the one at `at`. */
 export function removeAt(ids: string[], at: number): string[] {
   return ids.filter((_, i) => i !== at);
