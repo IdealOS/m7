@@ -16,7 +16,9 @@
 //! `$nin`, `$exists` and `$contains` (array membership). Comparisons are typed: a
 //! number never equals a string or a boolean. `{"field": null}` matches documents
 //! where the field is null or missing, and `$ne` matches documents without the field.
-//! Top-level `{"$createdBy": "<app id or service>"}` matches the documents that one created.
+//! Top-level `{"$createdBy": "<app id or service>"}` matches the documents that one created,
+//! and `{"$created": {"$gte": t}}` (or `$updated`, with `$gt`, `$gte`, `$lt`, `$lte`)
+//! the ones made (or last changed) at times `t`, in milliseconds since the Unix epoch.
 //!
 //! A field whose value is `{"$link": "<id>"}` links to another document, and one
 //! whose value is `{"$blob": "<sha-256>"}` refers to a stored blob. Filters follow
@@ -532,8 +534,8 @@ pub struct Query {
     /// Field paths mapped to a value to equal or an object of operators (`$eq`,
     /// `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),
     /// plus `$and`, `$or` and `$not`, and on the whole document `$id`,
-    /// `$createdBy`, `$linksTo` and `$linkedFrom`. Empty matches every document
-    /// of the type.
+    /// `$createdBy`, `$created`, `$updated`, `$linksTo` and `$linkedFrom`.
+    /// Empty matches every document of the type.
     #[serde(default, rename = "where", skip_serializing_if = "Map::is_empty")]
     pub filter: Map<String, Value>,
     /// Sort keys, most significant first: field paths, or `$updated` and

@@ -3,5 +3,5 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": [".", "../src/library.ts", "../src/clock.ts"]
+  "include": [".", "../src/library.ts", "../src/clock.ts", "../src/playlists.ts"]
 }

@@ -17,6 +17,7 @@
     "duration": { "type": "number", "minimum": 0, "description": "Seconds." },
     "audio": { "x-kind": "blob" },
     "artwork": { "x-kind": "blob" },
+    "rating": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Stars the listener gave it, 1 to 5; missing when unrated." },
     "playCount": { "type": "integer", "minimum": 0, "description": "Times played to the end." },
     "lastPlayed": { "type": "integer", "description": "When it last played to the end, in milliseconds since the Unix epoch." }
   },

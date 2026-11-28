@@ -394,14 +394,14 @@ System work first:
 The library:
 
 - [x] An importer: tags read with lofty become `Track` documents; audio files and cover art become blobs, stored once (duplicates are skipped, since blobs are named by hash), with progress shown. Built as part of `importd` (M14), from a share or a folder; from USB drives is still to do.
-- [ ] Ratings, play counts and last played on each `Track`. Play counts and last played are done (audiod sets them when a track is heard to its end); ratings aren't.
-- [ ] `Playlist` documents linking to tracks, and smart playlists as live queries ("rated 4+", "added this month", "never played") that keep themselves current.
+- [x] Ratings, play counts and last played on each `Track`. Play counts and last played are set by audiod when a track is heard to its end; a `rating` of 1 to 5 stars is set from a menu of stars on each song in Music and on what's playing.
+- [x] `Playlist` documents linking to tracks, and smart playlists as live queries ("rated 4+", "added this month", "never played") that keep themselves current. Done: a smart playlist's `smart` rule (minimum rating, added within so many days, played or never played, artist, genre, order, at most how many) becomes a `Track` query that Music follows live, so rating, playing or importing a track updates it at once. Queries can filter on `$created` and `$updated` for "added this month". Five smart playlists are built into Music rather than stored. A time window counts back from when its page opened.
 
 The player app:
 
 - [ ] Browse by artist, album, genre and year, with cover art; full-text search over titles, artists and albums. Done (`apps/music`): albums as a grid of covers, an album's tracks, artists, every song, and a search (each word, without case or accents) over titles, artists and albums. Albums group by album artist, or else by the folder the files came from, so a soundtrack stays one album by "Various artists". Lists are virtual, so a library of thousands costs only the rows on screen. Left: genre and year, and covers in JPEG (the compositor's image widget decodes only PNG; an album without a picture shows its initials on a colour of its own).
 - [ ] Now playing: large cover art, progress, and the queue beside it. Done: a bar along the bottom (cover, title, previous, play and pause, next, a position slider that seeks once a drag rests, shuffle, repeat, volume) and an Up Next view of audiod's queue (jump to, remove, clear). Each track has Play next and Add to Up Next. Left: a large now-playing view.
-- [ ] Playlists: make, edit and reorder them (drag and drop).
+- [ ] Playlists: make, edit and reorder them (drag and drop). Done without the dragging: make one (or a smart one, with its rules in a dialog), add songs from a song's ⋯ menu or a whole album, move a song up or down or remove it from its ⋯ menu, rename, and delete with Undo. Left: reordering by drag and drop, which needs drag events the toolkit doesn't send apps yet.
 
 Later:
 

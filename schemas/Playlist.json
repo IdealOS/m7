@@ -2,12 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "idealos:schema/Playlist",
   "title": "Playlist",
-  "description": "An ordered list of Tracks.",
+  "description": "An ordered list of Tracks, or with smart, a rule the Music app finds them by.",
   "type": "object",
   "required": ["name"],
   "properties": {
     "name": { "type": "string", "minLength": 1 },
-    "tracks": { "type": "array", "items": { "x-kind": "link" } }
+    "tracks": { "type": "array", "items": { "x-kind": "link" } },
+    "smart": {
+      "type": "object",
+      "description": "Which tracks a smart playlist holds; all the rules given must hold.",
+      "properties": {
+        "minRating": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "addedWithinDays": { "type": "integer", "minimum": 1 },
+        "played": { "enum": ["never", "ever"] },
+        "artist": { "type": "string" },
+        "genre": { "type": "string" },
+        "order": { "enum": ["added", "played", "plays", "rating", "title"] },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    }
   },
   "x-indexes": ["name"]
 }

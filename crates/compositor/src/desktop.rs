@@ -216,6 +216,9 @@ const CORNER: f32 = 16.0;
 /// How far the pointer must move, holding the button that opened a list, before
 /// letting go chooses the item under it.
 const DRAG_TO_CHOOSE: f32 = 4.0;
+/// A menu's text size, and the space either side of its options.
+const MENU_TEXT: f32 = 14.0;
+const MENU_PAD: f32 = 12.0;
 
 /// What the pointer is over, for hover states and the cursor.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1775,7 +1778,16 @@ impl Desktop {
         if labels.is_empty() {
             return;
         }
-        let rect = Rect { h: labels.len() as f32 * ROW + 8.0, ..at };
+        // As wide as its longest option, and moved left if that would leave the screen.
+        let font = crate::draw::text_font(
+            &self.scene.style(ROOT),
+            &Props::from_iter([("size".to_owned(), json!(MENU_TEXT))]),
+        );
+        let longest = labels.iter().map(|l| self.layout.text_width(l, &font)).fold(0.0, f32::max);
+        let w = at.w.max(longest + 2.0 * MENU_PAD);
+        let screen = self.seat.bounds().0;
+        let x = if at.x + w > screen { (screen - w).max(0.0) } else { at.x };
+        let rect = Rect { x, w, h: labels.len() as f32 * ROW + 8.0, ..at };
         self.menu = Some(Menu { labels, values, highlight, rect, purpose });
         self.draw_menu();
         self.fade_in(MENU);
@@ -1805,7 +1817,7 @@ impl Desktop {
         ];
         for (i, label) in labels.iter().enumerate() {
             let id = MENU + 10 + i as NodeId;
-            ops.push(create(id, NodeKind::Text, json!({"x": 12, "y": 4.0 + i as f32 * ROW + 5.0, "w": rect.w - 24.0, "h": 18, "text": label, "size": 14, "color": "$text"})));
+            ops.push(create(id, NodeKind::Text, json!({"x": MENU_PAD, "y": 4.0 + i as f32 * ROW + 5.0, "w": rect.w - 2.0 * MENU_PAD, "h": 18, "text": label, "size": MENU_TEXT, "color": "$text"})));
             ops.push(insert(MENU, id));
         }
         self.scene.apply_all(ops);
@@ -2975,6 +2987,36 @@ mod tests {
         assert_eq!(events(&key(&mut d, Key::Enter)), [(3, "choose".into(), json!("Close"))]);
     }
 
+    #[test]
+    fn menus_are_as_wide_as_their_longest_option() {
+        let mut d = desk();
+        let long = "Remove from this playlist, which has a long name";
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"padding": 12}},
+                {"op": "create", "id": 3, "type": "menu", "props": {"label": "⋯", "w": 40, "options": ["Play", long]}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0}
+            ]),
+        );
+        let m = global(&d, w, 3);
+        let at = center(&mut d, m);
+        click(&mut d, at);
+        let menu = d.menu.as_ref().expect("open").rect;
+        let list = d.draw_list();
+        let text =
+            list.layers.iter().flat_map(|l| &l.texts).find(|t| t.node > MENU && t.text == long).unwrap();
+        let font = crate::draw::text_font(
+            &d.scene.style(ROOT),
+            &Props::from_iter([("size".to_owned(), json!(MENU_TEXT))]),
+        );
+        let needed = d.layout.text_width(long, &font);
+        assert!(menu.w > 140.0 && text.rect.w >= needed, "{} wide for {needed}", text.rect.w);
+        assert!(menu.x >= 0.0 && menu.x + menu.w <= d.seat.bounds().0, "on screen");
+    }
+
     /// A long text area placed by its props (outside a layout container): a click
     /// puts the caret where it lands without scrolling, and Up and Down move by
     /// rows wrapped as they're drawn.
@@ -3286,6 +3328,41 @@ mod tests {
         let at = center(&mut d, ok);
         assert_eq!(events(&click(&mut d, at)), [(5, "click".into(), Value::Null)]);
         assert_eq!(events(&key(&mut d, Key::Escape)), [(4, "cancel".into(), Value::Null)]);
+    }
+
+    /// A dialog deep in the window's layout, as an app builds one beside its
+    /// content: its selects and text fields still take presses.
+    #[test]
+    fn widgets_in_a_nested_dialog_take_presses() {
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"grow": 1}},
+                {"op": "create", "id": 3, "type": "label", "props": {"text": "Content", "grow": 1}},
+                {"op": "create", "id": 4, "type": "dialog", "props": {"w": 300}},
+                {"op": "create", "id": 5, "type": "vstack", "props": {}},
+                {"op": "create", "id": 6, "type": "hstack", "props": {}},
+                {"op": "create", "id": 7, "type": "select", "props": {"options": ["A", "B"], "value": "A"}},
+                {"op": "create", "id": 8, "type": "text_field", "props": {}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0},
+                {"op": "insert", "parent": 2, "child": 4, "index": 1},
+                {"op": "insert", "parent": 4, "child": 5, "index": 0},
+                {"op": "insert", "parent": 5, "child": 6, "index": 0},
+                {"op": "insert", "parent": 6, "child": 7, "index": 0},
+                {"op": "insert", "parent": 5, "child": 8, "index": 1}
+            ]),
+        );
+        let field = global(&d, w, 8);
+        let at = center(&mut d, field);
+        click(&mut d, at);
+        assert_eq!(d.focus, Some(field), "the text field takes the focus");
+        let select = global(&d, w, 7);
+        let at = center(&mut d, select);
+        click(&mut d, at);
+        assert!(d.menu.is_some(), "the select opens");
     }
 
     #[test]

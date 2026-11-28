@@ -515,6 +515,11 @@ pub fn text_size(
 /// Where text sits, for carets, selections and clicks: shaped with the layout
 /// fonts and the renderer's metrics, so it lines up with what's drawn.
 impl Layout {
+    /// How wide `text` is on one line in `font`.
+    pub fn text_width(&mut self, text: &str, font: &Font) -> f32 {
+        text_size(&mut self.fonts, &mut self.measured, text, font, None).0
+    }
+
     /// A terminal cell's width and height in `font` (a monospace one): its
     /// advance, and the renderer's line height.
     pub fn cell(&mut self, font: &Font) -> (f32, f32) {

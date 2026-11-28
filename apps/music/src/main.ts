@@ -1,13 +1,15 @@
 // Music: the library of Track documents, and playback through audiod.
 //
 // On the left, a search and the ways in: albums, artists, songs, and what's up
-// next. Opening an album shows its tracks; playing one plays the album from
-// there. audiod owns the queue, so music keeps playing when this window closes,
+// next, then playlists: smart ones built in, and the listener's own. Opening an
+// album shows its tracks; playing one plays the album from there. audiod owns the queue, so music keeps playing when this window closes,
 // and the bar along the bottom follows it whoever changes it (the top bar,
 // `osctl audio`, another window).
 
 import style from "./style.css";
-import { batch, button, db, each, effect, hstack, label, memo, openWindow, signal, split, textField, vstack } from "@idealos/sdk";
+import { batch, button, db, each, effect, hstack, label, memo, onCleanup, openWindow, scroll, signal, split, textField, vstack } from "@idealos/sdk";
+import { collection } from "./collection.ts";
+import { playlistDialog, type Draft } from "./dialog.ts";
 import {
   albumMatches,
   albumsOf,
@@ -21,12 +23,17 @@ import {
   type Artist,
 } from "./library.ts";
 import { player } from "./player.ts";
-import { albumGrid, albumPage, artistList, GAP, nowPlaying, songList, TILE, upNext } from "./views.ts";
+import { BUILT_IN, describe, entriesOf, freshName, smartQuery, type Playlist, type Rule } from "./playlists.ts";
+import { albumGrid, albumPage, artistList, GAP, nowPlaying, playlistPage, smartPage, songList, TILE, upNext } from "./views.ts";
 
 type Section = "albums" | "artists" | "songs" | "queue";
 
 /** Where the main area is: a section, or something opened from one. */
-type Route = { kind: Section } | { kind: "album"; key: string } | { kind: "artist"; name: string };
+type Route =
+  | { kind: Section }
+  | { kind: "album"; key: string }
+  | { kind: "artist"; name: string }
+  | { kind: "playlist"; id: string };
 
 const SECTIONS: [Section, string][] = [
   ["albums", "Albums"],
@@ -42,12 +49,15 @@ const [ratio, setRatio] = signal(0.2);
 const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style }, () => {
   const docs = db.live({ type: TYPE, limit: 10_000 });
   const p = player();
+  const c = collection();
+  const [draft, setDraft] = signal<Draft | null>(null);
   const [routes, setRoutes] = signal<Route[]>([{ kind: "albums" }]);
   const [search, setSearch] = signal("");
 
   const route = () => routes()[routes().length - 1];
-  const section = (): Section => {
+  const section = (): Section | null => {
     const first = routes()[0];
+    if (first.kind === "playlist") return null;
     return first.kind === "album" || first.kind === "artist" ? "albums" : first.kind;
   };
   const go = (s: Section) => setRoutes([{ kind: s }]);
@@ -71,6 +81,51 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
   const albumAt = (key: string) => albums().find((a) => a.key === key);
   const byTrack = memo(() => new Map(albums().flatMap((a) => a.tracks.map((t) => [t.id, a] as const))));
   const artistAt = (name: string) => artists().find((a) => a.name === name);
+  const trackById = memo(() => new Map(tracks().map((t) => [t.id, t] as const)));
+  const genres = memo(() => [...new Set(tracks().map((t) => t.genre).filter((g) => g !== undefined))]);
+
+  const allPlaylists = memo(() => [...BUILT_IN, ...c.playlists()]);
+  const playlistAt = (id: string) => allPlaylists().find((pl) => pl.id === id);
+  const openPlaylist = (id: string) => setRoutes([{ kind: "playlist", id }]);
+  const newPlaylist = (smart: boolean) =>
+    setDraft({
+      smart,
+      name: freshName(smart ? "New smart playlist" : "New playlist", c.playlists().map((pl) => pl.name)),
+      rule: smart ? { order: "added" } : {},
+      artist: "",
+      genre: "",
+    });
+  const editPlaylist = (pl: Playlist) =>
+    setDraft({ id: pl.id, smart: pl.smart !== undefined, name: pl.name, rule: pl.smart ?? {}, artist: pl.smart?.artist ?? "", genre: pl.smart?.genre ?? "" });
+  const saveDraft = (d: Draft) => {
+    setDraft(null);
+    const pl = d.id ? c.playlists().find((x) => x.id === d.id) : undefined;
+    if (pl) {
+      if (pl.name !== d.name) c.rename(pl, d.name);
+      if (d.smart) c.setRule(pl, d.rule);
+      return;
+    }
+    void c.create(d.name, d.smart ? { smart: d.rule } : { tracks: [] }).then((id) => id && setOpening(id));
+  };
+  // A new playlist opens once the live query has it, so its page has something to show.
+  const [opening, setOpening] = signal<string | null>(null);
+  effect(() => {
+    const id = opening();
+    if (id && playlistAt(id))
+      batch(() => {
+        setOpening(null);
+        openPlaylist(id);
+      });
+  });
+  const deletePlaylist = (pl: Playlist) => {
+    c.remove(pl);
+    go("albums");
+  };
+  // A playlist that went away (deleted in another window, say) leaves its page.
+  effect(() => {
+    const r = route();
+    if (r.kind === "playlist" && c.ready() && !playlistAt(r.id)) batch(() => go("albums"));
+  });
 
   // Searching shows songs from an album or artist page, where it would filter nothing.
   effect(() => {
@@ -103,7 +158,30 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
         onClick: () => go(s),
       }),
     ),
-    label({ text: "", grow: 1 }),
+    label({ text: "Playlists", size: 12, color: "$muted", weight: "bold" }),
+    scroll(
+      { grow: 1, gap: 2 },
+      each(
+        allPlaylists,
+        (pl) => pl.id,
+        (pl) =>
+          button({
+            label: () => `${pl().smart ? "◇ " : ""}${pl().name}`,
+            w: "fill",
+            class: () => {
+              const r = route();
+              return r.kind === "playlist" && r.id === pl().id ? "primary" : "flat";
+            },
+            onClick: () => openPlaylist(pl().id),
+          }),
+        { gap: 2 },
+      ),
+    ),
+    hstack(
+      { gap: 6 },
+      button({ label: "New playlist", grow: 1, onClick: () => newPlaylist(false) }),
+      button({ label: "Smart", onClick: () => newPlaylist(true) }),
+    ),
     label({ text: counts, size: 12, color: "$muted" }),
   );
 
@@ -119,6 +197,7 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
       case "queue":
         return "Up Next";
       case "album":
+      case "playlist":
         return "";
       case "artist":
         return r.name;
@@ -146,6 +225,11 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
   // Rebuilt when the route (or, for grids, the number of columns) changes.
   const viewKey = () => {
     const r = route();
+    if (r.kind === "playlist") {
+      // A smart playlist's page queries afresh when its rule changes.
+      const rule = playlistAt(r.id)?.smart;
+      return `playlist:${r.id}${rule ? JSON.stringify(rule) : ""}`;
+    }
     const key = r.kind === "album" ? `album:${r.key}` : r.kind === "artist" ? `artist:${r.name}` : r.kind;
     return r.kind === "albums" || r.kind === "artist" ? `${key}@${cols()}` : key;
   };
@@ -153,12 +237,21 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
   const main = vstack(
     { grow: 1 },
     hstack(
-      { gap: 10, align: "center", padding: [10, 16] },
+      { gap: 10, align: "center", padding: [10, 16], hidden: () => route().kind === "playlist" },
       button({ label: "Back", hidden: () => routes().length < 2, onClick: back }),
       label({ text: heading, size: 20, weight: "bold", grow: 1 }),
       button({ label: "Clear", hidden: () => route().kind !== "queue" || (p.status()?.queue.length ?? 0) === 0, onClick: p.clear }),
     ),
-    label({ text: () => p.problem() || p.status()?.error || "", class: "err", hidden: () => !(p.problem() || p.status()?.error) }),
+    label({
+      text: () => p.problem() || p.status()?.error || c.problem(),
+      class: "err",
+      hidden: () => !(p.problem() || p.status()?.error || c.problem()),
+    }),
+    hstack(
+      { gap: 10, align: "center", padding: [0, 16], hidden: () => c.deleted() === null },
+      label({ text: () => `Deleted “${c.deleted()?.name ?? ""}”.` }),
+      button({ label: "Undo", onClick: c.restore }),
+    ),
     label({ text: emptiness, color: "$muted", hidden: () => emptiness() === "" }),
     each(
       () => [viewKey()],
@@ -169,22 +262,54 @@ const win = await openWindow({ title: "Music", width: WIDTH, height: 740, style 
           case "albums":
             return albumGrid(shownAlbums, cols(), openAlbum);
           case "album":
-            return albumPage(p, () => albumAt(r.key));
+            return albumPage(p, c, () => albumAt(r.key));
           case "artists":
             return artistList(shownArtists, openArtist);
           case "artist":
             return albumGrid(() => artistAt(r.name)?.albums ?? [], cols(), openAlbum);
           case "songs":
-            return songList(p, songs);
+            return songList(p, c, songs);
           case "queue":
             return upNext(p);
+          case "playlist":
+            return playlistView(r.id);
         }
       },
       { grow: 1 },
     ),
   );
 
-  return vstack({ grow: 1 }, split({ ratio, grow: 1, onChange: setRatio }, sidebar, main), nowPlaying(p, (id) => byTrack().get(id), openAlbum));
+  return vstack(
+    { grow: 1 },
+    split({ ratio, grow: 1, onChange: setRatio }, sidebar, main),
+    nowPlaying(p, c, (id) => trackById().get(id), (id) => byTrack().get(id), openAlbum),
+    playlistDialog({ draft, setDraft, artists: () => artists().map((a) => a.name), genres, save: saveDraft }),
+  );
+
+  /** A playlist's page: its own tracks, or what a smart playlist's rule finds. */
+  function playlistView(id: string) {
+    const list = () => playlistAt(id);
+    const edit = () => {
+      const pl = list();
+      if (pl) editPlaylist(pl);
+    };
+    const remove = () => {
+      const pl = list();
+      if (pl) deletePlaylist(pl);
+    };
+    const rule: Rule | undefined = list()?.smart;
+    if (rule === undefined) {
+      return playlistPage(p, c, list, () => entriesOf(list() ?? { id, name: "", tracks: [] }, trackById()), edit, remove);
+    }
+    // As of now: "added in the last 30 days" counts back from when the page opened.
+    const found = db.live(smartQuery(rule, Date.now()));
+    onCleanup(() => found.close());
+    const shown = memo(() => {
+      const ts = tracksOf(found());
+      return rule.order === "title" ? songsOf(ts) : ts;
+    });
+    return smartPage(p, c, list, shown, () => describe(rule), found.ready, edit, remove);
+  }
 });
 
 effect(() => setWidth(win.size().width));

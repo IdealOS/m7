@@ -602,11 +602,21 @@ impl Scene {
         self.content.get(&id).copied()
     }
 
-    /// Root child `root` and its visible descendants in paint order, with each one's
-    /// rectangle on screen and its clip (from the last layout).
+    /// `root` and its visible descendants in paint order, with each one's rectangle
+    /// on screen and its clip (from the last layout). `root` may be any node, a
+    /// window's dialog say: the walk starts from its root child, so it's placed
+    /// where it's drawn.
     pub fn paint_order(&self, root: NodeId) -> Vec<(NodeId, Rect, Rect)> {
+        let mut top = root;
+        while let Some(p) = self.parent(top).filter(|&p| p != ROOT) {
+            top = p;
+        }
         let mut out = Vec::new();
-        self.walk(root, SCREEN, None, Rect::INFINITE, &mut |id, _, rect, clip| out.push((id, rect, clip)));
+        self.walk(top, SCREEN, None, Rect::INFINITE, &mut |id, _, rect, clip| {
+            if top == root || self.is_within(id, root) {
+                out.push((id, rect, clip));
+            }
+        });
         out
     }
 

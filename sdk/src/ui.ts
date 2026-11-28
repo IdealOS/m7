@@ -455,6 +455,12 @@ export function virtualList(props: VirtualListProps, render: (index: number) => 
       }
     },
   });
+  // Rows are roots of their own, so they go with the list: their effects would
+  // otherwise go on updating nodes destroyed along with it.
+  onCleanup(() => {
+    for (const row of rows.values()) row.dispose();
+    rows.clear();
+  });
   return list;
 }
 

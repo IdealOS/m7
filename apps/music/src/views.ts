@@ -20,14 +20,47 @@ import {
   type UiNode,
 } from "@idealos/sdk";
 import { clock, totals } from "./clock.ts";
+import type { Collection } from "./collection.ts";
 import { coverColor, initials, queueFrom, type Album, type Artist, type Track } from "./library.ts";
 import type { Player } from "./player.ts";
+import { RATING_OPTIONS, ratingFrom, stars, type Playlist } from "./playlists.ts";
 
 export const TILE = 150;
 export const GAP = 18;
 const ROW = 34;
 const PLAY_NEXT = "Play next";
 const ADD = "Add to Up Next";
+/** An action in a track's ⋯ menu: what it says, and what it does. */
+type RowAction = [string, () => void];
+const MOVE_UP = "Move up";
+const MOVE_DOWN = "Move down";
+const REMOVE = "Remove from playlist";
+const addTo = (name: string) => `Add to “${name}”`;
+
+/** The playlists tracks can be added to: the listener's, not smart ones. */
+const addable = (c: Collection) => c.playlists().filter((pl) => !pl.smart);
+
+/** Add `ids` to the playlist whose "Add to" option `option` is. Whether it was one. */
+function addToChosen(c: Collection, option: string, ids: string[]): boolean {
+  const pl = addable(c).find((x) => addTo(x.name) === option);
+  if (pl) c.add(pl, ids);
+  return pl !== undefined;
+}
+
+/** A track's rating, as stars that open a menu to change it. */
+export function ratingMenu(c: Collection, t: () => Track | undefined): UiNode {
+  return menu({
+    label: () => stars(t()?.rating),
+    class: "flat stars",
+    w: 120,
+    hidden: () => t() === undefined,
+    options: RATING_OPTIONS,
+    onChoose: (o) => {
+      const id = t()?.id;
+      if (id) c.rate(id, ratingFrom(o));
+    },
+  });
+}
 
 /** Whether `id` is the track playing (or paused) now. */
 function isCurrent(p: Player, id: string | undefined): boolean {
@@ -93,10 +126,17 @@ export function albumGrid(albums: () => Album[], cols: number, open: (a: Album) 
 /** A track in a list: playing it plays `ids` from `index`. */
 function trackRow(
   p: Player,
+  c: Collection,
   t: () => Track | undefined,
   index: () => number,
   ids: () => string[],
-  opts: { number?: boolean; artist?: (t: Track) => string | undefined; album?: boolean },
+  opts: {
+    number?: boolean;
+    artist?: (t: Track) => string | undefined;
+    album?: boolean;
+    /** More of the ⋯ menu's actions, for this row. */
+    actions?: () => RowAction[];
+  },
 ): UiNode {
   const current = () => isCurrent(p, t()?.id);
   const play = () => {
@@ -113,15 +153,19 @@ function trackRow(
     button({ label: () => t()?.title ?? "", class: () => (current() ? "flat current" : "flat"), onClick: play }),
     label({ text: "", grow: 1 }),
     // Fixed widths, so artists and albums line up in columns.
-    label({ text: () => (opts.artist && t() ? (opts.artist(t()!) ?? "") : ""), color: "$muted", size: 13, w: 200 }),
-    label({ text: () => (opts.album ? (t()?.album ?? "") : ""), color: "$muted", size: 13, w: 220, hidden: !opts.album }),
+    label({ text: () => (opts.artist && t() ? (opts.artist(t()!) ?? "") : ""), color: "$muted", size: 13, w: 170 }),
+    label({ text: () => (opts.album ? (t()?.album ?? "") : ""), color: "$muted", size: 13, w: 180, hidden: !opts.album }),
+    ratingMenu(c, t),
     menu({
       label: "⋯",
       w: 56,
-      options: [PLAY_NEXT, ADD],
+      options: () => [...(opts.actions?.() ?? []).map(([name]) => name), PLAY_NEXT, ADD, ...addable(c).map((pl) => addTo(pl.name))],
       onChoose: (o) => {
         const id = t()?.id;
-        if (id) p.enqueue([id], o === PLAY_NEXT);
+        const action = opts.actions?.().find(([name]) => name === o);
+        if (action) return action[1]();
+        if (!id || addToChosen(c, o, [id])) return;
+        p.enqueue([id], o === PLAY_NEXT);
       },
     }),
     label({ text: () => clock(t()?.duration), w: 48, color: "$muted", size: 13 }),
@@ -129,7 +173,7 @@ function trackRow(
 }
 
 /** An album: its cover, what it is, and its tracks. */
-export function albumPage(p: Player, album: () => Album | undefined): UiNode {
+export function albumPage(p: Player, c: Collection, album: () => Album | undefined): UiNode {
   const ids = () => album()?.tracks.map((t) => t.id) ?? [];
   const shuffle = () => {
     const n = ids().length;
@@ -160,11 +204,17 @@ export function albumPage(p: Player, album: () => Album | undefined): UiNode {
           button({ label: "Play", class: "primary", onClick: () => p.play(ids(), 0) }),
           button({ label: "Shuffle", onClick: shuffle }),
           button({ label: "Play next", onClick: () => p.enqueue(ids(), true) }),
+          menu({
+            label: "Add to playlist",
+            hidden: () => addable(c).length === 0,
+            options: () => addable(c).map((pl) => addTo(pl.name)),
+            onChoose: (o) => void addToChosen(c, o, ids()),
+          }),
         ),
       ),
     ),
     virtualList({ count: () => album()?.tracks.length ?? 0, rowHeight: ROW, grow: 1 }, (i) =>
-      trackRow(p, () => album()?.tracks[i], () => i, ids, {
+      trackRow(p, c, () => album()?.tracks[i], () => i, ids, {
         number: true,
         // A track's artist only when it isn't the album's.
         artist: (t) => (t.artist && t.artist !== album()?.artist ? t.artist : undefined),
@@ -174,10 +224,108 @@ export function albumPage(p: Player, album: () => Album | undefined): UiNode {
 }
 
 /** Every song, as a list made as it scrolls into view. */
-export function songList(p: Player, songs: () => Track[]): UiNode {
+export function songList(p: Player, c: Collection, songs: () => Track[]): UiNode {
   const ids = () => songs().map((t) => t.id);
   return virtualList({ count: () => songs().length, rowHeight: ROW, grow: 1 }, (i) =>
-    trackRow(p, () => songs()[i], () => i, ids, { artist: (t) => t.artist, album: true }),
+    trackRow(p, c, () => songs()[i], () => i, ids, { artist: (t) => t.artist, album: true }),
+  );
+}
+
+/** A playlist's heading: its name, what it holds, and what can be done with it. */
+function playlistHeading(
+  p: Player,
+  list: () => Playlist | undefined,
+  ids: () => string[],
+  about: () => string,
+  edit: () => void,
+  remove: () => void,
+): UiNode {
+  const shuffle = () => {
+    const n = ids().length;
+    if (n === 0) return;
+    p.setShuffle(true);
+    p.play(ids(), Math.floor(Math.random() * n));
+  };
+  const play = () => {
+    const q = queueFrom(ids(), 0, MAX_QUEUE);
+    p.play(q.tracks, q.start);
+  };
+  const fixed = () => list()?.builtIn === true;
+  return vstack(
+    { gap: 6, padding: [14, 16, 4, 16] },
+    label({ text: () => list()?.name ?? "", class: "album-title" }),
+    label({ text: about, color: "$muted", size: 13 }),
+    hstack(
+      { gap: 8, padding: [6, 0, 0, 0] },
+      button({ label: "Play", class: "primary", onClick: play }),
+      button({ label: "Shuffle", onClick: shuffle }),
+      label({ text: "", grow: 1 }),
+      button({ label: () => (list()?.smart ? "Edit rules" : "Rename"), hidden: fixed, onClick: edit }),
+      button({ label: "Delete", hidden: fixed, onClick: remove }),
+    ),
+  );
+}
+
+/** Songs, with a total time: "12 songs, 48 min". */
+const songCount = (tracks: Track[]) => totals(tracks.map((t) => t.duration));
+
+/** A playlist the listener made: its tracks in their order, to play, reorder and remove. */
+export function playlistPage(
+  p: Player,
+  c: Collection,
+  list: () => Playlist | undefined,
+  entries: () => { at: number; track: Track }[],
+  edit: () => void,
+  remove: () => void,
+): UiNode {
+  const ids = () => entries().map((e) => e.track.id);
+  const about = () => (entries().length === 0 ? "No songs yet. Add them from a song's ⋯ menu." : songCount(entries().map((e) => e.track)));
+  return vstack(
+    { grow: 1, gap: 12 },
+    playlistHeading(p, list, ids, about, edit, remove),
+    virtualList({ count: () => entries().length, rowHeight: ROW, grow: 1 }, (i) => {
+      const entry = () => entries()[i];
+      const change = (fn: (pl: Playlist, at: number) => void) => () => {
+        const pl = list();
+        const e = entry();
+        if (pl && e) fn(pl, e.at);
+      };
+      // Moves past tracks no longer in the library, so a move is always visible.
+      const neighbour = (d: number) => entries()[i + d]?.at;
+      return trackRow(p, c, () => entry()?.track, () => i, ids, {
+        artist: (t) => t.artist,
+        album: true,
+        actions: () => {
+          const actions: RowAction[] = [];
+          if (i > 0) actions.push([MOVE_UP, change((pl, at) => c.move(pl, at, neighbour(-1) ?? at))]);
+          if (i < entries().length - 1) actions.push([MOVE_DOWN, change((pl, at) => c.move(pl, at, neighbour(1) ?? at))]);
+          actions.push([REMOVE, change((pl, at) => c.removeAt(pl, at))]);
+          return actions;
+        },
+      });
+    }),
+  );
+}
+
+/** A smart playlist: what its rule finds, kept current by a live query. */
+export function smartPage(
+  p: Player,
+  c: Collection,
+  list: () => Playlist | undefined,
+  tracks: () => Track[],
+  rule: () => string,
+  ready: () => boolean,
+  edit: () => void,
+  remove: () => void,
+): UiNode {
+  const ids = () => tracks().map((t) => t.id);
+  const about = () => [rule(), ready() ? (tracks().length === 0 ? "nothing matches yet" : songCount(tracks())) : ""].filter(Boolean).join(" — ");
+  return vstack(
+    { grow: 1, gap: 12 },
+    playlistHeading(p, list, ids, about, edit, remove),
+    virtualList({ count: () => tracks().length, rowHeight: ROW, grow: 1 }, (i) =>
+      trackRow(p, c, () => tracks()[i], () => i, ids, { artist: (t) => t.artist, album: true }),
+    ),
   );
 }
 
@@ -227,7 +375,13 @@ const REPEATS: [Repeat, string][] = [
 
 /** The bar along the bottom: what's playing, where it is, and the controls.
  * `albumOf` finds a track's album in the library, to show and open. */
-export function nowPlaying(p: Player, albumOf: (id: string) => Album | undefined, open: (a: Album) => void): UiNode {
+export function nowPlaying(
+  p: Player,
+  c: Collection,
+  trackOf: (id: string) => Track | undefined,
+  albumOf: (id: string) => Album | undefined,
+  open: (a: Album) => void,
+): UiNode {
   const item = () => {
     const s = p.status();
     return s?.current !== undefined && s?.current !== null ? s.queue[s.current] : undefined;
@@ -252,6 +406,10 @@ export function nowPlaying(p: Player, albumOf: (id: string) => Album | undefined
         color: "$muted",
         size: 12,
         max_w: 230,
+      }),
+      ratingMenu(c, () => {
+        const it = item();
+        return it ? trackOf(it.id) : undefined;
       }),
     ),
     vstack(

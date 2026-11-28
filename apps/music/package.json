@@ -7,7 +7,11 @@
     "id": "org.idealos.music",
     "name": "Music",
     "autostart": false,
-    "permissions": [{ "type": "Track", "access": ["read"] }, { "capability": "service:audio" }]
+    "permissions": [
+      { "type": "Track", "access": ["read", "write"] },
+      { "type": "Playlist", "access": ["read", "write", "create"] },
+      { "capability": "service:audio" }
+    ]
   },
   "scripts": {
     "build": "node ../../tools/build-app.ts .",

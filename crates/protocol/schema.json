@@ -2188,7 +2188,7 @@
         },
         "where": {
           "additionalProperties": true,
-          "description": "Field paths mapped to a value to equal or an object of operators (`$eq`,\n`$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),\nplus `$and`, `$or` and `$not`, and on the whole document `$id`,\n`$createdBy`, `$linksTo` and `$linkedFrom`. Empty matches every document\nof the type.",
+          "description": "Field paths mapped to a value to equal or an object of operators (`$eq`,\n`$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains`),\nplus `$and`, `$or` and `$not`, and on the whole document `$id`,\n`$createdBy`, `$created`, `$updated`, `$linksTo` and `$linkedFrom`.\nEmpty matches every document of the type.",
           "type": "object"
         }
       },

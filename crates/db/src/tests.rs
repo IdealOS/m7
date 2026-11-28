@@ -82,6 +82,36 @@ fn queries_can_order_by_when_documents_changed_and_were_made() {
 }
 
 #[test]
+fn queries_can_filter_by_when_documents_changed_and_were_made() {
+    let mut s = Store::open_in_memory().unwrap();
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
+    let a = s.create("Note", &obj(json!({"n": 1})), "t").unwrap();
+    pause();
+    let b = s.create("Note", &obj(json!({"n": 2})), "t").unwrap();
+    pause();
+    s.update(&a.id, &obj(json!({"n": 3})), "t").unwrap();
+    let a = s.get(&a.id).unwrap();
+    let q = |filter| ids(&s.query(&query("Note", filter)).unwrap());
+    assert_eq!(q(json!({"$created": {"$gte": b.created}})), std::slice::from_ref(&b.id), "made since b");
+    assert_eq!(q(json!({"$created": {"$lt": b.created}})), std::slice::from_ref(&a.id));
+    assert_eq!(
+        q(json!({"$updated": {"$gt": b.updated}})),
+        std::slice::from_ref(&a.id),
+        "changed since b was made"
+    );
+    assert_eq!(q(json!({"$created": {"$gte": a.created, "$lte": b.created}})).len(), 2, "a range");
+    assert_eq!(q(json!({"$or": [{"$created": {"$gt": b.created}}, {"n": 2}]})), std::slice::from_ref(&b.id));
+    for bad in [
+        json!({"$created": 5}),
+        json!({"$created": {}}),
+        json!({"$created": {"$eq": 5}}),
+        json!({"$updated": {"$gt": "now"}}),
+    ] {
+        assert!(s.query(&query("Note", bad.clone())).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn ids_sort_by_creation_and_bad_input_is_refused() {
     let mut s = Store::open_in_memory().unwrap();
     let a = s.create("Note", &Map::new(), "test").unwrap();

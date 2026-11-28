@@ -77,7 +77,8 @@ the snapshot methods need the `storage` capability.
 `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$exists`, `$and`, `$or`,
 `$not`, and for links `$linksTo` and `$linkedFrom`; `$createdBy` matches the app
 that made a document, and `$id` one document by its id (to follow it with
-`watch`) or a list of up to 10,000 ids. `orderBy` takes field paths, and `$updated` and `$created` for when a
+`watch`) or a list of up to 10,000 ids; `{"$created": {"$gte": t}}` and `$updated`
+compare when a document was made or last changed (milliseconds since the epoch). `orderBy` takes field paths, and `$updated` and `$created` for when a
 document last changed and when it was made.
 
 **Links and blobs** live in document data: `{"$link": "<id>"}` and `{"$blob":

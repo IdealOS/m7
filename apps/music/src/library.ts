@@ -21,6 +21,9 @@ export interface Track {
   discNumber?: number;
   year?: number;
   duration?: number;
+  genre?: string;
+  /** Stars, 1 to 5; missing when unrated. */
+  rating?: number;
   /** The cover's blob hash. */
   artwork?: string;
   /** The folder the file was imported from, which groups an album's tracks when
@@ -68,6 +71,8 @@ export function trackOf(doc: Doc): Track | null {
     discNumber: num(d.discNumber),
     year: num(d.year),
     duration: num(d.duration),
+    genre: str(d.genre),
+    rating: typeof d.rating === "number" && Number.isInteger(d.rating) && d.rating >= 1 && d.rating <= 5 ? d.rating : undefined,
     artwork: blob(d.artwork),
     folder: path?.includes("/") ? `${str(source.from) ?? ""}/${path.slice(0, path.lastIndexOf("/"))}` : undefined,
   };

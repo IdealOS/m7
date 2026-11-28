@@ -219,6 +219,8 @@ impl Compiler {
                     let who = self.bind(Sql::Text(who.clone()));
                     format!("(d.creator = {who})")
                 }
+                // When the document was made or last changed: `{"$created": {"$gte": t}}`.
+                "$created" | "$updated" => self.time(key, v)?,
                 // The document with this id, to follow one document with a live query
                 // (a bound text field does), or any of a list of ids.
                 "$id" => {
@@ -266,6 +268,33 @@ impl Compiler {
             Value::Array(_) => bad("arrays can't be compared; use $contains for membership"),
             scalar => self.equals(path, scalar),
         }
+    }
+
+    /// `$created` or `$updated` compared with times in milliseconds since the Unix
+    /// epoch, with `$gt`, `$gte`, `$lt` and `$lte`.
+    fn time(&mut self, key: &str, v: &Value) -> Result<String> {
+        let column = if key == "$created" { "d.created" } else { "d.updated" };
+        let usage =
+            || format!("{key} takes comparisons with a time in milliseconds, such as {{\"$gte\": 0}}");
+        let Value::Object(ops) = v else { return bad(usage()) };
+        if ops.is_empty() {
+            return bad(usage());
+        }
+        let mut parts = Vec::new();
+        for (op, arg) in ops {
+            self.term()?;
+            let sym = match op.as_str() {
+                "$gt" => ">",
+                "$gte" => ">=",
+                "$lt" => "<",
+                "$lte" => "<=",
+                _ => return bad(usage()),
+            };
+            let Some(t) = arg.as_i64() else { return bad(usage()) };
+            let p = self.bind(Sql::Integer(t));
+            parts.push(format!("{column} {sym} {p}"));
+        }
+        Ok(format!("({})", parts.join(" AND ")))
     }
 
     fn op(&mut self, path: &str, op: &str, arg: &Value) -> Result<String> {

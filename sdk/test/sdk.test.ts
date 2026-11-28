@@ -299,6 +299,34 @@ test("a virtual list makes rows as they come into view and drops them as they le
   assert.equal(host.commits().flat().filter((op) => op.op === "destroy").length, 6, "the first rows left");
 });
 
+test("a virtual list's rows stop following signals when the list goes", async () => {
+  const host = fresh();
+  const [shown, setShown] = signal(true);
+  const [name, setName] = signal("a");
+  const opened = openWindow({ title: "Rows" }, () =>
+    vstack(
+      {},
+      each(
+        () => (shown() ? ["list"] : []),
+        (k) => k,
+        () => virtualList({ count: 3, rowHeight: 20 }, (i) => label({ text: () => `${name()} ${i}` })),
+      ),
+    ),
+  );
+  host.streams[0].part({ kind: "opened", window: 3, width: 300, height: 200 });
+  await opened;
+  await tick();
+  const vlist = host.commits()[0].find((op) => op.op === "create" && op.type === "vlist") as { id: number };
+  host.streams[0].part({ kind: "event", node: vlist.id, event: "range", value: [0, 2] });
+  await tick();
+  setShown(false);
+  await tick();
+  host.requests.length = 0;
+  setName("b");
+  await tick();
+  assert.deepEqual(host.commits(), [], "nothing is sent for rows that are gone");
+});
+
 test("a delete gives back the change set that undoing it takes", async () => {
   const host = fresh();
   host.answer = (_to, method) => ({ change_set: method === "delete" ? 7 : 8 });
