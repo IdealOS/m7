@@ -148,7 +148,8 @@ let deployResults: Check[] = [];
 let reportResults: Check[] = [];
 let plan: InputPlan | undefined;
 
-/** Drag the top window and press Alt+Tab, then wait for the compositor to log both. */
+/** Drag the top window, press Alt+Tab and then Play/Pause, waiting for the
+ * compositor to log each. */
 async function runInput(): Promise<void> {
   const size = screenSize(log);
   if (!size) return; // evaluateInput reports it
@@ -157,6 +158,10 @@ async function runInput(): Promise<void> {
   if (!(await waitAtMost(/wm: dropped window/, 10_000))) return;
   await qmp(join(work, "qmp"), plan.keys);
   await waitAtMost(/wm: raised window/, 10_000);
+  // The compositor retries audiod every 3 s, should it have started first.
+  if (!(await waitAtMost(/media: following audiod/, 15_000))) return;
+  await qmp(join(work, "qmp"), plan.media);
+  await waitAtMost(/request failed: empty/, 10_000);
 }
 
 /** Push target/device with tools/deploy-to-pi and check the restarted session. */

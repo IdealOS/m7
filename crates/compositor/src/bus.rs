@@ -77,6 +77,7 @@ pub fn connect_with(
                 tokio::spawn(follow_grants(bus.clone(), calls_tx.clone(), wake.clone()));
                 tokio::spawn(follow_theme(bus.clone(), calls_tx.clone(), wake.clone()));
                 tokio::spawn(follow_style_sheets(bus.clone(), calls_tx.clone(), wake.clone()));
+                tokio::spawn(follow_audio(bus.clone(), calls_tx.clone(), wake.clone()));
                 let sender = bus.clone();
                 let replies = calls_tx.clone();
                 let woken = wake.clone();
@@ -385,6 +386,40 @@ async fn follow_style_sheets(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<d
                 }
                 wake();
             }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// Follow what audiod is playing, for the top bar's media control: each part of
+/// its `watch` stream goes to the frame loop, and `None` when the stream ends
+/// (audiod stopped or restarted), so the control hides until it's back. If audiod
+/// isn't there (yet, or any more), try again a little later.
+async fn follow_audio(bus: Client, calls: mpsc::Sender<Call>, wake: Arc<dyn Fn() + Send + Sync>) {
+    use protocol::audio::{self, AudioStatus};
+    let mut warned = false;
+    loop {
+        match bus.request_stream(audio::SERVICE, audio::method::WATCH, serde_json::json!({})).await {
+            Ok(mut parts) => {
+                log::info!("media: following audiod");
+                warned = false;
+                while let Some(Ok(part)) = parts.next().await {
+                    let Ok(status) = serde_json::from_value::<AudioStatus>(part) else { continue };
+                    if calls.send(Call::Audio(Some(Box::new(status)))).is_err() {
+                        return;
+                    }
+                    wake();
+                }
+                if calls.send(Call::Audio(None)).is_err() {
+                    return;
+                }
+                wake();
+            }
+            Err(e) if !warned => {
+                log::info!("media: audiod isn't there yet: {e}");
+                warned = true;
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }

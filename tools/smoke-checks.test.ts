@@ -220,6 +220,9 @@ const INPUT_LOG = [
   `${INFO} input: added QEMU Virtio Tablet (pointer)`,
   "[2026-11-21T10:00:02Z INFO  compositor::backend::kms::run] wm: dropped window 2900 at (894, 402)",
   "[2026-11-21T10:00:02Z INFO  compositor::backend::kms::run] wm: raised window 1000 from the keyboard",
+  "[2026-11-21T10:00:03Z INFO  compositor::bus] media: following audiod",
+  "[2026-11-21T10:00:04Z INFO  compositor::desktop] media: PlayPause key: toggle",
+  "[2026-11-21T10:00:04Z WARN  compositor::desktop] a compositor request failed: empty: nothing is queued",
 ].join("\n");
 
 test("the screen size comes from the compositor's mode line", () => {
@@ -239,6 +242,7 @@ test("the input plan grabs the top demo window's title bar", () => {
   // The drag ends with the button release; the keys are a separate phase.
   assert.match(JSON.stringify(plan.drag.at(-1)), /"btn".*"down":false/);
   assert.equal(JSON.stringify(plan.keys).match(/"qcode"/g)?.length, 4);
+  assert.match(JSON.stringify(plan.media), /"data":"audioplay"/);
 });
 
 test("the input plan keeps windows on a small screen", () => {
@@ -267,6 +271,8 @@ test("no input devices and no input actions are each reported", () => {
     "pointer found",
     "title-bar drag moved the window",
     "Alt+Tab raised the next window",
+    "the top bar follows audiod",
+    "the Play/Pause key reached audiod",
   ]);
 });
 
@@ -428,4 +434,11 @@ test("the recording must hold sound, not silence", () => {
   assert.equal(evaluateRecording(wav(Array(50_000).fill(3))).ok, false); // dither, not sound
   const noise = wav(Array.from({ length: 50_000 }, (_, i) => (i % 2 ? 9000 : -9000)));
   assert.deepEqual(evaluateRecording(noise), { name: "the sound card played sound", ok: true, detail: "50000 loud samples" });
+});
+
+test("a Play/Pause key audiod never answered fails", () => {
+  // Pressed before audiod was up: the bus, not audiod, says no.
+  const log = INPUT_LOG.replace("empty: nothing is queued", "no_such_service: no service named audio");
+  const failed = evaluateInput(log, inputPlan(1280, 800)).filter((c) => !c.ok);
+  assert.deepEqual(failed.map((c) => [c.name, c.detail]), [["the Play/Pause key reached audiod", "no answer from audiod logged"]]);
 });

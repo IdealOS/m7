@@ -27,6 +27,7 @@ use crate::demo::TOP_BAR;
 use crate::draw::FIELD_PAD;
 use crate::input::{Effect, Input, Key, Mods, Seat, Shortcut};
 use crate::layout::{DIVIDER, Layout};
+use crate::media;
 use crate::prompt;
 use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
@@ -91,6 +92,9 @@ pub enum Call {
         node: NodeId,
         event: Value,
     },
+    /// What audiod is playing now (a part of its `watch` stream), or `None` when
+    /// audiod went away.
+    Audio(Option<Box<protocol::audio::AudioStatus>>),
 }
 
 /// What to send over the bus.
@@ -309,6 +313,10 @@ pub struct Desktop {
     switcher_until: Option<Instant>,
     pending: HashMap<u64, Pending>,
     next_token: u64,
+    /// What audiod last said it's playing, for the media control and keys.
+    audio: Option<Box<protocol::audio::AudioStatus>>,
+    /// The volume Mute took away, for the next Mute to give back.
+    muted_from: Option<f64>,
     outbox: Vec<Out>,
     /// Decoded images by blob hash; `None` while one is loading or if it failed.
     images: HashMap<String, Cached>,
@@ -373,6 +381,8 @@ impl Desktop {
             switcher_until: None,
             pending: HashMap::new(),
             next_token: 1,
+            audio: None,
+            muted_from: None,
             outbox: Vec::new(),
             images: HashMap::new(),
             blob_ok: Default::default(),
@@ -394,6 +404,8 @@ impl Desktop {
         self.apps.set_work_area(0.0, BAR_HEIGHT, w, h - BAR_HEIGHT);
         shell::install(&mut self.scene, w, self.workspace);
         shell::set_clock(&mut self.scene, &shell::clock_text(SystemTime::now()));
+        // install puts the media control back as it started: hidden.
+        shell::set_media(&mut self.scene, media::shown(self.audio.as_deref()).as_ref());
         self.show_prompt();
     }
 
@@ -491,6 +503,12 @@ impl Desktop {
     /// Apply one input. Returns what the backend should act on, and what to send.
     pub fn input(&mut self, input: Input) -> (Effect, Vec<Out>) {
         self.relayout();
+        // Media keys go to audiod whatever else is going on, a prompt included:
+        // they answer nothing and touch no window.
+        if let Input::Media(key) = input {
+            self.media_key(key);
+            return (Effect::default(), self.drain());
+        }
         if !self.prompts.is_empty() {
             return (self.prompt_input(input), self.drain());
         }
@@ -509,6 +527,7 @@ impl Desktop {
                 effect
             }
             Input::Shortcut(_) => self.seat.handle(input, &mut self.scene, &mut self.wm),
+            Input::Media(_) => Effect::default(), // handled above
         };
         (effect, self.drain())
     }
@@ -530,6 +549,12 @@ impl Desktop {
                     );
                 }
                 shell::Action::Workspace(n) => self.switch_workspace(n),
+                shell::Action::Media(media::Action::Open) => self.open_music(),
+                shell::Action::Media(action) => {
+                    if let Some((method, params)) = media::request_for(action) {
+                        self.request(None, protocol::audio::SERVICE, method, params);
+                    }
+                }
             }
             return Effect::default();
         }
@@ -1868,6 +1893,32 @@ impl Desktop {
         log::info!("wm: workspace {}", self.workspace);
     }
 
+    /// A media key: ask audiod for what it means.
+    fn media_key(&mut self, key: crate::input::MediaKey) {
+        match media::request_for_key(key, self.audio.as_deref(), &mut self.muted_from) {
+            Some((method, params)) => {
+                log::info!("media: {key:?} key: {method}");
+                self.request(None, protocol::audio::SERVICE, method, params);
+            }
+            None => log::info!("media: {key:?} key, but audiod hasn't said what's playing"),
+        }
+    }
+
+    /// Show the Music app: its window if it has one (on its workspace, raised),
+    /// or else start it. (session's `launch` would restart a running app.)
+    fn open_music(&mut self) {
+        let Some(frame) = self.apps.frame_of_app(media::MUSIC_APP) else {
+            self.request(None, "session", "launch", json!({"app": media::MUSIC_APP}));
+            return;
+        };
+        let ws = self.prop(frame, "workspace").and_then(Value::as_u64).unwrap_or(1) as u32;
+        if ws != self.workspace {
+            self.switch_workspace(ws);
+        }
+        self.scene.raise(frame);
+        self.restack();
+    }
+
     /// Send the topmost window to workspace `n`.
     fn move_top_window(&mut self, n: u32) {
         let Some(window) = self.top_window() else { return };
@@ -2096,6 +2147,10 @@ impl Desktop {
                 }
             }
             Call::Doc { node, event } => self.doc_changed(node, event),
+            Call::Audio(status) => {
+                self.audio = status;
+                shell::set_media(&mut self.scene, media::shown(self.audio.as_deref()).as_ref());
+            }
             Call::Reply { token, result } => self.reply(token, result),
             Call::Blob { hash, app, result } => self.blob_loaded(hash, app, result),
             Call::Request { id, from, method, params, stream } => {
@@ -2544,7 +2599,10 @@ impl Desktop {
                 }
                 Effect::default()
             }
-            Input::Button { pressed: false } | Input::Scroll { .. } | Input::Shortcut(_) => Effect::default(),
+            Input::Button { pressed: false }
+            | Input::Scroll { .. }
+            | Input::Shortcut(_)
+            | Input::Media(_) => Effect::default(),
         }
     }
 
@@ -4405,6 +4463,119 @@ mod tests {
         d.input(Input::MotionTo { x: r.x + 20.0, y: r.y + 50.0 });
         assert_eq!(d.cursor_shape(), Shape::Arrow);
         assert_eq!(d.scene.style(split).border, Some(s.var("control")));
+    }
+
+    // --- The media control ---------------------------------------------------------
+
+    fn audio_status(state: &str, volume: f32) -> Call {
+        let status = json!({
+            "state": state,
+            "queue": [{"id": "t1", "title": "Shadowboxer", "artist": "Fiona Apple"}],
+            "current": 0, "position": 0.0, "at": 0, "volume": volume,
+            "shuffle": false, "repeat": "off",
+        });
+        Call::Audio(Some(Box::new(serde_json::from_value(status).unwrap())))
+    }
+
+    /// The audiod requests in `out`, as (method, params).
+    fn audio_requests(out: &[Out]) -> Vec<(String, Value)> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Request { to, method, params, .. } if to == "audio" => {
+                    Some((method.clone(), params.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn media_keys_go_to_audiod_wherever_the_focus_is() {
+        use crate::input::MediaKey;
+        let mut d = desk();
+        let window = open(&mut d, 1, widgets());
+        let field = global(&d, window, 7);
+        let at = center(&mut d, field);
+        click(&mut d, at);
+        assert_eq!(d.focus, Some(field), "a text field has the focus");
+        let out = d.input(Input::Media(MediaKey::PlayPause)).1;
+        assert_eq!(audio_requests(&out), [("toggle".to_owned(), json!({}))]);
+        assert!(events(&out).is_empty(), "the app hears nothing of it");
+        // The volume keys step from the volume audiod last reported.
+        assert!(audio_requests(&d.input(Input::Media(MediaKey::VolumeUp)).1).is_empty(), "no status yet");
+        d.call(audio_status("playing", 0.5));
+        let out = d.input(Input::Media(MediaKey::VolumeUp)).1;
+        assert_eq!(audio_requests(&out), [("volume".to_owned(), json!({"volume": 0.55}))]);
+    }
+
+    #[test]
+    fn media_keys_work_while_a_prompt_asks() {
+        use crate::input::MediaKey;
+        let mut d = desk();
+        d.prompts
+            .push_back((9, serde_json::from_value(json!({"app": "x", "name": "X", "asks": ["a"]})).unwrap()));
+        let out = d.input(Input::Media(MediaKey::Next)).1;
+        assert_eq!(audio_requests(&out), [("next".to_owned(), json!({}))]);
+        assert_eq!(d.prompts.len(), 1, "the prompt is still waiting for its answer");
+    }
+
+    #[test]
+    fn the_top_bar_follows_audiod_and_controls_it() {
+        let mut d = desk();
+        let hidden = |d: &Desktop| prop(d, 22, "hidden") == json!(true);
+        assert!(hidden(&d), "nothing playing: no control");
+        d.call(audio_status("playing", 1.0));
+        assert!(!hidden(&d));
+        assert_eq!(prop(&d, 24, "text"), "Shadowboxer — Fiona Apple");
+        assert_eq!(prop(&d, 22, "label"), "‖");
+        let play = center(&mut d, 22);
+        assert_eq!(audio_requests(&click(&mut d, play)), [("toggle".to_owned(), json!({}))]);
+        let next = center(&mut d, 23);
+        assert_eq!(audio_requests(&click(&mut d, next)), [("next".to_owned(), json!({}))]);
+        d.call(audio_status("paused", 1.0));
+        assert_eq!(prop(&d, 22, "label"), "▶");
+        // A resize puts the bar back together, with what's playing still on it.
+        d.set_screen(1024.0, 768.0);
+        assert!(!hidden(&d));
+        // audiod went away: the control goes with it.
+        d.call(Call::Audio(None));
+        assert!(hidden(&d));
+        assert!(audio_requests(&click(&mut d, play)).is_empty());
+    }
+
+    #[test]
+    fn clicking_whats_playing_shows_music() {
+        let mut d = desk();
+        d.call(audio_status("playing", 1.0));
+        let title = center(&mut d, 24);
+        // Not running: session starts it.
+        let out = click(&mut d, title);
+        assert!(
+            out.iter().any(|o| matches!(o, Out::Request { to, method, params, .. }
+                if to == "session" && method == "launch" && params["app"] == media::MUSIC_APP)),
+            "{out:?}"
+        );
+        // Running on another workspace: that workspace, with its window on top.
+        let music = Some(Sender::App { app: media::MUSIC_APP.into(), conn: 4 });
+        let out = d.call(Call::Request {
+            id: 50,
+            from: music,
+            method: "open_window".into(),
+            params: json!({"title": "Music", "width": 400, "height": 300}),
+            stream: true,
+        });
+        assert!(matches!(&out[..], [Out::Part { .. }]), "{out:?}");
+        let frame = d.apps.frame_of_app(media::MUSIC_APP).unwrap();
+        d.set(frame, json!({"workspace": 3}));
+        d.switch_workspace(1);
+        open(&mut d, 1, widgets()); // another app's window above it
+        let out = click(&mut d, title);
+        assert!(
+            !out.iter().any(|o| matches!(o, Out::Request { to, .. } if to == "session")),
+            "not restarted"
+        );
+        assert_eq!(d.workspace, 3);
+        assert_eq!(d.top_window(), Some(frame));
     }
 }
 

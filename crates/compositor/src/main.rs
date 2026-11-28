@@ -31,7 +31,7 @@ use std::process::ExitCode;
 
 use compositor::backend::{Options, RenderHeight, Scanout};
 use compositor::desktop::Desktop;
-use compositor::input::{Input, Key, Mods};
+use compositor::input::{Input, Key, MediaKey, Mods};
 use compositor::{bus, demo, headless};
 
 fn main() -> ExitCode {
@@ -86,8 +86,13 @@ fn main() -> ExitCode {
             }
             "--key" => {
                 let name = value("--key");
-                let (key, mods) = key_named(&name).unwrap_or_else(|| usage(&format!("unknown key {name}")));
-                steps.push(Step::Key(key, mods))
+                if let Some(media) = media_key_named(&name) {
+                    steps.push(Step::Media(media));
+                } else {
+                    let (key, mods) =
+                        key_named(&name).unwrap_or_else(|| usage(&format!("unknown key {name}")));
+                    steps.push(Step::Key(key, mods))
+                }
             }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
@@ -124,6 +129,23 @@ enum Step {
     Key(Key, Mods),
     /// Turn the wheel under the pointer this many pixels.
     Scroll(f32),
+    /// A media key.
+    Media(MediaKey),
+}
+
+/// A media key by name: `play-pause`, `next`, `volume-up` and the like.
+fn media_key_named(name: &str) -> Option<MediaKey> {
+    Some(match name {
+        "play-pause" => MediaKey::PlayPause,
+        "pause" => MediaKey::Pause,
+        "stop" => MediaKey::Stop,
+        "next" => MediaKey::Next,
+        "previous" => MediaKey::Previous,
+        "volume-up" => MediaKey::VolumeUp,
+        "volume-down" => MediaKey::VolumeDown,
+        "mute" => MediaKey::Mute,
+        _ => return None,
+    })
 }
 
 /// A key by name, after any modifiers: `enter`, `cmd+z`, `alt+shift+up`. A
@@ -233,6 +255,7 @@ fn serve(desktop: &mut Desktop, secs: f64, steps: &[Step]) -> Result<(), Box<dyn
                 }
                 Step::Key(key, mods) => vec![Input::Key { key: *key, mods: *mods }],
                 Step::Scroll(dy) => vec![Input::Scroll { dx: 0.0, dy: *dy }],
+                Step::Media(key) => vec![Input::Media(*key)],
             };
             for input in inputs {
                 let (_, outs) = desktop.input(input);
@@ -250,7 +273,7 @@ fn usage(err: &str) -> ! {
         eprintln!("error: {err}\n");
     }
     eprintln!(
-        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--theme light|dark] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME]...]"
+        "usage: compositor [--backend hosted|kms] [--card /dev/dri/cardN] [--render-height auto|native|ROWS] [--scanout auto|copy|direct] [--theme light|dark] [--windows N] [--size WxH]\n                  [--continuous] [--screenshot out.png [--scale S] [--serve-for SECS] [--click LABEL | --type TEXT | --key NAME | --key play-pause|next|previous|volume-up|volume-down|mute]...]"
     );
     std::process::exit(if err.is_empty() { 0 } else { 2 })
 }

@@ -230,7 +230,9 @@ impl ApplicationHandler<Wake> for App {
                     shift: m.shift_key(),
                     logo: m.super_key(),
                 };
-                if let Some(key) = winit_key(&event.logical_key) {
+                if let Some(media) = winit_media(&event.logical_key) {
+                    self.input(Input::Media(media));
+                } else if let Some(key) = winit_key(&event.logical_key) {
                     self.input(Input::Key { key, mods });
                 }
             }
@@ -300,6 +302,23 @@ fn winit_key(key: &Key) -> Option<input::Key> {
         Key::Named(NamedKey::PageDown) => K::PageDown,
         Key::Named(NamedKey::Space) => K::Char(' '),
         Key::Character(s) => K::Char(s.chars().next()?),
+        _ => return None,
+    })
+}
+
+/// winit's media key as ours. (macOS keeps its own media keys for the system's
+/// Now Playing, so few reach a window there; on Linux they do.)
+fn winit_media(key: &Key) -> Option<input::MediaKey> {
+    use input::MediaKey as M;
+    Some(match key {
+        Key::Named(NamedKey::MediaPlayPause | NamedKey::MediaPlay) => M::PlayPause,
+        Key::Named(NamedKey::MediaPause) => M::Pause,
+        Key::Named(NamedKey::MediaStop) => M::Stop,
+        Key::Named(NamedKey::MediaTrackNext) => M::Next,
+        Key::Named(NamedKey::MediaTrackPrevious) => M::Previous,
+        Key::Named(NamedKey::AudioVolumeUp) => M::VolumeUp,
+        Key::Named(NamedKey::AudioVolumeDown) => M::VolumeDown,
+        Key::Named(NamedKey::AudioVolumeMute) => M::Mute,
         _ => return None,
     })
 }

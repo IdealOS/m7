@@ -142,6 +142,15 @@ impl Apps {
         self.windows.get(&window).map(|w| w.frame)
     }
 
+    /// The frame of a window of app `app` (its newest, if it has several).
+    pub fn frame_of_app(&self, app: &str) -> Option<NodeId> {
+        self.windows
+            .iter()
+            .filter(|(_, w)| matches!(&w.owner, Sender::App { app: a, .. } if a == app))
+            .max_by_key(|(id, _)| **id)
+            .map(|(_, w)| w.frame)
+    }
+
     /// The app that owns scene node `node` (by its window), if an app does: who the
     /// compositor acts for when it reads or writes documents for that node.
     pub fn app_of(&self, node: NodeId) -> Option<&str> {

@@ -229,7 +229,9 @@ export function evaluate(log: string): Check[] {
 //
 // QEMU's virtio tablet and keyboard are driven over QMP (input-send-event). The plan
 // drags the topmost demo window by its title bar, then presses Alt+Tab; the
-// compositor logs one "wm:" line per finished action.
+// compositor logs one "wm:" line per finished action. Then the keyboard's
+// Play/Pause key: the compositor sends it to audiod, which (with nothing queued
+// yet) answers that nothing is, and the compositor logs that answer.
 
 /** Screen size from the compositor's "kms: ... at WxH @ ..." line. */
 export function screenSize(log: string): { w: number; h: number } | undefined {
@@ -248,6 +250,9 @@ export interface InputPlan {
   drop: { id: number; x: number; y: number };
   /** The window Alt+Tab must raise. */
   raised: number;
+  /** QMP commands for the Play/Pause key. Send them once the compositor follows
+   * audiod, so audiod is there to answer. */
+  media: object[];
 }
 
 /** virtio-tablet axes run 0..32767; libinput maps them to `value * size / 32768`. */
@@ -292,7 +297,9 @@ export function inputPlan(w: number, h: number): InputPlan {
   drag.push(btn(false));
   const keys = [key("alt", true), key("tab", true), key("tab", false), key("alt", false)];
   // Alt+Tab raises the bottom-most window: the first one the demo created.
-  return { drag, keys, drop: { id, x: x + DRAG.dx, y: y + DRAG.dy }, raised: 1000 };
+  // QEMU's audioplay is evdev's KEY_PLAYPAUSE, which xkb calls XF86AudioPlay.
+  const media = [key("audioplay", true), key("audioplay", false)];
+  return { drag, keys, drop: { id, x: x + DRAG.dx, y: y + DRAG.dy }, raised: 1000, media };
 }
 
 export function evaluateInput(log: string, plan: InputPlan | undefined): Check[] {
@@ -302,6 +309,9 @@ export function evaluateInput(log: string, plan: InputPlan | undefined): Check[]
   const pointer = has("pointer");
   const dropped = /wm: dropped window (\d+) at \((-?[\d.]+), (-?[\d.]+)\)/.exec(log);
   const raised = /wm: raised window (\d+) from the keyboard/.exec(log);
+  const following = /media: following audiod/.test(log);
+  const pressed = /media: PlayPause key: toggle/.test(log);
+  const answered = /a compositor request failed: empty: nothing is queued/.test(log);
   // libinput's tablet scaling can land a pixel off.
   const near = (a: string, b: number) => Math.abs(Number(a) - b) <= 2;
   const dropOk =
@@ -327,6 +337,12 @@ export function evaluateInput(log: string, plan: InputPlan | undefined): Check[]
       name: "Alt+Tab raised the next window",
       ok: plan !== undefined && raised !== null && Number(raised[1]) === plan.raised,
       detail: raised ? `window ${raised[1]}` : "no raise logged",
+    },
+    { name: "the top bar follows audiod", ok: following, detail: following ? "yes" : "not logged" },
+    {
+      name: "the Play/Pause key reached audiod",
+      ok: pressed && answered,
+      detail: !pressed ? "no key logged" : answered ? "audiod answered" : "no answer from audiod logged",
     },
   ];
 }

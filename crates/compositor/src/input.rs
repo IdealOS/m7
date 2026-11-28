@@ -41,6 +41,38 @@ pub enum Input {
         dy: f32,
     },
     Shortcut(Shortcut),
+    /// A media key (play/pause, next, volume). The compositor sends it to audiod;
+    /// no app sees it.
+    Media(MediaKey),
+}
+
+/// The keys a keyboard has for music, wherever the focus is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKey {
+    /// Play/Pause (most keyboards' one play key), or a separate Play key.
+    PlayPause,
+    Pause,
+    Stop,
+    Next,
+    Previous,
+    VolumeUp,
+    VolumeDown,
+    Mute,
+}
+
+/// The media key for an XKB keysym (the `XF86Audio…` ones), if it is one.
+pub fn media_from_keysym(keysym: u32) -> Option<MediaKey> {
+    Some(match keysym {
+        0x1008_ff14 => MediaKey::PlayPause, // XF86AudioPlay: what KEY_PLAYPAUSE gives
+        0x1008_ff31 => MediaKey::Pause,     // XF86AudioPause
+        0x1008_ff15 => MediaKey::Stop,      // XF86AudioStop
+        0x1008_ff17 => MediaKey::Next,      // XF86AudioNext
+        0x1008_ff16 => MediaKey::Previous,  // XF86AudioPrev
+        0x1008_ff13 => MediaKey::VolumeUp,  // XF86AudioRaiseVolume
+        0x1008_ff11 => MediaKey::VolumeDown, // XF86AudioLowerVolume
+        0x1008_ff12 => MediaKey::Mute,      // XF86AudioMute
+        _ => return None,
+    })
 }
 
 /// A key, as text editing and shortcuts need it.
@@ -171,7 +203,7 @@ impl Seat {
             }
             Input::Button { pressed: false } => Effect { dropped: wm.pointer_up(), ..Effect::default() },
             // The desktop handles keys and scrolling before the seat sees input.
-            Input::Key { .. } | Input::Scroll { .. } => Effect::default(),
+            Input::Key { .. } | Input::Scroll { .. } | Input::Media(_) => Effect::default(),
             Input::Shortcut(Shortcut::NextWindow) => {
                 Effect { raised: wm.raise_next(scene), ..Effect::default() }
             }
@@ -281,6 +313,18 @@ mod tests {
         assert_eq!(key_from_keysym(0x20ac, 0x20ac), Some(Key::Char('€')));
         assert_eq!(key_from_keysym(0xffe1, 0), None, "Shift alone types nothing");
         assert!(Mods { logo: true, ..Mods::default() }.primary());
+    }
+
+    #[test]
+    fn media_keysyms_map_to_media_keys() {
+        assert_eq!(media_from_keysym(0x1008_ff14), Some(MediaKey::PlayPause));
+        assert_eq!(media_from_keysym(0x1008_ff17), Some(MediaKey::Next));
+        assert_eq!(media_from_keysym(0x1008_ff16), Some(MediaKey::Previous));
+        assert_eq!(media_from_keysym(0x1008_ff13), Some(MediaKey::VolumeUp));
+        assert_eq!(media_from_keysym(0x1008_ff12), Some(MediaKey::Mute));
+        assert_eq!(media_from_keysym('a' as u32), None);
+        // Media keys type nothing, so they never reach apps as keys.
+        assert_eq!(key_from_keysym(0x1008_ff14, 0), None);
     }
 
     #[test]

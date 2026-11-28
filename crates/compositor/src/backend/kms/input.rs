@@ -16,7 +16,7 @@ use input::event::{DeviceEvent, EventTrait, KeyboardEvent, PointerEvent};
 use input::{DeviceCapability, Libinput, LibinputInterface};
 use xkbcommon::xkb;
 
-use crate::input::{Input, Mods, key_from_keysym};
+use crate::input::{Input, Mods, key_from_keysym, media_from_keysym};
 
 /// Pixels one wheel click scrolls.
 const WHEEL_STEP: f64 = 48.0;
@@ -120,7 +120,9 @@ impl Devices {
                             shift: modifier(&self.keyboard, xkb::MOD_NAME_SHIFT),
                             logo: modifier(&self.keyboard, xkb::MOD_NAME_LOGO),
                         };
-                        if let Some(key) = key_from_keysym(sym.raw(), xkb::keysym_to_utf32(sym)) {
+                        if let Some(media) = media_from_keysym(sym.raw()) {
+                            out.push(Input::Media(media));
+                        } else if let Some(key) = key_from_keysym(sym.raw(), xkb::keysym_to_utf32(sym)) {
                             out.push(Input::Key { key, mods });
                         }
                     }
