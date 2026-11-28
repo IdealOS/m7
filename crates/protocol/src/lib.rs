@@ -17,7 +17,9 @@ pub mod pty;
 pub mod scene;
 pub mod secrets;
 pub mod session;
+pub mod surface;
 pub mod unix;
+pub mod web;
 
 pub use bus::{BROKER, BusError, Message, Sender};
 pub use scene::{Clipboard, Commit, NodeId, NodeKind, OpenWindowParams, Props, SceneOp, WindowEvent};

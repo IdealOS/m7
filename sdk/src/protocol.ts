@@ -57,6 +57,9 @@ export const MAX_FRAME_BYTES = 4194304;
 /** Most service names one connection may claim. */
 export const MAX_NAMES = 64;
 
+/** Most pages browser-host keeps open at once. */
+export const MAX_PAGES = 8;
+
 /**
  * Most requests one connection may have waiting for an answer at once; past it the broker answers
  * `limit_exceeded`.
@@ -77,6 +80,9 @@ export const MAX_STREAMS = 256;
 
 /** Most subscription patterns one connection may hold. */
 export const MAX_SUBSCRIPTIONS = 256;
+
+/** The largest surface, in pixels on a side. */
+export const MAX_SURFACE_SIDE = 4096;
 
 /** Longest `timeout_ms` the broker honors; longer ones are shortened to this. */
 export const MAX_TIMEOUT_MS = 3600000;
@@ -104,6 +110,9 @@ export const SESSION_SERVICE = "session";
 
 /** The broker's trace of every message; only trusted connections may subscribe. */
 export const TAP_TOPIC = "bus.tap";
+
+/** The name browser-host claims. */
+export const WEB_SERVICE = "web";
 
 /** The node id of a window's content area in that window's commits. */
 export const WINDOW_CONTENT = 1;
@@ -149,6 +158,12 @@ export type AtParams = { id: string; change_set: number };
 
 /** Result of `at`. */
 export type AtResult = { data: Record<string, unknown> };
+
+/**
+ * Params of `attach`: the session, the size it's shown at (in pixels), and
+ * how many of those pixels make a logical one.
+ */
+export type AttachParams = { id: string; width: number; height: number; scale?: number };
 
 /**
  * Result of most methods, and each part of `watch`.
@@ -312,6 +327,9 @@ export type Busy = {
   done: number;
   total: number;
 };
+
+/** Which mouse button. */
+export type Button = "left" | "middle" | "right";
 
 /** A capability: `network`, `clipboard`, `permissions` or `service:NAME`. */
 export type CapabilityRule = { capability: string };
@@ -581,6 +599,9 @@ export type InfoResult = {
   services: string[];
 };
 
+/** Params of `input`. */
+export type InputParams = { id: string; event: SurfaceInput };
+
 /** What a file is, by its name, and so what importing it makes. */
 export type Kind =
   | "folder"
@@ -632,6 +653,14 @@ export type ListResult = {
 /** Result of `list`: the names of the caller's secrets. */
 export type ListResult2 = { names: string[] };
 
+/** How far a page has loaded. */
+export type Load =
+  | "started"
+  /** Its `<head>` is read: the title and the start of the page are coming. */
+  | "parsed"
+  /** It and everything on it have loaded. */
+  | "complete";
+
 /** Params of `login`: keep `password` for `user` on computer `host`. */
 export type LoginParams = { host: string; user: string; password: string };
 
@@ -668,7 +697,13 @@ export type Message =
    * One part of a streamed answer to request `id`, from the service it went to.
    * The broker forwards it under the requester's id; the request stays open.
    */
-  | { kind: "stream"; id: number; data?: unknown }
+  | {
+    kind: "stream";
+    id: number;
+    data?: unknown;
+    /** Descriptors that travel with this part, as on a request. */
+    fds?: number;
+  }
   /**
    * The requester no longer wants the answer to request `id`. The broker
    * forwards it to the service and drops the response if one still comes.
@@ -682,6 +717,15 @@ export type Message =
   | { kind: "unsubscribe"; id: number; topic: string }
   | { kind: "publish"; topic: string; data?: unknown; fds?: number; from?: Sender | null };
 
+/** Modifier keys held. */
+export type Mods = {
+  alt?: boolean;
+  ctrl?: boolean;
+  /** Command on a Mac keyboard, the Windows key on others. */
+  logo?: boolean;
+  shift?: boolean;
+};
+
 /** Params of `claim` and `release`. */
 export type NameParams = {
   /** A service name: lowercase letters, digits, `-` and `.`. */
@@ -690,6 +734,12 @@ export type NameParams = {
 
 /** Params of `get` and `delete`. */
 export type NameParams2 = { name: string };
+
+/**
+ * Params of `navigate`: what was typed in the address bar. An address without a
+ * scheme gets `https://`.
+ */
+export type NavigateParams = { id: string; url: string };
 
 /** How connected the device is. */
 export type NetState =
@@ -727,7 +777,8 @@ export type NetworksResult = { networks: WifiNetwork[] };
  * `image`), containers that lay out their children (`vstack`, `hstack`,
  * `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
  * draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
- * `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).
+ * `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`), and
+ * `surface`, whose pixels another process draws.
  */
 export type NodeKind =
   | "group" | "rect" | "text" | "image" | "vstack" | "hstack" | "toolbar" | "grid" | "split" | "scroll" | "dialog" | "label" | "button" | "checkbox" | "toggle" | "slider" | "select" | "text_field" | "text_area"
@@ -749,10 +800,20 @@ export type NodeKind =
    * screen, and sends it what's typed and the size that fits; the app sees
    * none of it.
    */
-  | "terminal";
+  | "terminal"
+  /**
+   * Pixels drawn by service `service` for its session `id` (a web page from
+   * `web`, say), which the app opened. The compositor attaches to the session
+   * as the app (see `surface`), shows its frames at the node's size, and
+   * sends it the pointer and, while focused, the keyboard.
+   */
+  | "surface";
 
 /** Params of `open`: the screen's starting size. */
 export type OpenParams = { cols: number; rows: number };
+
+/** Params of `open`: where to start, if anywhere (a blank page otherwise). */
+export type OpenParams2 = { url?: string | null };
 
 /** Params of `open_window`. */
 export type OpenWindowParams = {
@@ -809,6 +870,23 @@ export type OutputsResult = {
    */
   current?: string | null;
 };
+
+/** A part of `open`'s streamed answer. */
+export type PageEvent =
+  /** The first part: the page's id, for the `surface` node and the methods. */
+  | { event: "opened"; id: string }
+  /** The page is at `url` now. */
+  | { event: "url"; url: string }
+  /** The page's title (none if it has none). */
+  | { event: "title"; title?: string | null }
+  | { event: "load"; load: Load }
+  /** Whether there's somewhere to go back or forward to. */
+  | { event: "history"; back: boolean; forward: boolean }
+  /** The page's content process failed; the stream ends after this. */
+  | { event: "crashed"; reason: string };
+
+/** Params of `back`, `forward` and `reload`. */
+export type PageParams = { id: string };
 
 /**
  * Params of `pin`: pin (or with `pinned` false, unpin) document `id`'s version
@@ -877,6 +955,13 @@ export type QueueItem = {
   /** Seconds, from its tags. */
   duration?: number | null;
 };
+
+/**
+ * Params of `release`: frame `seq`, in buffer `buffer`, has been copied out,
+ * and the buffer may be drawn into. (The frame's number keeps a release that
+ * crossed a resize from freeing a new buffer of the same number.)
+ */
+export type ReleaseParams = { id: string; buffer: number; seq: number };
 
 /** What happens at the end of the queue, or of a track. */
 export type Repeat =
@@ -1095,6 +1180,38 @@ export type StatsResult = {
 
 /** A mistake in a style sheet, and where it is (1-based). */
 export type StyleError = { line: number; col: number; message: string };
+
+/**
+ * Something the user did to a surface. Positions are in the surface's pixels,
+ * from its top left.
+ */
+export type SurfaceInput =
+  /** The pointer moved to (x, y). */
+  | { kind: "move"; x: number; y: number }
+  /** A button went down or up at (x, y). */
+  | { kind: "button"; x: number; y: number; button: Button; pressed: boolean }
+  /**
+   * The wheel or trackpad scrolled by (dx, dy) pixels at (x, y); positive `dy`
+   * moves the view down the page, as the web's `deltaY` does.
+   */
+  | { kind: "wheel"; x: number; y: number; dx: number; dy: number }
+  /**
+   * A key went down or up. `key` is named as the web's `KeyboardEvent.key`: the
+   * character it types (`"a"`, `"A"`, `" "`), or a name (`"Enter"`, `"ArrowLeft"`).
+   */
+  | { kind: "key"; key: string; pressed: boolean; mods: Mods }
+  /** The surface gained or lost the keyboard. */
+  | { kind: "focus"; on: boolean };
+
+/** A part of `attach`'s streamed answer. */
+export type SurfacePart =
+  /**
+   * New buffers, replacing any before: `count` shared-memory descriptors come
+   * with this part, each `stride * height` bytes of 8-bit RGBA, rows top first.
+   */
+  | { part: "buffers"; width: number; height: number; stride: number; count: number }
+  /** Buffer `buffer` holds a new frame. `seq` counts frames. */
+  | { part: "frame"; buffer: number; seq: number };
 
 /** Result of `system_style`: the built-in system style sheet, for reference. */
 export type SystemStyleResult = { css: string };

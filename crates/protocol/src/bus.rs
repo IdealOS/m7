@@ -136,6 +136,9 @@ pub enum Message {
         id: u64,
         #[serde(default)]
         data: Value,
+        /// Descriptors that travel with this part, as on a request.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        fds: u32,
     },
     /// The requester no longer wants the answer to request `id`. The broker
     /// forwards it to the service and drops the response if one still comes.
@@ -219,17 +222,20 @@ impl Message {
     /// How many file descriptors travel with this message.
     pub fn fds(&self) -> u32 {
         match self {
-            Message::Request { fds, .. } | Message::Response { fds, .. } | Message::Publish { fds, .. } => {
-                *fds
-            }
+            Message::Request { fds, .. }
+            | Message::Response { fds, .. }
+            | Message::Publish { fds, .. }
+            | Message::Stream { fds, .. } => *fds,
             _ => 0,
         }
     }
 
     /// Set the descriptor count, where the message kind can carry descriptors.
     pub fn with_fds(mut self, n: u32) -> Message {
-        if let Message::Request { fds, .. } | Message::Response { fds, .. } | Message::Publish { fds, .. } =
-            &mut self
+        if let Message::Request { fds, .. }
+        | Message::Response { fds, .. }
+        | Message::Publish { fds, .. }
+        | Message::Stream { fds, .. } = &mut self
         {
             *fds = n;
         }
@@ -382,7 +388,7 @@ mod tests {
         assert_eq!(streamed, Message::stream_request(8, "db", "watch", Value::Null));
         let frame: Message =
             serde_json::from_str(r#"{"kind": "stream", "id": 8, "data": {"n": 1}}"#).unwrap();
-        assert_eq!(frame, Message::Stream { id: 8, data: serde_json::json!({"n": 1}) });
+        assert_eq!(frame, Message::Stream { id: 8, data: serde_json::json!({"n": 1}), fds: 0 });
         assert_eq!(cancel, Message::Cancel { id: 7 });
         let with_fds: Message =
             serde_json::from_str(r#"{"kind": "publish", "topic": "t", "fds": 2}"#).unwrap();
@@ -449,7 +455,7 @@ mod tests {
             Message::err(2, code::TIMEOUT, "slow \u{1F600} \"quoted\""),
             Message::Cancel { id: u64::MAX },
             Message::stream_request(3, "db", "watch", serde_json::json!({"type": "Note"})),
-            Message::Stream { id: 3, data: serde_json::json!({"kind": "diff", "removed": ["x"]}) },
+            Message::Stream { id: 3, data: serde_json::json!({"kind": "diff", "removed": ["x"]}), fds: 0 },
             Message::publish("db.live.1", serde_json::json!({"added": [{}], "s": "\\"})).with_fds(2),
         ]
         .iter()

@@ -21,6 +21,7 @@ import {
   permissions,
   pty,
   root,
+  web,
   setClipboard,
   signal,
   textArea,
@@ -389,6 +390,32 @@ test("permissions.request asks perm, waiting as long as a prompt may", async () 
   const grants = await permissions.granted();
   assert.equal(grants.length, 1);
   assert.deepEqual(host.requests[1], { to: "perm", method: "grants", params: {} });
+});
+
+test("web.open streams a page: its id, where it goes, and steering it", async () => {
+  const host = fresh();
+  const urls: string[] = [];
+  const history: [boolean, boolean][] = [];
+  const opening = web.open("example.com", { onUrl: (u) => urls.push(u), onHistory: (b, f) => history.push([b, f]) });
+  const s = host.streams[0];
+  assert.deepEqual([s.to, s.method, s.params], ["web", "open", { url: "example.com" }]);
+  s.part({ event: "opened", id: "2" });
+  const page = await opening;
+  assert.equal(page.id, "2");
+  s.part({ event: "url", url: "https://example.com/" });
+  s.part({ event: "history", back: true, forward: false });
+  assert.deepEqual(urls, ["https://example.com/"]);
+  assert.deepEqual(history, [[true, false]]);
+  await page.navigate("servo.org");
+  await page.back();
+  assert.deepEqual(
+    host.requests.map((r) => [r.method, r.params]),
+    [["navigate", { id: "2", url: "servo.org" }], ["back", { id: "2" }]],
+  );
+  s.part({ event: "crashed", reason: "out of memory" });
+  assert.equal(await page.closed, "out of memory");
+  page.close();
+  assert.equal(s.cancelled, true, "closing ends the stream");
 });
 
 test("pty.open streams a session: its id, titles, and how it exited", async () => {

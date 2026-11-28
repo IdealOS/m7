@@ -122,8 +122,9 @@ struct Sub {
     tx: mpsc::UnboundedSender<Publication>,
 }
 
-/// What a [`Stream`] receives: a part, or the error that ended it.
-type StreamItem = Result<Value, CallError>;
+/// What a [`Stream`] receives: a part and the descriptors that came with it, or
+/// the error that ended it.
+type StreamItem = Result<(Value, Vec<OwnedFd>), CallError>;
 
 struct State {
     pending: HashMap<u64, oneshot::Sender<Result<Reply, CallError>>>,
@@ -307,7 +308,13 @@ impl Client {
     /// Send one part of the streamed answer to request `id` from
     /// [`Client::take_requests`]. End the stream with [`Client::respond`].
     pub async fn stream(&self, id: u64, data: Value) -> Result<(), CallError> {
-        self.send(Message::Stream { id, data }, Vec::new()).await
+        self.stream_with(id, data, Vec::new()).await
+    }
+
+    /// Like [`Client::stream`], with descriptors (shared memory, say) going along.
+    pub async fn stream_with(&self, id: u64, data: Value, fds: Vec<OwnedFd>) -> Result<(), CallError> {
+        let n = fds.len() as u32;
+        self.send(Message::Stream { id, data, fds: n }, fds).await
     }
 
     /// A broker method with typed params and result (see [`protocol::broker`]).
@@ -474,6 +481,11 @@ impl Stream {
     /// The next part. `Some(Err(..))` is the error that ended the stream (from the
     /// service, the broker, or a lost connection); `None` means it ended normally.
     pub async fn next(&mut self) -> Option<Result<Value, CallError>> {
+        self.next_with_fds().await.map(|r| r.map(|(data, _)| data))
+    }
+
+    /// Like [`Stream::next`], with the descriptors that came with the part.
+    pub async fn next_with_fds(&mut self) -> Option<Result<(Value, Vec<OwnedFd>), CallError>> {
         self.rx.recv().await
     }
 }
@@ -585,9 +597,9 @@ fn dispatch(state: &mut State, msg: Message, fds: Vec<OwnedFd>) {
                 let _ = stream.send(Err(error()));
             }
         }
-        Message::Stream { id, data } => {
+        Message::Stream { id, data, .. } => {
             if let Some(stream) = state.streams.get(&id) {
-                let _ = stream.send(Ok(data));
+                let _ = stream.send(Ok((data, fds)));
             }
         }
         Message::Publish { topic, data, from, .. } => {

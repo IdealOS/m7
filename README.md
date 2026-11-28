@@ -119,6 +119,7 @@ crates/dbd          the db service on the bus
 crates/permd        the perm service: grants, the audit log, permission prompts
 crates/secretsd     the secrets service: an encrypted store, per owner
 crates/ptyd         the pty service: shells on pseudo-terminals, parsed into screens
+crates/browser-host the web service: Servo draws pages into surfaces (builds outside the workspace)
 crates/netd         the net service: Wi-Fi and connections, over NetworkManager
 crates/backupd      the backup service: the database and its blobs to and from a USB drive
 crates/audiod       the audio service: plays Track documents, gapless, and owns the queue
@@ -129,7 +130,7 @@ crates/session      first process after init: starts and supervises services, sa
 crates/sandbox      the sandboxes session puts apps in and importd puts its file reader in
 spikes/             db-bench (C), js-bench (D), kms-probe (A/B): benchmarks to rerun on the Pi
 sdk/                @idealos/sdk: bus, database and live queries, signals, windows and widgets
-apps/               the apps that ship with the system (counter, notes, gallery, terminal, settings, browser, editor, files, styles, music)
+apps/               the apps that ship with the system (counter, notes, gallery, terminal, settings, browser, editor, files, styles, music, web)
 schemas/            JSON Schemas for the system document types
 image/              Buildroot external tree: defconfigs, kernel fragments, rootfs overlay
 tools/              build VM, image build, QEMU, SD card, deploy scripts

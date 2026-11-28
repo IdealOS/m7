@@ -151,6 +151,18 @@ impl Apps {
             .map(|(_, w)| w.frame)
     }
 
+    /// Who owns scene node `node` (by its window), as a session-owning service
+    /// names them: the app's id, or `conn:N` for a tool's connection (an app run
+    /// with `app-host --bundle` in development). None for a service's window.
+    pub fn owner_of(&self, node: NodeId) -> Option<String> {
+        let &(window, _) = self.owners.get(&node)?;
+        match &self.windows.get(&window)?.owner {
+            Sender::App { app, .. } => Some(app.clone()),
+            Sender::Conn(n) => Some(format!("conn:{n}")),
+            Sender::Service(_) => None,
+        }
+    }
+
     /// The app that owns scene node `node` (by its window), if an app does: who the
     /// compositor acts for when it reads or writes documents for that node.
     pub fn app_of(&self, node: NodeId) -> Option<&str> {

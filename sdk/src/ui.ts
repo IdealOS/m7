@@ -410,6 +410,22 @@ export function terminal(props: TerminalProps): UiNode {
   return node("terminal", { ...props });
 }
 
+export interface SurfaceProps extends Common {
+  /** The service drawing it (`"web"`). */
+  service: string;
+  /** The app's session there (a page's id, from `web.open`). */
+  id: string;
+}
+
+/**
+ * Pixels another process draws: a web page, say. The compositor shows the
+ * service's frames at the node's size and sends it the pointer and keys; the app
+ * sees none of it.
+ */
+export function surface(props: SurfaceProps): UiNode {
+  return node("surface", { ...props });
+}
+
 export interface VirtualListProps extends Common {
   count: Prop<number>;
   rowHeight: number;

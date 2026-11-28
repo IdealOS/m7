@@ -264,7 +264,7 @@ impl Router {
                 self.by_client.insert((conn, id), bus_id);
                 out.push(Action::Deliver { to: vec![service], msg: forwarded });
             }
-            Message::Stream { id, data } => {
+            Message::Stream { id, data, fds } => {
                 // Only from the service a streamed request went to; a frame after
                 // the request ended (a cancel crossing it on the wire) is dropped.
                 if let Some(p) = self.pending.get(&id)
@@ -273,7 +273,7 @@ impl Router {
                 {
                     out.push(Action::Deliver {
                         to: vec![p.requester],
-                        msg: Message::Stream { id: p.client_id, data },
+                        msg: Message::Stream { id: p.client_id, data, fds },
                     });
                 }
             }
@@ -1075,17 +1075,17 @@ mod tests {
         let bus_id = *bus_id;
         assert!(h.router.next_deadline().is_none(), "no timeout");
         for n in 0..3 {
-            let out = h.send(1, Message::Stream { id: bus_id, data: json!(n) });
-            assert_eq!(out, [deliver(2, Message::Stream { id: 7, data: json!(n) })]);
+            let out = h.send(1, Message::Stream { id: bus_id, data: json!(n), fds: 0 });
+            assert_eq!(out, [deliver(2, Message::Stream { id: 7, data: json!(n), fds: 0 })]);
         }
         // Only the service may send parts.
-        assert!(h.send(3, Message::Stream { id: bus_id, data: json!("forged") }).is_empty());
-        assert!(h.send(2, Message::Stream { id: bus_id, data: json!("forged") }).is_empty());
+        assert!(h.send(3, Message::Stream { id: bus_id, data: json!("forged"), fds: 0 }).is_empty());
+        assert!(h.send(2, Message::Stream { id: bus_id, data: json!("forged"), fds: 0 }).is_empty());
         h.advance(Duration::from_millis(MAX_TIMEOUT_MS * 2));
-        assert_eq!(h.send(1, Message::Stream { id: bus_id, data: json!(3) }).len(), 1, "still open");
+        assert_eq!(h.send(1, Message::Stream { id: bus_id, data: json!(3), fds: 0 }).len(), 1, "still open");
         // A response ends it; later parts are dropped.
         assert_eq!(h.send(1, Message::ok(bus_id, Value::Null)), [deliver(2, Message::ok(7, Value::Null))]);
-        assert!(h.send(1, Message::Stream { id: bus_id, data: json!(4) }).is_empty());
+        assert!(h.send(1, Message::Stream { id: bus_id, data: json!(4), fds: 0 }).is_empty());
 
         // A cancel ends one, and so does the requester going away.
         let open = |h: &mut Harness, id| match &h
@@ -1096,7 +1096,7 @@ mod tests {
         };
         let first = open(&mut h, 8);
         assert_eq!(h.send(2, Message::Cancel { id: 8 }), [deliver(1, Message::Cancel { id: first })]);
-        assert!(h.send(1, Message::Stream { id: first, data: Value::Null }).is_empty());
+        assert!(h.send(1, Message::Stream { id: first, data: Value::Null, fds: 0 }).is_empty());
         let second = open(&mut h, 9);
         assert_eq!(h.run(Event::Closed { conn: 2 }), [deliver(1, Message::Cancel { id: second })]);
     }

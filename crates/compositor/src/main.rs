@@ -210,6 +210,7 @@ fn take_screenshot(
     desktop.scene.set_dark(opts.dark);
     desktop.scene.apply_all(demo::build(opts.width as f32, opts.height as f32, opts.windows));
     desktop.set_screen(opts.width as f32, opts.height as f32);
+    desktop.set_pixel_scale(scale);
     if serve_for > 0.0 {
         serve(&mut desktop, serve_for, steps)?;
     }

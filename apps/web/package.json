@@ -1,0 +1,19 @@
+{
+  "name": "@idealos/app-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.web",
+    "name": "Web",
+    "autostart": false,
+    "permissions": [{ "capability": "service:web" }]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

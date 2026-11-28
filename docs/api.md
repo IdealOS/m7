@@ -19,6 +19,9 @@ service, a tool, or an app by its id), so no one can pretend to be someone else.
   error with a `code` and a `message`. A **streamed** request gets any number of
   parts until either side cancels it, which is how live queries, windows and
   terminals work.
+- **Descriptors** (open files, shared memory) can travel with a request, a
+  response, a publication or a streamed part, passed by the kernel, never as JSON:
+  blobs go to and from db this way, and a surface's frame buffers.
 - **Topics** carry publications to every subscriber (`perm.grants`, for one).
 - **Names**: a service claims a name (`db`, `net`, ...). System services and
   tools may claim names; apps may not.
@@ -275,6 +278,40 @@ Apps need `service:pty`.
 An app usually opens a session and shows it with a `terminal` node, which the
 compositor attaches to itself; the app never sees the screen.
 
+## web: pages
+
+`browser-host` runs Servo and draws web pages. Apps need `service:web`; it
+fetches pages itself, so they need no network grant.
+
+| method | params | result |
+| --- | --- | --- |
+| `open` | `{url?}`, streamed | `{event: "opened", id}`, then `url`, `title`, `load` (`started`, `parsed`, `complete`), `history` (`{back, forward}`) and `crashed` events |
+| `navigate` | `{id, url}` | null (an address without a scheme gets `https://`) |
+| `back`, `forward`, `reload` | `{id}` | null |
+
+An app shows a page with a `surface` node (`service: "web"`, `id`); cancelling
+`open` closes the page. A page belongs to whoever opened it. At most 8 are open.
+
+### Surfaces
+
+A `surface` node shows pixels another process draws. The compositor attaches to
+the session as the node's app and gets frames and sends input itself, so they
+never pass through the app. Every surface service has these methods:
+
+| method | params | result |
+| --- | --- | --- |
+| `attach` | `{id, width, height, scale}`, streamed | `{part: "buffers", width, height, stride, count}` with `count` shared-memory descriptors, then `{part: "frame", buffer, seq}` per frame |
+| `resize` | `{id, width, height, scale}` | null; new buffers come on the attachment |
+| `release` | `{id, buffer, seq}` | null: the frame is copied out, draw into the buffer again |
+| `input` | `{id, event}` | null |
+
+Sizes and positions are in the surface's pixels; `scale` is how many make one of
+the screen's logical pixels (a page's CSS pixel). Buffers are 8-bit RGBA, top row
+first. Input events: `move {x, y}`, `button {x, y, button, pressed}`, `wheel {x,
+y, dx, dy}` (positive `dy` goes down the page), `key {key, pressed, mods}`
+(`key` as the web's `KeyboardEvent.key`) and `focus {on}`. Only a system
+service may act for an app (`as`, an app id or `conn:N` for a tool's connection).
+
 ## session
 
 `session` starts and supervises the services and runs each app in its own
@@ -491,3 +528,6 @@ await openWindow({ title: "Counter", width: 300, height: 200, style }, () => {
   `granted()` lists the app's grants.
 - **Terminals** (`pty.`): `open(cols?, rows?, onTitle?)` gives a session to show
   in a `terminal` node.
+- **Web pages** (`web.`): `open(url?, {onUrl, onTitle, onLoad, onHistory})`
+  gives a page to show in a `surface` node, with `navigate(url)`, `back()`,
+  `forward()`, `reload()` and `close()`.

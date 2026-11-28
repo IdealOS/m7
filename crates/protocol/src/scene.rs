@@ -24,7 +24,8 @@ pub type Props = Map<String, Value>;
 /// `image`), containers that lay out their children (`vstack`, `hstack`,
 /// `toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor
 /// draws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,
-/// `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).
+/// `select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`), and
+/// `surface`, whose pixels another process draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +62,11 @@ pub enum NodeKind {
     /// screen, and sends it what's typed and the size that fits; the app sees
     /// none of it.
     Terminal,
+    /// Pixels drawn by service `service` for its session `id` (a web page from
+    /// `web`, say), which the app opened. The compositor attaches to the session
+    /// as the app (see [`crate::surface`]), shows its frames at the node's size, and
+    /// sends it the pointer and, while focused, the keyboard.
+    Surface,
 }
 
 /// One change to a window's scene graph.

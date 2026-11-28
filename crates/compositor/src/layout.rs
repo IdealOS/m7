@@ -476,7 +476,7 @@ fn measure(
         NodeKind::Menu => (text(&s("label"), None).0.max(40.0) + 40.0, 32.0),
         NodeKind::Image => (num(p, "_iw", 64.0), num(p, "_ih", 64.0)),
         NodeKind::Vlist => (200.0, 160.0),
-        NodeKind::Terminal => (480.0, 300.0),
+        NodeKind::Terminal | NodeKind::Surface => (480.0, 300.0),
         _ => (0.0, 0.0),
     };
     (explicit("w").unwrap_or(w), explicit("h").unwrap_or(h))

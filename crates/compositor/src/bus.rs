@@ -134,6 +134,38 @@ pub fn connect_with(
                                 attached.retain(|_, t| !t.is_finished());
                                 Ok(())
                             }
+                            Out::AttachSurface { node, service, params } => {
+                                let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
+                                let task = tokio::spawn(async move {
+                                    match bus
+                                        .request_stream(&service, protocol::surface::method::ATTACH, params)
+                                        .await
+                                    {
+                                        Ok(mut parts) => {
+                                            while let Some(Ok((part, fds))) = parts.next_with_fds().await {
+                                                if replies
+                                                    .send(Call::SurfacePart { node, part, fds })
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                                woken();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!("bus: couldn't attach a surface to {service}: {e}")
+                                        }
+                                    }
+                                    if replies.send(Call::SurfaceEnd { node }).is_ok() {
+                                        woken();
+                                    }
+                                });
+                                if let Some(old) = attached.insert(node, task) {
+                                    old.abort();
+                                }
+                                attached.retain(|_, t| !t.is_finished());
+                                Ok(())
+                            }
                             Out::Follow { node, params } => {
                                 let (bus, replies, woken) = (sender.clone(), replies.clone(), woken.clone());
                                 let task = tokio::spawn(async move {

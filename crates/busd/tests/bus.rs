@@ -330,6 +330,26 @@ async fn descriptors_travel_with_requests_responses_and_publishes() {
     }
 }
 
+/// Parts of a streamed answer can carry descriptors too (a surface's shared
+/// buffers), and parts without any still come through as before.
+#[tokio::test]
+async fn descriptors_travel_with_the_parts_of_a_streamed_answer() {
+    let bus = Bus::start("stream-fds");
+    let svc = bus.client().await;
+    svc.claim("frames").await.unwrap();
+    let mut requests = svc.take_requests().unwrap();
+    let client = bus.client().await;
+    let mut stream = client.request_stream("frames", "attach", Value::Null).await.unwrap();
+    let (id, _) = next_request(&mut requests).await;
+    svc.stream_with(id, json!({"buffers": 2}), vec![file_with("one"), file_with("two")]).await.unwrap();
+    svc.stream(id, json!({"frame": 0})).await.unwrap();
+    let (data, fds) = stream.next_with_fds().await.unwrap().unwrap();
+    assert_eq!(data, json!({"buffers": 2}));
+    assert_eq!(fds.into_iter().map(read_all).collect::<Vec<_>>(), ["one", "two"]);
+    let (data, fds) = stream.next_with_fds().await.unwrap().unwrap();
+    assert_eq!((data, fds.len()), (json!({"frame": 0}), 0));
+}
+
 /// A connection that declares descriptors it didn't send is broken, not trusted
 /// to line up later.
 #[tokio::test]

@@ -192,6 +192,7 @@ impl ApplicationHandler<Wake> for App {
         );
         self.desktop.scene.apply_all(demo::build(w, h, self.opts.windows));
         self.desktop.set_screen(w, h);
+        self.desktop.set_pixel_scale(gpu.window.scale_factor() as f32);
         gpu.window.request_redraw();
         self.gpu = Some(gpu);
     }
@@ -207,6 +208,7 @@ impl ApplicationHandler<Wake> for App {
                 let (w, h) = App::logical_size(gpu);
                 self.desktop.scene.apply_all(demo::resize(w, h));
                 self.desktop.set_screen(w, h);
+                self.desktop.set_pixel_scale(gpu.window.scale_factor() as f32);
                 gpu.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {

@@ -340,6 +340,20 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, style: &Style, laye
                 }
             }
         }
+        NodeKind::Surface => {
+            // The service's latest frame, or a plain box until the first comes.
+            match p.get("_frame").and_then(Value::as_str) {
+                Some(frame) if num(p, "_iw", 0.0) > 0.0 => o.layer.images.push(ImageItem {
+                    node: id,
+                    blob: frame.to_owned(),
+                    pixels: None,
+                    rect,
+                    clip,
+                    radius: 0.0,
+                }),
+                _ => o.quad(rect, fill, Rgba::TRANSPARENT, 0.0, 0.0),
+            }
+        }
         NodeKind::Image => {
             match p.get("blob").and_then(Value::as_str) {
                 Some(blob) if num(p, "_iw", 0.0) > 0.0 => {
@@ -417,7 +431,11 @@ pub fn draw(id: NodeId, node: &Node, rect: Rect, clip: Rect, style: &Style, laye
     if focused
         && !matches!(
             node.kind,
-            NodeKind::TextField | NodeKind::TextArea | NodeKind::Slider | NodeKind::Terminal
+            NodeKind::TextField
+                | NodeKind::TextArea
+                | NodeKind::Slider
+                | NodeKind::Terminal
+                | NodeKind::Surface
         )
     {
         let ring = Rect { x: rect.x - 3.0, y: rect.y - 3.0, w: rect.w + 6.0, h: rect.h + 6.0 };

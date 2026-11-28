@@ -88,7 +88,7 @@ fn random_message(rng: &mut Rng, router: &Router) -> Message {
             let mut ids: Vec<u64> = router.pending.keys().copied().collect();
             ids.sort_unstable();
             let id = if !ids.is_empty() && rng.chance(80) { *rng.pick(&ids) } else { id };
-            Message::Stream { id, data: Value::Null }
+            Message::Stream { id, data: Value::Null, fds: 0 }
         }
         7 => Message::Subscribe { id, topic: rng.pick(TOPICS).to_string() },
         8 => Message::Unsubscribe { id, topic: rng.pick(TOPICS).to_string() },

@@ -32,6 +32,7 @@ use crate::prompt;
 use crate::reorder::{self, Reorder};
 use crate::scene::{ROOT, Rect, Scene, num};
 use crate::shell::{self, BAR_HEIGHT, WORKSPACES};
+use crate::surface;
 use crate::terminal;
 use crate::textedit::{Edit, Move, Splice};
 use crate::texthistory::{Kind, TextHistory};
@@ -87,6 +88,17 @@ pub enum Call {
     ScreenEnd {
         node: NodeId,
     },
+    /// A part of surface node `node`'s attachment ([`protocol::surface::SurfacePart`]),
+    /// with the descriptors that came with it, asked for with [`Out::AttachSurface`].
+    SurfacePart {
+        node: NodeId,
+        part: Value,
+        fds: Vec<std::os::fd::OwnedFd>,
+    },
+    /// Surface node `node`'s attachment ended (or couldn't be made).
+    SurfaceEnd {
+        node: NodeId,
+    },
     /// A part of the live query following bound text field `node`'s document
     /// (a [`protocol::db::WatchEvent`]), asked for with [`Out::Follow`].
     Doc {
@@ -118,8 +130,11 @@ pub enum Out {
     /// Follow bound text field `node`'s document with a live query (`params`
     /// for `db watch`); its parts come back as [`Call::Doc`].
     Follow { node: NodeId, params: Value },
-    /// Stop the attachment for terminal node `node`, or the live query for
-    /// bound text field `node`.
+    /// Attach surface node `node` to its session at service `service` (`params`
+    /// for `attach`); parts come back as [`Call::SurfacePart`].
+    AttachSurface { node: NodeId, service: String, params: Value },
+    /// Stop the attachment for terminal or surface node `node`, or the live
+    /// query for bound text field `node`.
     Detach { node: NodeId },
 }
 
@@ -343,6 +358,13 @@ pub struct Desktop {
     allow_focused: bool,
     /// Terminal nodes' screens and sessions.
     terms: HashMap<NodeId, terminal::View>,
+    /// Surface nodes' sessions and buffers.
+    surfaces: HashMap<NodeId, surface::View>,
+    /// The surface a button went down on, which gets the pointer until it's let go.
+    surface_press: Option<NodeId>,
+    /// Screen pixels per logical pixel (2 on a Retina display), for surfaces'
+    /// sizes: a page is drawn at the screen's own resolution.
+    pixel_scale: f32,
 }
 
 impl Desktop {
@@ -402,6 +424,9 @@ impl Desktop {
             shown_prompt: None,
             allow_focused: false,
             terms: HashMap::new(),
+            surfaces: HashMap::new(),
+            surface_press: None,
+            pixel_scale: 1.0,
         }
     }
 
@@ -453,6 +478,14 @@ impl Desktop {
         self.scene.node(id)?.props.get(key)
     }
 
+    /// Screen pixels per logical pixel; surfaces are sized in screen pixels.
+    pub fn set_pixel_scale(&mut self, scale: f32) {
+        if scale > 0.0 && scale != self.pixel_scale {
+            self.pixel_scale = scale;
+            self.size_surfaces();
+        }
+    }
+
     fn kind(&self, id: NodeId) -> Option<NodeKind> {
         self.scene.node(id).map(|n| n.kind)
     }
@@ -465,6 +498,7 @@ impl Desktop {
         }
         self.layout.run(&mut self.scene);
         self.size_terminals();
+        self.size_surfaces();
         let ids: Vec<(NodeId, NodeKind)> = self
             .scene
             .ids()
@@ -522,8 +556,10 @@ impl Desktop {
         }
         let effect = match input {
             Input::Key { key, mods } => self.key(key, mods),
-            Input::Scroll { dy, .. } => {
-                self.wheel(dy);
+            Input::Scroll { dx, dy } => {
+                if !self.surface_wheel(dx, dy) {
+                    self.wheel(dy);
+                }
                 Effect::default()
             }
             Input::Button { pressed: true } => self.press(),
@@ -532,6 +568,7 @@ impl Desktop {
                 let effect = self.seat.handle(input, &mut self.scene, &mut self.wm);
                 self.motion();
                 self.hover();
+                self.surface_motion();
                 effect
             }
             Input::Shortcut(_) => self.seat.handle(input, &mut self.scene, &mut self.wm),
@@ -647,6 +684,11 @@ impl Desktop {
                     self.drag = Some(Drag::Menu { from: (x, y) });
                 }
                 NodeKind::Terminal => self.set_focus(Some(node)),
+                NodeKind::Surface => {
+                    self.set_focus(Some(node));
+                    self.surface_press = Some(node);
+                    self.surface_button(node, true);
+                }
                 NodeKind::TextField | NodeKind::TextArea => {
                     // Where the click is, before focusing: focusing a field puts
                     // its caret at the end and scrolls there, which in a long text
@@ -705,6 +747,10 @@ impl Desktop {
     }
 
     fn release(&mut self) -> Effect {
+        if let Some(node) = self.surface_press.take() {
+            self.surface_button(node, false);
+            return Effect::default();
+        }
         let (x, y) = self.seat.cursor();
         if let Some(win) = self.pressed_title.take() {
             self.set_title(win, "pressed", Value::Null);
@@ -1245,7 +1291,8 @@ impl Desktop {
                 | NodeKind::Menu
                 | NodeKind::TextField
                 | NodeKind::TextArea
-                | NodeKind::Terminal => return Some((id, kind, rect)),
+                | NodeKind::Terminal
+                | NodeKind::Surface => return Some((id, kind, rect)),
                 NodeKind::Split => {
                     let p = &self.scene.node(id).expect("exists").props;
                     let at = num(p, "_divider", -1.0);
@@ -1332,10 +1379,12 @@ impl Desktop {
             && self.scene.node(old).is_some()
         {
             self.set(old, json!({"_focus": false, "_sel": Value::Null}));
+            self.surface_input(old, protocol::surface::SurfaceInput::Focus { on: false });
         }
         self.focus = node;
         if let Some(n) = node {
             self.set(n, json!({"_focus": true}));
+            self.surface_input(n, protocol::surface::SurfaceInput::Focus { on: true });
             if matches!(self.kind(n), Some(NodeKind::TextField | NodeKind::TextArea)) {
                 self.edit(n, |_| None);
             }
@@ -1362,6 +1411,7 @@ impl Desktop {
                                 | NodeKind::TextField
                                 | NodeKind::TextArea
                                 | NodeKind::Terminal
+                                | NodeKind::Surface
                         )
                     )
             })
@@ -1799,6 +1849,13 @@ impl Desktop {
         // A focused terminal gets every other key, Tab and Escape included.
         if let Some(node) = self.focus.filter(|&n| self.kind(n) == Some(NodeKind::Terminal)) {
             self.terminal_key(node, key, mods);
+            return Effect::default();
+        }
+        // So does a focused surface, but Command shortcuts stay the system's.
+        if !mods.logo
+            && let Some(node) = self.focus.filter(|&n| self.kind(n) == Some(NodeKind::Surface))
+        {
+            self.surface_key(node, key, mods);
             return Effect::default();
         }
         if key == Key::Escape {
@@ -2301,6 +2358,18 @@ impl Desktop {
                     self.set(node, json!({"_cursor": Value::Null}));
                 }
             }
+            Call::SurfacePart { node, part, fds } => self.surface_part(node, part, fds),
+            Call::SurfaceEnd { node } => {
+                if let Some(view) = self.surfaces.remove(&node) {
+                    log::info!("surface: {} session {} ended", view.service, view.session);
+                    if let Some(key) = view.key {
+                        self.images.remove(&key);
+                    }
+                    if self.scene.node(node).is_some() {
+                        self.set(node, json!({"_frame": Value::Null}));
+                    }
+                }
+            }
             Call::Cancel { id } => {
                 if self.apps.close_request(&mut self.scene, id) {
                     log::info!("apps: closed a window (request {id} ended)");
@@ -2330,6 +2399,17 @@ impl Desktop {
             self.terms.keys().copied().filter(|n| self.scene.node(*n).is_none()).collect();
         for node in gone {
             self.terms.remove(&node);
+            self.outbox.push(Out::Detach { node });
+        }
+        let gone: Vec<NodeId> =
+            self.surfaces.keys().copied().filter(|n| self.scene.node(*n).is_none()).collect();
+        for node in gone {
+            if let Some(key) = self.surfaces.remove(&node).and_then(|v| v.key) {
+                self.images.remove(&key);
+            }
+            if self.surface_press == Some(node) {
+                self.surface_press = None;
+            }
             self.outbox.push(Out::Detach { node });
         }
         let gone: Vec<NodeId> =
@@ -2551,6 +2631,10 @@ impl Desktop {
                 self.attach_terminal(node);
                 continue;
             }
+            if self.kind(node) == Some(NodeKind::Surface) {
+                self.new_surface(node);
+                continue;
+            }
             if !matches!(self.kind(node), Some(NodeKind::TextField | NodeKind::TextArea)) {
                 continue;
             }
@@ -2560,6 +2644,143 @@ impl Desktop {
             let mut params = json!({"id": doc});
             self.act_for(node, &mut params);
             self.request(Some(Pending::Bind(node)), "db", "get", params);
+        }
+    }
+
+    // --- Surfaces ----------------------------------------------------------------
+
+    /// Note new surface node `node`'s session; it's attached once it has a size.
+    fn new_surface(&mut self, node: NodeId) {
+        let text = |s: &Self, k: &str| s.prop(node, k).and_then(Value::as_str).map(str::to_owned);
+        let (Some(service), Some(session)) = (text(self, "service"), text(self, "id")) else {
+            log::warn!("surface: a surface node needs `service` and `id`");
+            return;
+        };
+        // Only system services claim names, and each checks the session is the
+        // app's; still, keep names to what a service could be called.
+        if service.is_empty()
+            || service.len() > 64
+            || !service.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            log::warn!("surface: {service:?} isn't a service name");
+            return;
+        }
+        let owner = self.apps.owner_of(node);
+        self.surfaces.insert(node, surface::View::new(service, session, owner));
+    }
+
+    /// Attach each surface once laid out, and tell its service when its size in
+    /// screen pixels changes.
+    fn size_surfaces(&mut self) {
+        let nodes: Vec<NodeId> = self.surfaces.keys().copied().collect();
+        let rects = self.scene.screen_rects();
+        for node in nodes {
+            let Some(&(rect, _)) = rects.get(&node) else { continue };
+            // Nothing to draw into yet (a window still opening, a collapsed pane).
+            if rect.w < 1.0 || rect.h < 1.0 {
+                continue;
+            }
+            let size = surface::pixels(rect.w, rect.h, self.pixel_scale);
+            let view = self.surfaces.get_mut(&node).expect("listed");
+            if view.asked == Some(size) {
+                continue;
+            }
+            let first = view.asked.is_none();
+            view.asked = Some(size);
+            let params = view.params(json!({"width": size.0, "height": size.1, "scale": self.pixel_scale}));
+            let service = view.service.clone();
+            if first {
+                self.outbox.push(Out::AttachSurface { node, service, params });
+            } else {
+                self.request(None, &service, protocol::surface::method::RESIZE, params);
+            }
+        }
+    }
+
+    /// A part of surface node `node`'s attachment: new buffers, or a frame to show.
+    fn surface_part(&mut self, node: NodeId, part: Value, fds: Vec<std::os::fd::OwnedFd>) {
+        let Some(view) = self.surfaces.get_mut(&node) else { return };
+        match view.take(part, fds) {
+            Ok(surface::Got::Buffers) => {}
+            Ok(surface::Got::Frame { image, buffer, seq }) => {
+                let (w, h) = (image.width, image.height);
+                let key = format!("surface:{node}:{seq}");
+                let old = view.key.replace(key.clone());
+                let params = view.params(json!({"buffer": buffer, "seq": seq}));
+                let service = view.service.clone();
+                // Copied out: the service may draw into it again.
+                self.request(None, &service, protocol::surface::method::RELEASE, params);
+                if let Some(old) = old {
+                    self.images.remove(&old);
+                }
+                self.uses += 1;
+                self.images.insert(key.clone(), Cached { image: Some(image), used: self.uses });
+                if self.scene.node(node).is_some() {
+                    self.set(node, json!({"_frame": key, "_iw": w, "_ih": h}));
+                }
+            }
+            Err(e) => log::warn!("surface: {} sent {e}", view.service),
+        }
+    }
+
+    /// Send `event` to surface node `node`'s service, if it is a surface.
+    fn surface_input(&mut self, node: NodeId, event: protocol::surface::SurfaceInput) {
+        let Some(view) = self.surfaces.get(&node) else { return };
+        let Ok(event) = serde_json::to_value(event) else { return };
+        let params = view.params(json!({"event": event}));
+        let service = view.service.clone();
+        self.request(None, &service, protocol::surface::method::INPUT, params);
+    }
+
+    /// Where the pointer is on surface node `node`, in its pixels.
+    fn surface_point(&self, node: NodeId) -> Option<(f32, f32)> {
+        let rect = self.scene.screen_rects().get(&node)?.0;
+        let (x, y) = self.seat.cursor();
+        Some(((x - rect.x) * self.pixel_scale, (y - rect.y) * self.pixel_scale))
+    }
+
+    /// The surface under the pointer, in the topmost window there.
+    fn surface_under(&mut self) -> Option<NodeId> {
+        let (x, y) = self.seat.cursor();
+        let window = self.wm.window_at(&self.scene, x, y)?;
+        let root = self.dialog_in(window).unwrap_or(window);
+        match self.widget_at(root, x, y) {
+            Some((id, NodeKind::Surface, _)) if self.surfaces.contains_key(&id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn surface_button(&mut self, node: NodeId, pressed: bool) {
+        let Some((x, y)) = self.surface_point(node) else { return };
+        let button = protocol::surface::Button::Left;
+        self.surface_input(node, protocol::surface::SurfaceInput::Button { x, y, button, pressed });
+    }
+
+    /// The pointer moved: tell the surface it's over (or the one being pressed).
+    fn surface_motion(&mut self) {
+        let Some(node) = self.surface_press.or_else(|| self.surface_under()) else { return };
+        let Some((x, y)) = self.surface_point(node) else { return };
+        self.surface_input(node, protocol::surface::SurfaceInput::Move { x, y });
+    }
+
+    /// Scroll the surface under the pointer, if there is one there.
+    fn surface_wheel(&mut self, dx: f32, dy: f32) -> bool {
+        let Some(node) = self.surface_under() else { return false };
+        let Some((x, y)) = self.surface_point(node) else { return false };
+        // Our positive dy moves content up (toward the top of a page); the web's
+        // positive deltaY goes down the page.
+        let (dx, dy) = (-dx * self.pixel_scale, -dy * self.pixel_scale);
+        self.surface_input(node, protocol::surface::SurfaceInput::Wheel { x, y, dx, dy });
+        true
+    }
+
+    /// A key typed into focused surface node `node`: down, then up (the
+    /// backends report presses only).
+    fn surface_key(&mut self, node: NodeId, key: Key, mods: Mods) {
+        let (key, mods) = (surface::key_name(key), surface::mods(mods));
+        for pressed in [true, false] {
+            let event = protocol::surface::SurfaceInput::Key { key: key.clone(), pressed, mods };
+            self.surface_input(node, event);
         }
     }
 
@@ -5121,5 +5342,168 @@ mod terminal_tests {
         let ops = json!([{"op": "destroy", "id": 2}]);
         let out = call(&mut d, 3, "commit", json!({"window": window, "ops": ops}), false);
         assert!(out.contains(&Out::Detach { node }), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::demo;
+    use crate::input::{Input, Key, Mods};
+    use serde_json::json;
+    use std::io::Write;
+
+    const APP: &str = "org.example.web";
+
+    fn desk() -> Desktop {
+        let mut d = Desktop::with_fonts(1280.0, 800.0, crate::fonts::ui_only());
+        d.scene.apply_all(demo::build(1280.0, 800.0, 0));
+        d.set_screen(1280.0, 800.0);
+        d
+    }
+
+    fn call(d: &mut Desktop, id: u64, method: &str, params: Value, stream: bool) -> Vec<Out> {
+        let from = Some(Sender::App { app: APP.into(), conn: 3 });
+        d.call(Call::Request { id, from, method: method.into(), params, stream })
+    }
+
+    /// The requests to `web` with method `method`, by their params.
+    fn to_web(out: &[Out], method: &str) -> Vec<Value> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Request { to, method: m, params, .. } if to == "web" && m == method => {
+                    Some(params.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn buffer(bytes: &[u8]) -> std::os::fd::OwnedFd {
+        let path = std::env::temp_dir().join(format!(
+            "desktop-surface-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        f.into()
+    }
+
+    #[test]
+    fn a_surface_attaches_as_its_app_shows_frames_and_gets_input() {
+        let mut d = desk();
+        let out = call(&mut d, 1, "open_window", json!({"title": "Web", "width": 600, "height": 400}), true);
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let window = data["window"].as_u64().unwrap();
+        let ops = json!([
+            {"op": "create", "id": 3, "type": "vstack", "props": {"grow": 1}},
+            {"op": "create", "id": 2, "type": "surface", "props": {"service": "web", "id": "p1", "grow": 1}},
+            {"op": "insert", "parent": 1, "child": 3, "index": 0},
+            {"op": "insert", "parent": 3, "child": 2, "index": 0}
+        ]);
+        let out = call(&mut d, 2, "commit", json!({"window": window, "ops": ops}), false);
+        // Once laid out, it's attached as the app, at its size in pixels.
+        let (node, params) = out
+            .iter()
+            .find_map(|o| match o {
+                Out::AttachSurface { node, service, params } if service == "web" => {
+                    Some((*node, params.clone()))
+                }
+                _ => None,
+            })
+            .expect("attaches");
+        let (r, _) = d.scene.screen_rects()[&node];
+        assert_eq!(
+            params,
+            json!({"id": "p1", "as": APP, "width": r.w.round() as u32, "height": r.h.round() as u32, "scale": 1.0})
+        );
+        // On a Retina screen it's drawn at twice that.
+        d.set_pixel_scale(2.0);
+        let resize = to_web(&d.drain(), "resize");
+        let (w, h) = ((r.w * 2.0).round() as u32, (r.h * 2.0).round() as u32);
+        assert_eq!(resize, [json!({"id": "p1", "as": APP, "width": w, "height": h, "scale": 2.0})]);
+
+        // Buffers, then a frame: it's shown, and its buffer handed back.
+        let part = json!({"part": "buffers", "width": 2, "height": 1, "stride": 8, "count": 2});
+        d.call(Call::SurfacePart { node, part, fds: vec![buffer(&[1; 8]), buffer(&[2; 8])] });
+        let out = d.call(Call::SurfacePart {
+            node,
+            part: json!({"part": "frame", "buffer": 1, "seq": 1}),
+            fds: vec![],
+        });
+        assert_eq!(to_web(&out, "release"), [json!({"id": "p1", "as": APP, "buffer": 1, "seq": 1})]);
+        let list = d.draw_list();
+        let shown: Vec<_> = list.layers.iter().flat_map(|l| &l.images).filter(|i| i.node == node).collect();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].pixels.as_ref().unwrap().rgba, [2; 8]);
+        // The next frame replaces it in the cache, rather than piling up.
+        d.call(Call::SurfacePart {
+            node,
+            part: json!({"part": "frame", "buffer": 0, "seq": 2}),
+            fds: vec![],
+        });
+        assert_eq!(d.images.keys().filter(|k| k.starts_with("surface:")).count(), 1);
+
+        // A click focuses it and goes to the page, in its pixels. (The window is
+        // still sliding into place as it opens, so allow it a pixel or two.)
+        let (r, _) = d.scene.screen_rects()[&node];
+        let (x, y) = (r.x + 10.0, r.y + 20.0);
+        d.input(Input::MotionTo { x, y });
+        let mut out = d.input(Input::Button { pressed: true }).1;
+        out.extend(d.input(Input::Button { pressed: false }).1);
+        let events: Vec<Value> = to_web(&out, "input").into_iter().map(|p| p["event"].clone()).collect();
+        let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["focus", "button", "button"], "{events:?}");
+        assert_eq!(events[0]["on"], true);
+        assert_eq!((events[1]["pressed"].clone(), events[2]["pressed"].clone()), (json!(true), json!(false)));
+        let near = |e: &Value, k: &str, v: f64| (e[k].as_f64().unwrap() - v).abs() < 3.0;
+        assert!(
+            events[1..].iter().all(|e| near(e, "x", 20.0) && near(e, "y", 40.0) && e["button"] == "left")
+        );
+
+        // Keys go to it, down then up; Command shortcuts stay the system's.
+        let out = d.input(Input::Key { key: Key::Enter, mods: Mods::default() }).1;
+        let keys: Vec<Value> = to_web(&out, "input").into_iter().map(|p| p["event"].clone()).collect();
+        assert_eq!(
+            keys,
+            [
+                json!({"kind": "key", "key": "Enter", "pressed": true, "mods": {}}),
+                json!({"kind": "key", "key": "Enter", "pressed": false, "mods": {}})
+            ]
+        );
+        let out = d.input(Input::Key { key: Key::Char('q'), mods: Mods { logo: true, ..Mods::default() } }).1;
+        assert!(to_web(&out, "input").is_empty());
+
+        // The wheel scrolls the page: down the page when content moves up.
+        let out = d.input(Input::Scroll { dx: 0.0, dy: -3.0 }).1;
+        let wheel = to_web(&out, "input");
+        assert_eq!(
+            (wheel.len(), &wheel[0]["event"]["kind"], &wheel[0]["event"]["dy"]),
+            (1, &json!("wheel"), &json!(6.0))
+        );
+
+        // When the node goes, so does the attachment and its frame.
+        let ops = json!([{"op": "destroy", "id": 2}]);
+        let out = call(&mut d, 3, "commit", json!({"window": window, "ops": ops}), false);
+        assert!(out.contains(&Out::Detach { node }), "{out:?}");
+        assert_eq!(d.images.keys().filter(|k| k.starts_with("surface:")).count(), 0);
+    }
+
+    #[test]
+    fn a_surface_naming_no_proper_service_isnt_attached() {
+        let mut d = desk();
+        let out = call(&mut d, 1, "open_window", json!({"title": "Web", "width": 600, "height": 400}), true);
+        let [Out::Part { data, .. }] = &out[..] else { panic!("{out:?}") };
+        let window = data["window"].as_u64().unwrap();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "surface", "props": {"service": "../db", "id": "p1", "grow": 1}},
+            {"op": "create", "id": 3, "type": "surface", "props": {"service": "web", "grow": 1}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0},
+            {"op": "insert", "parent": 1, "child": 3, "index": 1}
+        ]);
+        let out = call(&mut d, 2, "commit", json!({"window": window, "ops": ops}), false);
+        assert!(!out.iter().any(|o| matches!(o, Out::AttachSurface { .. })), "{out:?}");
     }
 }

@@ -93,6 +93,15 @@ fn document() -> Value {
     g.subschema_for::<protocol::audio::RepeatParams>();
     g.subschema_for::<protocol::audio::Leveling>();
     g.subschema_for::<protocol::audio::OutputsResult>();
+    g.subschema_for::<protocol::surface::AttachParams>();
+    g.subschema_for::<protocol::surface::ReleaseParams>();
+    g.subschema_for::<protocol::surface::SurfacePart>();
+    g.subschema_for::<protocol::surface::InputParams>();
+    g.subschema_for::<protocol::surface::SurfaceInput>();
+    g.subschema_for::<protocol::web::OpenParams>();
+    g.subschema_for::<protocol::web::NavigateParams>();
+    g.subschema_for::<protocol::web::PageParams>();
+    g.subschema_for::<protocol::web::PageEvent>();
     g.subschema_for::<backup::BackupStatus>();
     g.subschema_for::<backup::DriveParams>();
     g.subschema_for::<backup::BackedUp>();
@@ -149,6 +158,9 @@ fn document() -> Value {
         "MAX_QUEUE": constant(protocol::audio::MAX_QUEUE.into(), "Most tracks audiod's queue holds."),
         "AUDIO_OUTPUT_KEY": constant(protocol::audio::OUTPUT_KEY.into(), "The Setting that picks audiod's sound output: an id from `outputs`, or null for the default."),
         "AUDIO_LEVELING_KEY": constant(protocol::audio::LEVELING_KEY.into(), "The Setting that picks how audiod levels loudness: off, track or album."),
+        "WEB_SERVICE": constant(protocol::web::SERVICE.into(), "The name browser-host claims."),
+        "MAX_PAGES": constant(protocol::web::MAX_PAGES.into(), "Most pages browser-host keeps open at once."),
+        "MAX_SURFACE_SIDE": constant(protocol::surface::MAX_SIDE.into(), "The largest surface, in pixels on a side."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

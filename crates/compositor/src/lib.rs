@@ -35,6 +35,7 @@ pub mod scene;
 pub mod shell;
 pub mod stats;
 pub mod style;
+pub mod surface;
 pub mod terminal;
 pub mod textedit;
 pub mod texthistory;

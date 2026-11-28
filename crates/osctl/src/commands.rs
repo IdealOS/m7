@@ -254,7 +254,7 @@ pub fn tap_line(p: &Publication) -> String {
         Message::Publish { topic, data, .. } => format!("{who} publish {topic}{}", compact(&data)),
         Message::Subscribe { topic, .. } => format!("{who} subscribe {topic}"),
         Message::Unsubscribe { topic, .. } => format!("{who} unsubscribe {topic}"),
-        Message::Stream { id, data } => format!("{who} stream {id}{}", compact(&data)),
+        Message::Stream { id, data, .. } => format!("{who} stream {id}{}", compact(&data)),
         Message::Cancel { id } => format!("{who} cancel {id}"),
     }
 }

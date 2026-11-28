@@ -1,0 +1,36 @@
+[package]
+name = "browser-host"
+description = "The web service: runs Servo and draws pages into surfaces the compositor shows."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Outside the main workspace: Servo is several hundred crates (and SpiderMonkey)
+# that nothing else needs, so `cargo test` at the top stays quick. Build it here:
+# `cargo build --release` (in the build VM for the device, or on the Mac to run
+# hosted).
+
+[workspace]
+
+[dependencies]
+protocol = { path = "../protocol" }
+bus-client = { path = "../bus-client" }
+serde = "1"
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+tokio = { version = "1.54", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+# As in spikes/servo-offscreen: no GStreamer (media), clipboard or devtools.
+# Resources and FreeType are built in, so it needs fontconfig, and GL (EGL and
+# GLES on Linux), at run time.
+servo = { version = "=0.8.0", default-features = false, features = ["bundled", "js_jit"] }
+dpi = "0.1"
+euclid = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+url = "2"
+libc = "0.2"
+
+[profile.release]
+debug = false
+strip = true

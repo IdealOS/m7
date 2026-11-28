@@ -422,9 +422,9 @@ Later:
 
 ### M13: Browser (Servo)
 
-- [ ] `browser-host` embeds Servo and renders each tab into a buffer shared with the compositor as a dmabuf, shown through an external-surface node.
-- [ ] Input forwarding from the compositor to Servo.
-- [ ] Browser app: tabs, address bar, back and forward. History and bookmarks are documents.
+- [x] `browser-host` embeds Servo and renders each page into buffers shared with the compositor, shown through a `surface` node. Done with shared memory: Servo draws offscreen, browser-host reads the frame back into one of two memfds (an unlinked file on the Mac) and streams a part saying which, the compositor copies it into a texture and releases the buffer. The buffers' descriptors go out once per size on the `attach` stream (streamed parts can now carry descriptors). Left: zero-copy dmabufs on the Pi (a GPU-backed `RenderingContext` of our own; see Spike E), and the image (browser-host built in the VM, fontconfig, CA certificates, working name lookup, a `web` line in session.conf).
+- [x] Input forwarding from the compositor to Servo: pointer moves, the left button, the wheel and keys (down and up), and focus, in the surface's pixels; the surface is sized in screen pixels with the screen's scale, so pages are sharp on a Retina display.
+- [ ] Browser app: tabs, address bar, back and forward. History and bookmarks are documents. Started: the **Web** app (`apps/web`) has the address bar, back, forward and reload, and one page.
 - [ ] Downloads go through `importd`.
 - [ ] Runs with the network grant, in its own sandbox.
 

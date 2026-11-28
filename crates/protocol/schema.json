@@ -130,6 +130,35 @@
       ],
       "type": "object"
     },
+    "AttachParams": {
+      "description": "Params of `attach`: the session, the size it's shown at (in pixels), and\nhow many of those pixels make a logical one.",
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "scale": {
+          "default": 1.0,
+          "format": "float",
+          "type": "number"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
     "AudioStatus": {
       "description": "Result of most methods, and each part of `watch`.\n\nWhere the current track is: `position` seconds at `at` (milliseconds since the\nUnix epoch). While playing, add the time since `at`; watchers aren't sent a\npart for every second that passes.",
       "properties": {
@@ -576,6 +605,15 @@
         "total"
       ],
       "type": "object"
+    },
+    "Button": {
+      "description": "Which mouse button.",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ],
+      "type": "string"
     },
     "CapabilityRule": {
       "description": "A capability: `network`, `clipboard`, `permissions` or `service:NAME`.",
@@ -1417,6 +1455,22 @@
       ],
       "type": "object"
     },
+    "InputParams": {
+      "description": "Params of `input`.",
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/SurfaceInput"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "event"
+      ],
+      "type": "object"
+    },
     "Kind": {
       "description": "What a file is, by its name, and so what importing it makes.",
       "oneOf": [
@@ -1553,6 +1607,27 @@
       ],
       "type": "object"
     },
+    "Load": {
+      "description": "How far a page has loaded.",
+      "oneOf": [
+        {
+          "enum": [
+            "started"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "parsed",
+          "description": "Its `<head>` is read: the title and the start of the page are coming.",
+          "type": "string"
+        },
+        {
+          "const": "complete",
+          "description": "It and everything on it have loaded.",
+          "type": "string"
+        }
+      ]
+    },
     "LoginParams": {
       "description": "Params of `login`: keep `password` for `user` on computer `host`.",
       "properties": {
@@ -1678,6 +1753,12 @@
             "data": {
               "default": null
             },
+            "fds": {
+              "description": "Descriptors that travel with this part, as on a request.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
             "id": {
               "format": "uint64",
               "minimum": 0,
@@ -1794,6 +1875,25 @@
         }
       ]
     },
+    "Mods": {
+      "description": "Modifier keys held.",
+      "properties": {
+        "alt": {
+          "type": "boolean"
+        },
+        "ctrl": {
+          "type": "boolean"
+        },
+        "logo": {
+          "description": "Command on a Mac keyboard, the Windows key on others.",
+          "type": "boolean"
+        },
+        "shift": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "NameParams": {
       "description": "Params of `claim` and `release`.",
       "properties": {
@@ -1816,6 +1916,22 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "NavigateParams": {
+      "description": "Params of `navigate`: what was typed in the address bar. An address without a\nscheme gets `https://`.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "url"
       ],
       "type": "object"
     },
@@ -1906,7 +2022,7 @@
       "type": "object"
     },
     "NodeKind": {
-      "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`).",
+      "description": "Node types understood by the compositor: primitives (`group`, `rect`, `text`,\n`image`), containers that lay out their children (`vstack`, `hstack`,\n`toolbar`, `grid`, `split`, `scroll`, `dialog`), and widgets the compositor\ndraws and drives itself (`label`, `button`, `checkbox`, `toggle`, `slider`,\n`select`, `menu`, `text_field`, `text_area`, `vlist`, `terminal`), and\n`surface`, whose pixels another process draws.",
       "oneOf": [
         {
           "enum": [
@@ -1946,6 +2062,11 @@
           "const": "terminal",
           "description": "A terminal showing pty session `pty` (see `pty`), which the app\nopened. The compositor attaches to the session as the app, draws its\nscreen, and sends it what's typed and the size that fits; the app sees\nnone of it.",
           "type": "string"
+        },
+        {
+          "const": "surface",
+          "description": "Pixels drawn by service `service` for its session `id` (a web page from\n`web`, say), which the app opened. The compositor attaches to the session\nas the app (see `surface`), shows its frames at the node's size, and\nsends it the pointer and, while focused, the keyboard.",
+          "type": "string"
         }
       ]
     },
@@ -1969,6 +2090,18 @@
         "cols",
         "rows"
       ],
+      "type": "object"
+    },
+    "OpenParams2": {
+      "description": "Params of `open`: where to start, if anywhere (a blank page otherwise).",
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "OpenWindowParams": {
@@ -2094,6 +2227,130 @@
       },
       "required": [
         "outputs"
+      ],
+      "type": "object"
+    },
+    "PageEvent": {
+      "description": "A part of `open`'s streamed answer.",
+      "oneOf": [
+        {
+          "description": "The first part: the page's id, for the `surface` node and the methods.",
+          "properties": {
+            "event": {
+              "const": "opened",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The page is at `url` now.",
+          "properties": {
+            "event": {
+              "const": "url",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "url"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The page's title (none if it has none).",
+          "properties": {
+            "event": {
+              "const": "title",
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "event"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "event": {
+              "const": "load",
+              "type": "string"
+            },
+            "load": {
+              "$ref": "#/$defs/Load"
+            }
+          },
+          "required": [
+            "event",
+            "load"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Whether there's somewhere to go back or forward to.",
+          "properties": {
+            "back": {
+              "type": "boolean"
+            },
+            "event": {
+              "const": "history",
+              "type": "string"
+            },
+            "forward": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "event",
+            "back",
+            "forward"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The page's content process failed; the stream ends after this.",
+          "properties": {
+            "event": {
+              "const": "crashed",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PageParams": {
+      "description": "Params of `back`, `forward` and `reload`.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
       ],
       "type": "object"
     },
@@ -2298,6 +2555,30 @@
       "required": [
         "id",
         "title"
+      ],
+      "type": "object"
+    },
+    "ReleaseParams": {
+      "description": "Params of `release`: frame `seq`, in buffer `buffer`, has been copied out,\nand the buffer may be drawn into. (The frame's number keeps a release that\ncrossed a resize from freeing a new buffer of the same number.)",
+      "properties": {
+        "buffer": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "buffer",
+        "seq"
       ],
       "type": "object"
     },
@@ -3198,6 +3479,207 @@
       ],
       "type": "object"
     },
+    "SurfaceInput": {
+      "description": "Something the user did to a surface. Positions are in the surface's pixels,\nfrom its top left.",
+      "oneOf": [
+        {
+          "description": "The pointer moved to (x, y).",
+          "properties": {
+            "kind": {
+              "const": "move",
+              "type": "string"
+            },
+            "x": {
+              "format": "float",
+              "type": "number"
+            },
+            "y": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "x",
+            "y"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A button went down or up at (x, y).",
+          "properties": {
+            "button": {
+              "$ref": "#/$defs/Button"
+            },
+            "kind": {
+              "const": "button",
+              "type": "string"
+            },
+            "pressed": {
+              "type": "boolean"
+            },
+            "x": {
+              "format": "float",
+              "type": "number"
+            },
+            "y": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "x",
+            "y",
+            "button",
+            "pressed"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The wheel or trackpad scrolled by (dx, dy) pixels at (x, y); positive `dy`\nmoves the view down the page, as the web's `deltaY` does.",
+          "properties": {
+            "dx": {
+              "format": "float",
+              "type": "number"
+            },
+            "dy": {
+              "format": "float",
+              "type": "number"
+            },
+            "kind": {
+              "const": "wheel",
+              "type": "string"
+            },
+            "x": {
+              "format": "float",
+              "type": "number"
+            },
+            "y": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "x",
+            "y",
+            "dx",
+            "dy"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A key went down or up. `key` is named as the web's `KeyboardEvent.key`: the\ncharacter it types (`\"a\"`, `\"A\"`, `\" \"`), or a name (`\"Enter\"`, `\"ArrowLeft\"`).",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "key",
+              "type": "string"
+            },
+            "mods": {
+              "$ref": "#/$defs/Mods"
+            },
+            "pressed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "key",
+            "pressed",
+            "mods"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The surface gained or lost the keyboard.",
+          "properties": {
+            "kind": {
+              "const": "focus",
+              "type": "string"
+            },
+            "on": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "on"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SurfacePart": {
+      "description": "A part of `attach`'s streamed answer.",
+      "oneOf": [
+        {
+          "description": "New buffers, replacing any before: `count` shared-memory descriptors come\nwith this part, each `stride * height` bytes of 8-bit RGBA, rows top first.",
+          "properties": {
+            "count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "height": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "part": {
+              "const": "buffers",
+              "type": "string"
+            },
+            "stride": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "width": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "part",
+            "width",
+            "height",
+            "stride",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Buffer `buffer` holds a new frame. `seq` counts frames.",
+          "properties": {
+            "buffer": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "part": {
+              "const": "frame",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "part",
+            "buffer",
+            "seq"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SystemStyleResult": {
       "description": "Result of `system_style`: the built-in system style sheet, for reference.",
       "properties": {
@@ -3665,6 +4147,10 @@
       "description": "Most service names one connection may claim.",
       "value": 64
     },
+    "MAX_PAGES": {
+      "description": "Most pages browser-host keeps open at once.",
+      "value": 8
+    },
     "MAX_PENDING_REQUESTS": {
       "description": "Most requests one connection may have waiting for an answer at once; past it the broker answers `limit_exceeded`.",
       "value": 1024
@@ -3684,6 +4170,10 @@
     "MAX_SUBSCRIPTIONS": {
       "description": "Most subscription patterns one connection may hold.",
       "value": 256
+    },
+    "MAX_SURFACE_SIDE": {
+      "description": "The largest surface, in pixels on a side.",
+      "value": 4096
     },
     "MAX_TIMEOUT_MS": {
       "description": "Longest `timeout_ms` the broker honors; longer ones are shortened to this.",
@@ -3720,6 +4210,10 @@
     "TAP_TOPIC": {
       "description": "The broker's trace of every message; only trusted connections may subscribe.",
       "value": "bus.tap"
+    },
+    "WEB_SERVICE": {
+      "description": "The name browser-host claims.",
+      "value": "web"
     },
     "WINDOW_CONTENT": {
       "description": "The node id of a window's content area in that window's commits.",
