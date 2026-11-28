@@ -1,0 +1,13 @@
+/* The Music app's own look. */
+
+/* A title that plays or opens something: a button without its chrome until
+   it's hovered, so rows read as text. */
+.flat { background: transparent; border-color: transparent; }
+.flat:hover { background: var(--control-hover); border-color: transparent; }
+.flat:pressed { background: var(--control-pressed); border-color: transparent; }
+
+/* The track playing, wherever it's listed. */
+.current { color: var(--accent); font-weight: bold; }
+
+.album-title { font-size: 26px; font-weight: bold; }
+.err { color: var(--danger); }

@@ -399,8 +399,8 @@ The library:
 
 The player app:
 
-- [ ] Browse by artist, album, genre and year, with cover art; full-text search over titles, artists and albums.
-- [ ] Now playing: large cover art, progress, and the queue beside it.
+- [ ] Browse by artist, album, genre and year, with cover art; full-text search over titles, artists and albums. Done (`apps/music`): albums as a grid of covers, an album's tracks, artists, every song, and a search (each word, without case or accents) over titles, artists and albums. Albums group by album artist, or else by the folder the files came from, so a soundtrack stays one album by "Various artists". Lists are virtual, so a library of thousands costs only the rows on screen. Left: genre and year, and covers in JPEG (the compositor's image widget decodes only PNG; an album without a picture shows its initials on a colour of its own).
+- [ ] Now playing: large cover art, progress, and the queue beside it. Done: a bar along the bottom (cover, title, previous, play and pause, next, a position slider that seeks once a drag rests, shuffle, repeat, volume) and an Up Next view of audiod's queue (jump to, remove, clear). Each track has Play next and Add to Up Next. Left: a large now-playing view.
 - [ ] Playlists: make, edit and reorder them (drag and drop).
 
 Later:

@@ -2102,6 +2102,9 @@ impl Desktop {
                 self.request_in(id, from, &method, params, stream)
             }
         }
+        // Lay out what the call changed, so what depends on layout (a virtual
+        // list's visible rows) is sent now, not after some later call or input.
+        self.relayout();
         self.drain()
     }
 
@@ -2767,7 +2770,8 @@ mod tests {
             panic!()
         };
         let out = d.call(request(request_id + 1000, "commit", json!({"window": window, "ops": ops}), false));
-        assert!(matches!(out.last(), Some(Out::Respond { result: Ok(_), .. })), "{out:?}");
+        // Answered; events from laying out what it made (a list's rows) may follow.
+        assert!(out.iter().any(|o| matches!(o, Out::Respond { result: Ok(_), .. })), "{out:?}");
         window
     }
 
@@ -3132,8 +3136,8 @@ mod tests {
             [Out::Part { data, .. }] => data["window"].as_u64().unwrap(),
             other => panic!("{other:?}"),
         };
-        d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
-        let out = d.call(Call::Cancel { id: 999 }); // any call relays out
+        // The commit's own answer carries the rows to make.
+        let out = d.call(request(8, "commit", json!({"window": window, "ops": ops}), false));
         let first = events(&out);
         assert_eq!(first, [(2, "range".into(), json!([0, 4]))]);
         let vlist = global(&d, window, 2);
@@ -3141,6 +3145,60 @@ mod tests {
         d.input(Input::MotionTo { x: at.0, y: at.1 });
         let out = d.input(Input::Scroll { dx: 0.0, dy: 210.0 }).1;
         assert_eq!(events(&out), [(2, "range".into(), json!([10, 15]))]);
+    }
+
+    #[test]
+    fn a_virtual_list_whose_count_comes_later_reports_rows_at_once() {
+        // An app's list of what it hasn't loaded yet starts empty; the rows to
+        // make must follow the count, with no input or other call needed.
+        let mut d = desk();
+        let ops = json!([
+            {"op": "create", "id": 2, "type": "vlist", "props": {"row_height": 20, "h": 100}},
+            {"op": "insert", "parent": 1, "child": 2, "index": 0}
+        ]);
+        let out = d.call(request(7, "open_window", json!({"title": "List"}), true));
+        let window = match &out[..] {
+            [Out::Part { data, .. }] => data["window"].as_u64().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            events(&d.call(request(8, "commit", json!({"window": window, "ops": ops}), false))).is_empty()
+        );
+        let set = json!([{"op": "set", "id": 2, "props": {"count": 3}}]);
+        let out = d.call(request(9, "commit", json!({"window": window, "ops": set}), false));
+        assert_eq!(events(&out), [(2, "range".into(), json!([0, 2]))]);
+    }
+
+    #[test]
+    fn a_virtual_lists_rows_span_the_list() {
+        // A list sized only by growing, and a row that is a stack: a spacer that
+        // grows pushes the row's last label to the list's right edge.
+        let mut d = desk();
+        let w = open(
+            &mut d,
+            7,
+            json!([
+                {"op": "create", "id": 2, "type": "vstack", "props": {"grow": 1}},
+                {"op": "create", "id": 3, "type": "vlist", "props": {"count": 1, "row_height": 30, "grow": 1}},
+                {"op": "create", "id": 4, "type": "hstack", "props": {"index": 0}},
+                {"op": "create", "id": 5, "type": "label", "props": {"text": "Title"}},
+                {"op": "create", "id": 6, "type": "label", "props": {"text": "", "grow": 1}},
+                {"op": "create", "id": 7, "type": "label", "props": {"text": "3:59"}},
+                {"op": "insert", "parent": 1, "child": 2, "index": 0},
+                {"op": "insert", "parent": 2, "child": 3, "index": 0},
+                {"op": "insert", "parent": 3, "child": 4, "index": 0},
+                {"op": "insert", "parent": 4, "child": 5, "index": 0},
+                {"op": "insert", "parent": 4, "child": 6, "index": 1},
+                {"op": "insert", "parent": 4, "child": 7, "index": 2}
+            ]),
+        );
+        d.relayout();
+        let rects = d.scene.screen_rects();
+        let (list, row, time) =
+            (rects[&global(&d, w, 3)].0, rects[&global(&d, w, 4)].0, rects[&global(&d, w, 7)].0);
+        assert!(list.w > 300.0, "{list:?}");
+        assert_eq!((row.w, row.h), (list.w, 30.0));
+        assert!((time.x + time.w - (list.x + list.w)).abs() < 1.0, "time {time:?} in list {list:?}");
     }
 
     #[test]
@@ -4407,8 +4465,7 @@ mod terminal_tests {
                 _ => None,
             })
             .expect("attaches");
-        // Laying out tells ptyd the size that fits, as the app.
-        let out = d.call(Call::Cancel { id: 999 });
+        // Laying out the commit tells ptyd the size that fits, as the app.
         let resize = out.iter().find_map(|o| match o {
             Out::Request { method, params, .. } if method == "resize" => Some(params.clone()),
             _ => None,

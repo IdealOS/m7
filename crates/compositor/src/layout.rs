@@ -95,7 +95,11 @@ impl Layout {
                     && !hidden(scene, id)
             })
             .collect();
-        for root in roots {
+        // A virtual list's rows are roots sized by the list, so lay them out after
+        // the trees that size the lists.
+        let (rows, others): (Vec<NodeId>, Vec<NodeId>) =
+            roots.into_iter().partition(|&id| in_vlist(scene, id));
+        for root in others.into_iter().chain(rows) {
             self.lay_out_root(scene, root, &mut out);
         }
         out
@@ -109,10 +113,15 @@ impl Layout {
         // A root fills its parent (a window's content area) unless it has a size; a
         // dialog keeps its own size, since it floats over its parent.
         let floats = scene.node(root).is_some_and(|n| n.kind == NodeKind::Dialog);
-        let parent = scene
-            .parent(root)
-            .and_then(|p| scene.local_rect(p))
-            .filter(|r| r.w > 0.0 && r.h > 0.0 && !floats);
+        let parent = if in_vlist(scene, root) {
+            // A row: as wide as its list (laid out just now), one row high.
+            let list = scene.parent(root).expect("in a list");
+            let row = num(&scene.node(list).expect("exists").props, "row_height", 28.0).max(1.0);
+            out.rects.get(&list).or(scene.layout_rect(list).as_ref()).map(|r| Rect { h: row, ..*r })
+        } else {
+            scene.parent(root).and_then(|p| scene.local_rect(p))
+        }
+        .filter(|r| r.w > 0.0 && r.h > 0.0 && !floats);
         let mut style = tree.style(top).expect("built").clone();
         if dim(props.get("w")).is_none()
             && let Some(p) = parent
@@ -195,6 +204,11 @@ pub fn container_kind(kind: NodeKind) -> bool {
             | NodeKind::Scroll
             | NodeKind::Dialog
     )
+}
+
+/// Whether `id` is a row of a virtual list.
+fn in_vlist(scene: &Scene, id: NodeId) -> bool {
+    scene.parent(id).and_then(|p| scene.node(p)).is_some_and(|n| n.kind == NodeKind::Vlist)
 }
 
 fn hidden(scene: &Scene, id: NodeId) -> bool {

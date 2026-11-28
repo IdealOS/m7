@@ -1,0 +1,19 @@
+{
+  "name": "@idealos/app-music",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "idealos": {
+    "id": "org.idealos.music",
+    "name": "Music",
+    "autostart": false,
+    "permissions": [{ "type": "Track", "access": ["read"] }, { "capability": "service:audio" }]
+  },
+  "scripts": {
+    "build": "node ../../tools/build-app.ts .",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}
