@@ -98,7 +98,7 @@ BR2_PACKAGE_IDEALOS_USERSPACE=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
 BR2_TARGET_ROOTFS_EXT2_LABEL="root-a"
-BR2_TARGET_ROOTFS_EXT2_SIZE="512M"
+BR2_TARGET_ROOTFS_EXT2_SIZE="1G"
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_GENIMAGE=y
@@ -110,3 +110,7 @@ BR2_PACKAGE_HOST_MTOOLS=y
 # The compositor shapes text with cosmic-text, which panics with no fonts installed.
 # Bundled fonts are still an open M1 item; DejaVu covers it until then.
 BR2_PACKAGE_DEJAVU=y
+# browser-host (Servo) finds fonts through fontconfig, and checks HTTPS sites
+# against the CA certificates.
+BR2_PACKAGE_FONTCONFIG=y
+BR2_PACKAGE_CA_CERTIFICATES=y

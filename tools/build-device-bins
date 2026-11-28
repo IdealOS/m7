@@ -35,4 +35,5 @@ mkdir -p "$BIN"
 for b in $DEVICE_BINS; do
 	rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:out/$BOARD/target/usr/bin/$b" "$BIN/$b"
 done
+"$REPO/tools/build-browser-host"
 echo "Device binaries in target/device"

@@ -26,7 +26,7 @@ push() {
 
 # Everything goes to the writable /opt/idealos overlay. session and the services
 # it starts (through dev-exec) prefer binaries there over the image's copies.
-for b in $DEVICE_BINS; do
+for b in $DEVICE_BINS $NATIVE_BINS; do
 	[ -f "$BIN/$b" ] || { echo "No $BIN/$b. Run tools/build-device-bins."; exit 1; }
 	push "/opt/idealos/bin/$b" 755 <"$BIN/$b"
 done
@@ -46,4 +46,4 @@ done
 # session stops its services on SIGTERM; init then respawns it from /opt/idealos/bin,
 # and its `apps` service installs the pushed bundles.
 remote 'kill $(pidof session)'
-echo "Deployed $(echo $DEVICE_BINS | wc -w | tr -d ' ') binaries and $apps apps to $HOST:$PORT"
+echo "Deployed $(echo $DEVICE_BINS $NATIVE_BINS | wc -w | tr -d ' ') binaries and $apps apps to $HOST:$PORT"

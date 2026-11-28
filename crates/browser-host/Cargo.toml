@@ -3,7 +3,8 @@ name = "browser-host"
 description = "The web service: runs Servo and draws pages into surfaces the compositor shows."
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+# src/gl.rs is adapted from Servo, and stays MPL-2.0.
+license = "(MIT OR Apache-2.0) AND MPL-2.0"
 publish = false
 
 # Outside the main workspace: Servo is several hundred crates (and SpiderMonkey)
@@ -30,6 +31,10 @@ euclid = "0.22"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 url = "2"
 libc = "0.2"
+# For src/gl.rs, a rendering context on the GPU: the versions Servo uses.
+surfman = "=0.14.0"
+gleam = "0.15"
+glow = "0.17"
 
 [profile.release]
 debug = false

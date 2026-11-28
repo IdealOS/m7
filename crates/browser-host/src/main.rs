@@ -8,6 +8,7 @@
 //! compositor. The bus has its own thread with a small tokio runtime, and the two
 //! talk over channels.
 
+mod gl;
 mod host;
 mod shm;
 mod surface;

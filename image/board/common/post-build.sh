@@ -21,6 +21,21 @@ if [ -d "$TARGET_DIR/etc/NetworkManager" ]; then
 	ln -snf /data/var/lib/NetworkManager "$TARGET_DIR/var/lib/NetworkManager"
 fi
 
+# Name lookup: NetworkManager writes the resolver config it got from DHCP to
+# /run/NetworkManager/resolv.conf (the root filesystem is read-only), so point
+# /etc/resolv.conf there. Buildroot's skeleton points it at /run/resolv.conf,
+# which nothing writes.
+ln -snf ../run/NetworkManager/resolv.conf "$TARGET_DIR/etc/resolv.conf"
+
+# browser-host (the web service: Servo) builds natively in the VM, not as a
+# Buildroot package; tools/build-browser-host leaves it here.
+if [ -x "$HOME/browser-host/browser-host" ]; then
+	install -D -m 0755 "$HOME/browser-host/browser-host" "$TARGET_DIR/usr/bin/browser-host"
+else
+	echo "post-build: no ~/browser-host/browser-host (run tools/build-browser-host); the image has no web service" >&2
+	rm -f "$TARGET_DIR/usr/bin/browser-host"
+fi
+
 # tools/build-image puts the public half of image/output/dev-key here, so
 # tools/deploy-to-pi can log in as root. It is not in git.
 if [ -f "$BOARD_COMMON/dev-key.pub" ]; then

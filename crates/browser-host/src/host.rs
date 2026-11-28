@@ -15,11 +15,12 @@ use serde_json::{Value, json};
 use servo::{
     Code, DeviceIntRect, DevicePoint, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
     Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey, RenderingContext,
-    Servo, ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint,
-    WheelDelta, WheelEvent, WheelMode,
+    Servo, ServoBuilder, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent,
+    WheelMode,
 };
 use url::Url;
 
+use crate::gl::GpuContext;
 use crate::surface::{Surface, checked};
 use crate::{Out, Waker, error};
 
@@ -69,7 +70,7 @@ struct Page {
     /// The `open` request, whose stream the page's events go out on.
     open: u64,
     view: WebView,
-    rc: Rc<SoftwareRenderingContext>,
+    rc: Rc<GpuContext>,
     delegate: Rc<Delegate>,
     surface: Option<Surface>,
 }
@@ -178,7 +179,7 @@ impl Host {
             None => "about:blank".to_owned(),
         };
         let url = Url::parse(&url).map_err(|e| error(code::BAD_REQUEST, e.to_string()))?;
-        let rc = SoftwareRenderingContext::new(PhysicalSize::new(START_SIZE.0, START_SIZE.1))
+        let rc = GpuContext::new(PhysicalSize::new(START_SIZE.0, START_SIZE.1))
             .map_err(|e| error("unavailable", format!("no GL for a page: {e:?}")))?;
         let rc = Rc::new(rc);
         let _ = rc.make_current();

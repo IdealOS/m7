@@ -93,6 +93,12 @@ export const GUEST_SCRIPT = [
   String.raw`printf 'RIFF\044\167\001\000WAVEfmt \020\000\000\000\001\000\001\000\200\273\000\000\000\167\001\000\002\000\020\000data\000\167\001\000' > /run/smoke.wav; head -c 96000 /dev/urandom >> /run/smoke.wav`,
   `TH=$(osctl db put-blob /run/smoke.wav | grep -o '"hash":"[0-9a-f]*"' | cut -d'"' -f4); TID=$(osctl db create Track '{"title":"Smoke","audio":{"$blob":"'$TH'"}}' | sed 's/.*"id":"\\([^"]*\\)".*/\\1/')`,
   `osctl audio play "$TID" >/dev/null 2>&1; i=0; while [ $i -lt 10 ] && ! osctl db get "$TID" 2>/dev/null | grep -q playCount; do sleep 1; i=$((i+1)); done; echo SMOKE audio-played $(osctl db get "$TID" 2>&1 | grep -o '"playCount":[0-9]*')`,
+  // M13: browser-host is on the bus and can open a page (which makes a GL
+  // context and starts Servo), and the image can look up names and check HTTPS.
+  "echo SMOKE web-service $(osctl bus list 2>&1 | grep -c '^web ')",
+  `echo SMOKE web-open $(timeout 30 osctl bus stream web open '{"url":"about:blank"}' 2>&1 | grep -c '"event":"opened"')`,
+  "grep -q '^nameserver' /etc/resolv.conf && echo SMOKE resolv ok",
+  "[ -s /etc/ssl/certs/ca-certificates.crt ] && echo SMOKE ca-certs ok",
   // session keeps what it and the services print in /data/log/session.log (for
   // reading over SSH), stamped like dmesg; the console shell keeps the terminal.
   String.raw`grep -q "^\[ *[0-9]*\.[0-9]*\] session: started compositor" /data/log/session.log && grep -q "^\[.*\] .*kms: first frame on screen" /data/log/session.log && echo SMOKE session-log ok`,
@@ -125,8 +131,11 @@ export function evaluate(log: string): Check[] {
   const cacheFiles = Number(f.get("shader-cache-files") ?? 0);
   // Mesa: "Failed to create //.cache for shader cache (Read-only file system)---disabling."
   const cacheOff = /^.*for shader cache.*$/m.exec(log);
-  // wgpu's OpenGL backend probing EGL; the renderer only asks for Vulkan.
-  const egl = /^.*libEGL warning.*$/m.exec(log);
+  // wgpu's OpenGL backend probing EGL as the compositor starts; the renderer only
+  // asks for Vulkan. Only before its first frame: later, browser-host makes GL
+  // contexts for pages, and in QEMU Mesa warns as it falls back to the CPU.
+  const firstFrame = log.search(FIRST_FRAME);
+  const egl = /^.*libEGL warning.*$/m.exec(firstFrame >= 0 ? log.slice(0, firstFrame) : log);
   const bench = f.get("bus-bench") ?? "";
   const rps = Number(/requests_per_s=(\d+)/.exec(bench)?.[1] ?? 0);
   const rtt = /rtt_p50_us=([\d.]+)/.exec(bench)?.[1];
@@ -208,6 +217,10 @@ export function evaluate(log: string): Check[] {
     fact("sound-card", "1", "the kernel found the virtio sound card"),
     fact("audio-output", "1", "audiod opened a sound output (not silent)"),
     fact("audio-played", '"playCount":1', "a Track played to its end"),
+    fact("web-service", "1", "browser-host is on the bus"),
+    fact("web-open", "1", "browser-host opened a page"),
+    fact("resolv", "ok", "/etc/resolv.conf names a name server"),
+    fact("ca-certs", "ok", "the CA certificates are installed"),
     fact("session-log", "ok", "session kept the services' output in /data/log/session.log, stamped"),
     fact("console-tty", "ok", "the console shell writes to the terminal, not the log"),
     {

@@ -64,6 +64,10 @@ const GOOD = [
   "SMOKE sound-card 1",
   "SMOKE audio-output 1",
   'SMOKE audio-played "playCount":1',
+  "SMOKE web-service 1",
+  "SMOKE web-open 1",
+  "SMOKE resolv ok",
+  "SMOKE ca-certs ok",
   "SMOKE session-log ok",
   "SMOKE console-tty ok",
   '[2026-11-21T10:00:05Z INFO  compositor::desktop] apps: opened a window for App { app: "org.idealos.counter", conn: 9 }: "Counter"',
@@ -441,4 +445,11 @@ test("a Play/Pause key audiod never answered fails", () => {
   const log = INPUT_LOG.replace("empty: nothing is queued", "no_such_service: no service named audio");
   const failed = evaluateInput(log, inputPlan(1280, 800)).filter((c) => !c.ok);
   assert.deepEqual(failed.map((c) => [c.name, c.detail]), [["the Play/Pause key reached audiod", "no answer from audiod logged"]]);
+});
+
+test("browser-host's EGL warnings after the first frame aren't the compositor's", () => {
+  // Regression: opening a page in QEMU makes Mesa warn as it falls back to its
+  // CPU renderer, and the OpenGL check blamed the compositor for it.
+  const log = GOOD.replace("SMOKE web-service 1", "SMOKE web-service 1\nlibEGL warning: egl: failed to create dri2 screen");
+  assert.deepEqual(evaluate(log).filter((c) => !c.ok), []);
 });

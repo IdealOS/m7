@@ -28,6 +28,8 @@ vm_require
 # Every board builds with the shared cross-toolchain; make it first if it's missing.
 vm_run "[ -x ~/toolchains/idealos-aarch64/bin/aarch64-buildroot-linux-gnu-gcc ]" || "$REPO/tools/build-toolchain"
 vm_sync
+# Servo's browser-host builds natively in the VM; post-build.sh installs it.
+"$REPO/tools/build-browser-host"
 # Source downloads live outside the Buildroot tree so they survive version bumps.
 # idealos-userspace is a local package: Buildroot copies it once and never notices
 # later edits, so clean it each time to build the repo as it is now.

@@ -468,6 +468,8 @@ dependencies = [
  "dpi",
  "env_logger",
  "euclid",
+ "gleam",
+ "glow",
  "libc",
  "log",
  "protocol",
@@ -475,6 +477,7 @@ dependencies = [
  "serde",
  "serde_json",
  "servo",
+ "surfman",
  "tokio",
  "url",
 ]

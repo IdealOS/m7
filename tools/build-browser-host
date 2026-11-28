@@ -1,0 +1,21 @@
+#!/bin/sh
+# Build browser-host (crates/browser-host: the web service, Servo inside) in the
+# idealos-build VM, and copy it to target/device for tools/deploy-to-pi.
+#
+# Servo builds natively in the VM rather than with the image's cross-toolchain:
+# the VM is aarch64 like the Pi, its glibc (Ubuntu 24.04, 2.39) is older than the
+# image's, and the binary needs only libstdc++, zlib and fontconfig from the
+# image. tools/build-image runs this, and post-build.sh installs the result from
+# ~/browser-host/browser-host in the VM. The first build takes about ten minutes.
+# Usage: tools/build-browser-host
+set -eu
+. "$(dirname "$0")/_vm.sh"
+vm_require
+vm_sync
+vm_run "set -e
+	cd ~/idealos/crates/browser-host
+	CARGO_TARGET_DIR=\$HOME/browser-host/target cargo build --release --locked
+	install -m 0755 \$HOME/browser-host/target/release/browser-host \$HOME/browser-host/browser-host"
+mkdir -p "$REPO/target/device"
+rsync -a -e "ssh -F $SSH_CONFIG" "lima-$VM:browser-host/browser-host" "$REPO/target/device/browser-host"
+echo "browser-host in target/device"
