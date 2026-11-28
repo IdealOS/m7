@@ -180,6 +180,7 @@ app that asked, so an app can queue only the tracks it may read.
 | `volume` | `{volume}` | the status (0 to 1) |
 | `shuffle` | `{on}` | the status: what follows the current track shuffled, or put back in order |
 | `repeat` | `{repeat}` | the status: `off`, `all` or `one` |
+| `outputs` | none | `{outputs: [{id, name}], current?}`: the sound outputs there are now, and the one in use if it's one of them |
 
 `state` is `playing`, `paused` or `stopped`. `queue` is in play order, each entry
 `{id, title, artist?, album?, duration?, artwork?}` (the cover's blob hash). The
@@ -190,10 +191,25 @@ Tracks follow each other without a gap. When one is heard to its end, its
 is skipped, and said in `error`. Formats: MP3, AAC (M4A), ALAC, FLAC, Vorbis, WAV
 and AIFF (not Opus). Error codes: `not_found`, `empty`, `too_many`.
 
+Two `Setting` documents steer audiod, which follows them live (Settings > Sound
+writes them):
+
+- `audio.output`: the `id` of an output from `outputs`, or `null` (or no
+  setting) for the system's default. Changing it closes the old output, opens the
+  new one and goes on from where the music was. An output that isn't there plays
+  to the default instead. On Linux, `outputs` offers one entry per sound card (of
+  ALSA's many names for each: `hdmi:`, else `sysdefault:`, else `plughw:`), the
+  Pi's named "HDMI 1", "HDMI 2" and "Headphones".
+- `audio.leveling`: `off`, `track` (the default) or `album`. Each track's
+  samples are scaled by its ReplayGain (a `Track`'s `replayGain`, which importd
+  reads from the file's tags), the album's gain with `album` (falling back to the
+  track's, and the other way round), never so far that the track's peak would
+  clip, nor more than 12 dB up. Tracks without it play as they are.
+
 Shorthands: `osctl audio status`, `watch`, `play ID... | --album NAME [--artist
 NAME] [--start N]`, `enqueue ID... [--next yes]`, `pause`, `resume`, `toggle`,
 `stop`, `next`, `previous`, `clear`, `jump N`, `remove N`, `seek SECS`, `volume V`,
-`shuffle on|off`, `repeat off|all|one`.
+`shuffle on|off`, `repeat off|all|one`, `outputs`.
 
 ## net: networking
 

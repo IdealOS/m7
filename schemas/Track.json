@@ -19,7 +19,18 @@
     "artwork": { "x-kind": "blob" },
     "rating": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Stars the listener gave it, 1 to 5; missing when unrated." },
     "playCount": { "type": "integer", "minimum": 0, "description": "Times played to the end." },
-    "lastPlayed": { "type": "integer", "description": "When it last played to the end, in milliseconds since the Unix epoch." }
+    "lastPlayed": { "type": "integer", "description": "When it last played to the end, in milliseconds since the Unix epoch." },
+    "replayGain": {
+      "type": "object",
+      "description": "ReplayGain from the file's tags: dB to turn the track (or its album) by to play at the standard loudness, and its loudest sample (1 is full scale).",
+      "properties": {
+        "trackGain": { "type": "number" },
+        "trackPeak": { "type": "number", "minimum": 0 },
+        "albumGain": { "type": "number" },
+        "albumPeak": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
   },
   "x-indexes": ["artist", "album"]
 }

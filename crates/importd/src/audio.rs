@@ -33,6 +33,12 @@ pub struct Tags {
     pub year: Option<u16>,
     /// Seconds.
     pub duration: Option<f64>,
+    /// ReplayGain: how many dB to turn the track (or its whole album) up or down
+    /// to play at the standard loudness, and its loudest sample (1 is full scale).
+    pub track_gain: Option<f64>,
+    pub track_peak: Option<f64>,
+    pub album_gain: Option<f64>,
+    pub album_peak: Option<f64>,
     #[serde(skip)]
     pub artwork: Option<Artwork>,
 }
@@ -61,11 +67,24 @@ pub fn read(file: &mut std::fs::File, ext: &str) -> Result<Tags, String> {
     tags.track = tag.track();
     tags.disc = tag.disk();
     tags.year = tag.date().map(|d| d.year).filter(|&y| y > 0);
+    let number = |key: ItemKey| tag.get_string(key).and_then(replay_gain_number);
+    tags.track_gain = number(ItemKey::ReplayGainTrackGain);
+    tags.track_peak = number(ItemKey::ReplayGainTrackPeak);
+    tags.album_gain = number(ItemKey::ReplayGainAlbumGain);
+    tags.album_peak = number(ItemKey::ReplayGainAlbumPeak);
     let picture = tag.get_picture_type(PictureType::CoverFront).or_else(|| tag.pictures().first());
     tags.artwork = picture
         .filter(|p| !p.data().is_empty())
         .map(|p| Artwork { bytes: p.data().to_vec(), mime: p.mime_type().map(|m| m.as_str().to_owned()) });
     Ok(tags)
+}
+
+/// A ReplayGain tag's number: "-6.54 dB" for a gain, "0.988" for a peak.
+fn replay_gain_number(text: &str) -> Option<f64> {
+    let t = text.trim();
+    let t =
+        t.strip_suffix("dB").or_else(|| t.strip_suffix("db")).or_else(|| t.strip_suffix("DB")).unwrap_or(t);
+    t.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 /// A `Track` document's data from `tags`, titled `name` when the file has no title.
@@ -85,6 +104,20 @@ pub fn track(tags: &Tags, name: &str, audio: &str, artwork: Option<&str>) -> Map
     put("discNumber", json!(tags.disc));
     put("year", json!(tags.year));
     put("duration", json!(tags.duration.map(|d| (d * 1000.0).round() / 1000.0)));
+    let mut gain = Map::new();
+    for (key, v) in [
+        ("trackGain", tags.track_gain),
+        ("trackPeak", tags.track_peak),
+        ("albumGain", tags.album_gain),
+        ("albumPeak", tags.album_peak),
+    ] {
+        if let Some(v) = v {
+            gain.insert(key.into(), json!(v));
+        }
+    }
+    if !gain.is_empty() {
+        t.insert("replayGain".into(), Value::Object(gain));
+    }
     t.insert("audio".into(), json!({"$blob": audio}));
     if let Some(hash) = artwork {
         t.insert("artwork".into(), json!({"$blob": hash}));
@@ -132,6 +165,9 @@ pub mod tests {
             tag.set_track(3);
             tag.set_disk(1);
             tag.set_genre("Ambient".into());
+            tag.insert_text(ItemKey::ReplayGainTrackGain, "-6.54 dB".into());
+            tag.insert_text(ItemKey::ReplayGainTrackPeak, "0.988525".into());
+            tag.insert_text(ItemKey::ReplayGainAlbumGain, "+1.2 dB".into());
         }
         if let Some(bytes) = picture {
             tag.push_picture(
@@ -168,12 +204,18 @@ pub mod tests {
         assert_eq!(data["audio"], json!({"$blob": "aa"}));
         assert_eq!(data["artwork"], json!({"$blob": "bb"}));
         assert!(!data.contains_key("year"), "nothing missing is written");
+        assert_eq!(
+            data["replayGain"],
+            json!({"trackGain": -6.54, "trackPeak": 0.988525, "albumGain": 1.2}),
+            "ReplayGain as numbers; no album peak was tagged"
+        );
 
         // No title: the file's name.
         let bare = dir.join("bare.wav");
         tagged_wav(&bare, None, None);
         let tags = read_path(&bare).unwrap();
         assert_eq!(track(&tags, "bare", "aa", None)["title"], "bare");
+        assert!(!track(&tags, "bare", "aa", None).contains_key("replayGain"));
         let junk = dir.join("junk.mp3");
         std::fs::write(&junk, b"not music at all").unwrap();
         assert!(read_path(&junk).is_err());

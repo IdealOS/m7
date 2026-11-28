@@ -11,10 +11,11 @@
       { "capability": "service:net" },
       { "capability": "service:backup" },
       { "capability": "service:session" },
+      { "capability": "service:audio" },
       { "capability": "permissions" },
       { "capability": "storage" },
       { "type": "App", "access": ["read"] },
-      { "type": "Setting", "access": ["read", "write", "create"], "filter": { "key": { "$in": ["appearance.theme", "appearance.reduce_motion"] } } }
+      { "type": "Setting", "access": ["read", "write", "create"], "filter": { "key": { "$in": ["appearance.theme", "appearance.reduce_motion", "audio.output", "audio.leveling"] } } }
     ]
   },
   "scripts": {

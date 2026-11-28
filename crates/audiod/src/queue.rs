@@ -6,6 +6,8 @@
 
 use protocol::audio::{QueueItem, Repeat};
 
+use crate::gain::ReplayGain;
+
 pub type Key = u64;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +16,14 @@ pub struct Entry {
     pub item: QueueItem,
     /// The blob hash of its audio.
     pub audio: String,
+    pub gain: ReplayGain,
+}
+
+/// Where a queued track's sound comes from: its audio blob, and how loud it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub audio: String,
+    pub gain: ReplayGain,
 }
 
 #[derive(Default)]
@@ -68,14 +78,14 @@ impl Queue {
     }
 
     /// Replace everything with `items`; their keys, in order.
-    pub fn replace(&mut self, items: Vec<(QueueItem, String)>) -> Vec<Key> {
+    pub fn replace(&mut self, items: Vec<(QueueItem, Source)>) -> Vec<Key> {
         self.entries.clear();
         self.unshuffled = None;
         self.add(items, self.entries.len())
     }
 
     /// Add `items` at the end, or right after `after` (the current track).
-    pub fn enqueue(&mut self, items: Vec<(QueueItem, String)>, after: Option<Key>) -> Vec<Key> {
+    pub fn enqueue(&mut self, items: Vec<(QueueItem, Source)>, after: Option<Key>) -> Vec<Key> {
         let at = after.and_then(|k| self.index(k)).map_or(self.entries.len(), |i| i + 1);
         let keys = self.add(items, at);
         if let Some(order) = &mut self.unshuffled {
@@ -85,12 +95,12 @@ impl Queue {
         keys
     }
 
-    fn add(&mut self, items: Vec<(QueueItem, String)>, at: usize) -> Vec<Key> {
+    fn add(&mut self, items: Vec<(QueueItem, Source)>, at: usize) -> Vec<Key> {
         let entries: Vec<Entry> = items
             .into_iter()
-            .map(|(item, audio)| {
+            .map(|(item, Source { audio, gain })| {
                 self.next_key += 1;
-                Entry { key: self.next_key, item, audio }
+                Entry { key: self.next_key, item, audio, gain }
             })
             .collect();
         let keys = entries.iter().map(|e| e.key).collect();
@@ -180,7 +190,7 @@ impl Queue {
 mod tests {
     use super::*;
 
-    fn items(names: &[&str]) -> Vec<(QueueItem, String)> {
+    fn items(names: &[&str]) -> Vec<(QueueItem, Source)> {
         names
             .iter()
             .map(|n| {
@@ -192,7 +202,7 @@ mod tests {
                     duration: None,
                     artwork: None,
                 };
-                (item, format!("hash-{n}"))
+                (item, Source { audio: format!("hash-{n}"), gain: ReplayGain::default() })
             })
             .collect()
     }

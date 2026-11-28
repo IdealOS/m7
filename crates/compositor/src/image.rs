@@ -34,6 +34,7 @@ pub fn decode_jpeg(bytes: &[u8]) -> Result<Arc<Image>, String> {
     let mut decoder = Decoder::new(std::io::Cursor::new(bytes));
     decoder.read_info().map_err(|e| format!("not a JPEG: {e}"))?;
     let info = decoder.info().ok_or("the JPEG has no size")?;
+    let orientation = decoder.exif_data().map_or(1, exif_orientation);
     let (mut w, mut h) = (u32::from(info.width), u32::from(info.height));
     if w == 0 || h == 0 {
         return Err("the JPEG is empty".into());
@@ -71,7 +72,69 @@ pub fn decode_jpeg(bytes: &[u8]) -> Result<Arc<Image>, String> {
     if rgba.len() != (w * h) as usize * 4 {
         return Err("the image's data is the wrong size".into());
     }
-    Ok(Arc::new(Image { width: w, height: h, rgba }))
+    Ok(Arc::new(orient(Image { width: w, height: h, rgba }, orientation)))
+}
+
+/// The orientation EXIF data (from its TIFF header on) gives a photo: 1 to 8 as
+/// TIFF numbers them, 1 (upright) when it doesn't say or can't be read.
+pub fn exif_orientation(tiff: &[u8]) -> u16 {
+    const ORIENTATION: u16 = 0x0112;
+    const SHORT: u16 = 3;
+    let big = match tiff.get(..2) {
+        Some(b"MM") => true,
+        Some(b"II") => false,
+        _ => return 1,
+    };
+    let u16_at = |at: usize| {
+        tiff.get(at..at + 2)
+            .map(|b| if big { u16::from_be_bytes([b[0], b[1]]) } else { u16::from_le_bytes([b[0], b[1]]) })
+    };
+    let u32_at = |at: usize| {
+        tiff.get(at..at + 4).map(|b| {
+            let b = [b[0], b[1], b[2], b[3]];
+            if big { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+        })
+    };
+    if u16_at(2) != Some(42) {
+        return 1;
+    }
+    let Some(ifd) = u32_at(4).map(|o| o as usize) else { return 1 };
+    let count = u16_at(ifd).unwrap_or(0) as usize;
+    (0..count)
+        .map(|i| ifd + 2 + i * 12)
+        .find(|&e| u16_at(e) == Some(ORIENTATION) && u16_at(e + 2) == Some(SHORT))
+        .and_then(|e| u16_at(e + 8))
+        .filter(|o| (1..=8).contains(o))
+        .unwrap_or(1)
+}
+
+/// `img` turned and flipped as EXIF `orientation` says, so it shows upright:
+/// 2 mirrored, 3 turned half round, 4 flipped, 5 transposed, 6 turned a quarter
+/// clockwise, 7 transversed, 8 turned a quarter anticlockwise.
+pub fn orient(img: Image, orientation: u16) -> Image {
+    if !(2..=8).contains(&orientation) {
+        return img;
+    }
+    let (w, h) = (img.width as usize, img.height as usize);
+    let sideways = orientation >= 5;
+    let (ow, oh) = if sideways { (h, w) } else { (w, h) };
+    let mut rgba = vec![0; img.rgba.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = match orientation {
+                2 => (w - 1 - x, y),
+                3 => (w - 1 - x, h - 1 - y),
+                4 => (x, h - 1 - y),
+                5 => (y, x),
+                6 => (h - 1 - y, x),
+                7 => (h - 1 - y, w - 1 - x),
+                _ => (y, w - 1 - x),
+            };
+            let (from, to) = ((y * w + x) * 4, (dy * ow + dx) * 4);
+            rgba[to..to + 4].copy_from_slice(&img.rgba[from..from + 4]);
+        }
+    }
+    Image { width: ow as u32, height: oh as u32, rgba }
 }
 
 /// Decode a PNG of any color type and bit depth into RGBA.
@@ -156,6 +219,91 @@ mod tests {
         let [r, g, b, a] = at(&gray, 3, 8);
         assert!(r == g && g == b && a == 255, "grey: {:?}", [r, g, b, a]);
         assert!(r.abs_diff(at(&gray, 28, 8)[0]) > 20, "red and blue are different greys");
+    }
+
+    /// `jpeg` with an EXIF block saying `orientation`, as cameras write it
+    /// (big-endian if `big`).
+    fn with_orientation(jpeg: &[u8], orientation: u16, big: bool) -> Vec<u8> {
+        let u16b = |v: u16| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let u32b = |v: u32| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let mut tiff: Vec<u8> = if big { b"MM".to_vec() } else { b"II".to_vec() };
+        tiff.extend(u16b(42));
+        tiff.extend(u32b(8));
+        tiff.extend(u16b(2)); // two entries: something else first
+        for (tag, value) in [(0x010f_u16, 0_u16), (0x0112, orientation)] {
+            tiff.extend(u16b(tag));
+            tiff.extend(u16b(3));
+            tiff.extend(u32b(1));
+            tiff.extend(u16b(value));
+            tiff.extend([0, 0]);
+        }
+        tiff.extend(u32b(0));
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(tiff);
+        let mut out = vec![0xff, 0xd8, 0xff, 0xe1];
+        out.extend(((app1.len() + 2) as u16).to_be_bytes());
+        out.extend(app1);
+        // The rest, without any EXIF it had (the decoder keeps the last).
+        let mut at = 2;
+        while jpeg[at] == 0xff && jpeg[at + 1] != 0xda {
+            let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            if jpeg[at + 1] != 0xe1 {
+                out.extend(&jpeg[at..at + 2 + len]);
+            }
+            at += 2 + len;
+        }
+        out.extend(&jpeg[at..]);
+        out
+    }
+
+    #[test]
+    fn photos_are_turned_upright_as_their_exif_says() {
+        // COLOR is red on the left, blue on the right.
+        let red = [255, 0, 0];
+        // Orientation, the size it shows at, and where the red half is.
+        type Point = (u32, u32);
+        let cases: [(u16, Point, Point); 8] = [
+            (1, (32, 16), (3, 8)),
+            (2, (32, 16), (28, 8)),
+            (3, (32, 16), (28, 8)),
+            (4, (32, 16), (3, 8)),
+            (5, (16, 32), (8, 3)),
+            (6, (16, 32), (8, 3)),
+            (7, (16, 32), (8, 28)),
+            (8, (16, 32), (8, 28)),
+        ];
+        for (o, size, red_at) in cases {
+            for big in [false, true] {
+                let img = decode(&with_orientation(COLOR, o, big)).unwrap();
+                assert_eq!((img.width, img.height), size, "orientation {o}");
+                assert!(near(at(&img, red_at.0, red_at.1), red), "orientation {o}: red at {red_at:?}");
+            }
+        }
+        // Flips and turns that look alike on two colours, told apart on a 2x2.
+        let px = |rgba: &[u8]| rgba.chunks(4).map(|p| p[0]).collect::<Vec<_>>();
+        let img = || Image {
+            width: 2,
+            height: 2,
+            rgba: [1, 2, 3, 4].iter().flat_map(|&v| [v, 0, 0, 255]).collect(),
+        };
+        assert_eq!(px(&orient(img(), 4).rgba), [3, 4, 1, 2], "flipped top to bottom");
+        assert_eq!(px(&orient(img(), 3).rgba), [4, 3, 2, 1], "half round");
+        assert_eq!(px(&orient(img(), 5).rgba), [1, 3, 2, 4], "transposed");
+        assert_eq!(px(&orient(img(), 6).rgba), [3, 1, 4, 2], "a quarter clockwise");
+        assert_eq!(px(&orient(img(), 7).rgba), [4, 2, 3, 1], "transversed");
+        assert_eq!(px(&orient(img(), 8).rgba), [2, 4, 1, 3], "a quarter anticlockwise");
+    }
+
+    #[test]
+    fn exif_that_says_nothing_sensible_leaves_a_photo_upright() {
+        assert_eq!(exif_orientation(b""), 1);
+        assert_eq!(exif_orientation(b"XX\0\x2a\0\0\0\x08"), 1, "not a TIFF header");
+        assert_eq!(exif_orientation(b"II\x2a\0\xff\xff\0\0"), 1, "IFD past the end");
+        let mut cut = with_orientation(COLOR, 6, false);
+        cut.truncate(30); // inside the IFD
+        assert_eq!(exif_orientation(&cut[12..]), 1);
+        let img = decode(&with_orientation(COLOR, 9, false)).unwrap();
+        assert_eq!((img.width, img.height), (32, 16), "no orientation 9");
     }
 
     #[test]

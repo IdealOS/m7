@@ -14,6 +14,7 @@
 //! heard to its end, its `playCount` and `lastPlayed` are updated.
 
 pub mod decode;
+pub mod gain;
 pub mod output;
 pub mod player;
 pub mod queue;
@@ -27,8 +28,9 @@ use std::time::Duration;
 
 use bus_client::{CallError, Client, Incoming};
 use protocol::audio::{
-    AudioStatus, EnqueueParams, IndexParams, MAX_QUEUE, PlayParams, PlayState, QueueItem, Repeat,
-    RepeatParams, SeekParams, ShuffleParams, VolumeParams, code, method,
+    AudioStatus, EnqueueParams, IndexParams, LEVELING_KEY, Leveling, MAX_QUEUE, OUTPUT_KEY, OutputsResult,
+    PlayParams, PlayState, QueueItem, Repeat, RepeatParams, SeekParams, ShuffleParams, VolumeParams, code,
+    method,
 };
 use protocol::bus::code as bus_code;
 use protocol::db::{self, DocsResult};
@@ -37,9 +39,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use gain::ReplayGain;
 use output::{Output, Shared};
 use player::{Cmd, Event, Load};
-use queue::{Key, Queue, Wrap};
+use queue::{Key, Queue, Source, Wrap};
 
 /// How often the service checks which track is audible.
 pub const TICK: Duration = Duration::from_millis(100);
@@ -50,7 +53,8 @@ pub const RESTART_AFTER: f64 = 3.0;
 /// How audiod plays.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The sound device: any whose name contains this; `None` for the default.
+    /// The sound device: the one with this id, or any whose name contains it;
+    /// `None` for the default. The `audio.output` setting, once read, decides.
     pub device: Option<String>,
     /// Play to nowhere, keeping time (no sound device; for tests and machines
     /// without sound).
@@ -72,12 +76,12 @@ pub struct Engine {
     shared: Arc<Shared>,
     cmds: std::sync::mpsc::Sender<Cmd>,
     events: UnboundedReceiver<Event>,
-    _decoder: std::thread::JoinHandle<()>,
+    config: Config,
 }
 
 impl Engine {
-    /// Open the output (falling back to silent if there's no sound device) and
-    /// start the decoder thread.
+    /// Open the output (the default one if the one asked for isn't there, and
+    /// silent if there's no sound device at all) and start the decoder thread.
     pub fn start(config: &Config) -> Engine {
         let shared = Shared::new(config.volume.clamp(0.0, 1.0));
         let ring = Arc::new(Mutex::new(None));
@@ -91,7 +95,13 @@ impl Engine {
         let output = if config.silent {
             Output::null(output::DEFAULT_RATE, config.speed, make(shared.clone(), ring.clone()))
         } else {
-            match Output::device(config.device.as_deref(), make(shared.clone(), ring.clone())) {
+            let chosen = match &config.device {
+                Some(d) => Output::device(Some(d), make(shared.clone(), ring.clone())).map_err(|e| {
+                    log::warn!("audiod: {e}; playing to the default output");
+                }),
+                None => Err(()),
+            };
+            match chosen.or_else(|()| Output::device(None, make(shared.clone(), ring.clone()))) {
                 Ok(o) => o,
                 Err(e) => {
                     log::warn!("audiod: {e}; playing silently");
@@ -102,13 +112,14 @@ impl Engine {
         let producer = ring.lock().unwrap().take().expect("the output made the ring");
         let (cmds, cmd_rx) = std::sync::mpsc::channel();
         let (event_tx, events) = tokio::sync::mpsc::unbounded_channel();
-        let decoder = player::spawn(output.rate, shared.clone(), producer, cmd_rx, event_tx);
+        // The thread ends when `cmds` is dropped.
+        player::spawn(output.rate, shared.clone(), producer, cmd_rx, event_tx);
         log::info!(
             "audiod: playing to {} at {} Hz",
             output.name.as_deref().unwrap_or("nowhere (silent)"),
             output.rate
         );
-        Engine { output, shared, cmds, events, _decoder: decoder }
+        Engine { output, shared, cmds, events, config: config.clone() }
     }
 }
 
@@ -127,6 +138,12 @@ struct Service {
     cmds: std::sync::mpsc::Sender<Cmd>,
     rate: u32,
     output: Option<String>,
+    output_id: Option<String>,
+    /// How audiod was started, for starting again on another output.
+    config: Config,
+    /// The `audio.output` setting, once read (`Some(None)`: there's none).
+    chosen: Option<Option<String>>,
+    leveling: Leveling,
     queue: Queue,
     state: PlayState,
     shuffle: bool,
@@ -154,7 +171,9 @@ struct Service {
 /// Serve `engine` on `bus`, which must already have claimed `audio`.
 pub async fn serve(bus: Client, engine: Engine) -> Result<(), String> {
     let Some(mut requests) = bus.take_requests() else { return Ok(()) };
-    let Engine { output, shared, cmds, mut events, _decoder } = engine;
+    let Engine { output, shared, cmds, mut events, config } = engine;
+    let (settings_tx, mut settings) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(follow_settings(bus.clone(), settings_tx));
     let seed =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let mut s = Service {
@@ -163,6 +182,10 @@ pub async fn serve(bus: Client, engine: Engine) -> Result<(), String> {
         cmds,
         rate: output.rate,
         output: output.name.clone(),
+        output_id: output.id.clone(),
+        config,
+        chosen: None,
+        leveling: Leveling::default(),
         queue: Queue::new(seed),
         state: PlayState::Stopped,
         shuffle: false,
@@ -179,6 +202,7 @@ pub async fn serve(bus: Client, engine: Engine) -> Result<(), String> {
         watchers: Vec::new(),
         dirty: false,
     };
+    let mut output = Some(output);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -191,6 +215,19 @@ pub async fn serve(bus: Client, engine: Engine) -> Result<(), String> {
                 None => break,
             },
             Some(event) = events.recv() => s.event(event).await,
+            Some(change) = settings.recv() => match change {
+                Setting::Leveling(l) => s.set_leveling(l).await,
+                Setting::Output(id) => {
+                    // With no setting at first, stay on the output audiod started with.
+                    let started = s.chosen.is_none() && id.is_none();
+                    if s.chosen.as_ref() != Some(&id) {
+                        s.chosen = Some(id.clone());
+                        if !started {
+                            s.switch_output(&mut output, &mut events, id).await;
+                        }
+                    }
+                }
+            },
             _ = tick.tick() => s.sync(),
         }
         if s.dirty {
@@ -209,6 +246,12 @@ pub async fn serve(bus: Client, engine: Engine) -> Result<(), String> {
 
 impl Service {
     async fn request(&mut self, id: u64, from: Option<Sender>, method: &str, params: Value, stream: bool) {
+        if method == method::OUTPUTS {
+            let outputs = tokio::task::spawn_blocking(output::outputs).await.unwrap_or_default();
+            let current = self.output_id.clone().filter(|c| outputs.iter().any(|o| &o.id == c));
+            let _ = self.bus.respond(id, Ok(to_value(OutputsResult { outputs, current }))).await;
+            return;
+        }
         if method == method::WATCH {
             if stream {
                 let _ = self.bus.stream(id, to_value(self.status())).await;
@@ -343,7 +386,7 @@ impl Service {
         &self,
         from: Option<&Sender>,
         ids: &[String],
-    ) -> Result<Vec<(QueueItem, String)>, BusError> {
+    ) -> Result<Vec<(QueueItem, Source)>, BusError> {
         if ids.is_empty() {
             return Err(bad_request("no tracks given"));
         }
@@ -379,9 +422,63 @@ impl Service {
                     duration: doc.data.get("duration").and_then(Value::as_f64),
                     artwork: blob("artwork"),
                 };
-                Ok((item, audio))
+                Ok((item, Source { audio, gain: ReplayGain::from_doc(doc.data.get("replayGain")) }))
             })
             .collect()
+    }
+
+    /// What to scale track `key`'s samples by, as levelling is set now.
+    fn gain(&self, key: Key) -> f32 {
+        self.queue.get(key).map_or(1.0, |e| e.gain.factor(self.leveling))
+    }
+
+    /// Level loudness another way, from where the music is now.
+    async fn set_leveling(&mut self, leveling: Leveling) {
+        if self.leveling == leveling {
+            return;
+        }
+        log::info!("audiod: levelling {leveling:?}");
+        self.leveling = leveling;
+        if self.state != PlayState::Stopped {
+            self.restart_here().await;
+        }
+    }
+
+    /// Play to another output (`device`, or the one audiod started with), going
+    /// on from where the music was. The old one is closed first: a sound card
+    /// plays one stream at a time.
+    async fn switch_output(
+        &mut self,
+        output: &mut Option<Output>,
+        events: &mut UnboundedReceiver<Event>,
+        device: Option<String>,
+    ) {
+        let (state, at, volume) = (self.state, self.position(), self.shared.volume());
+        self.stop();
+        *output = None;
+        let config =
+            Config { device: device.or_else(|| self.config.device.clone()), volume, ..self.config.clone() };
+        // Opening a device takes a moment; audiod answers nothing meanwhile.
+        let engine = Engine::start(&config);
+        self.rate = engine.output.rate;
+        self.output = engine.output.name.clone();
+        self.output_id = engine.output.id.clone();
+        self.shared = engine.shared;
+        self.cmds = engine.cmds;
+        *events = engine.events;
+        *output = Some(engine.output);
+        self.hold = at;
+        self.dirty = true;
+        let Some(cur) = self.current else { return };
+        match state {
+            PlayState::Playing => self.play_from(cur, at).await,
+            PlayState::Paused => {
+                self.shared.paused.store(true, Ordering::Relaxed);
+                self.state = PlayState::Paused;
+                self.start(cur, at).await;
+            }
+            PlayState::Stopped => {}
+        }
     }
 
     /// Play `key` from `at`, playing (not paused).
@@ -417,7 +514,11 @@ impl Service {
             self.dirty = true;
             match self.open_audio(key).await {
                 Ok(file) => {
-                    let _ = self.cmds.send(Cmd::Start { epoch: self.epoch, load: Load { key, file }, at });
+                    let _ = self.cmds.send(Cmd::Start {
+                        epoch: self.epoch,
+                        load: Load { key, file, gain: self.gain(key) },
+                        at,
+                    });
                     return;
                 }
                 Err(e) => {
@@ -581,8 +682,11 @@ impl Service {
             };
             match self.open_audio(k).await {
                 Ok(file) => {
-                    let _ =
-                        self.cmds.send(Cmd::Next { epoch: self.epoch, after, load: Load { key: k, file } });
+                    let _ = self.cmds.send(Cmd::Next {
+                        epoch: self.epoch,
+                        after,
+                        load: Load { key: k, file, gain: self.gain(k) },
+                    });
                     self.told = Some((after, Some(k)));
                     return;
                 }
@@ -698,6 +802,73 @@ impl Service {
             CallError::Disconnected => fail(bus_code::NO_SUCH_SERVICE, "the bus closed the connection"),
         })?;
         serde_json::from_value(v).map_err(|e| fail(bus_code::BAD_REQUEST, format!("db answered oddly: {e}")))
+    }
+}
+
+/// A change to one of the settings audiod follows.
+#[derive(Debug, Clone, PartialEq)]
+enum Setting {
+    Output(Option<String>),
+    Leveling(Leveling),
+}
+
+/// Follow the `audio.output` and `audio.leveling` settings with a live query,
+/// sending each change (the output also when there's no setting, so the first
+/// report says so). If dbd isn't there (yet, or any more), try again a little
+/// later.
+async fn follow_settings(bus: Client, changes: tokio::sync::mpsc::UnboundedSender<Setting>) {
+    use protocol::db::{Doc, WatchEvent};
+    let query = json!({"type": "Setting", "where": {"key": {"$in": [OUTPUT_KEY, LEVELING_KEY]}}});
+    loop {
+        let mut stream = match bus.request_stream(db::SERVICE, "watch", query.clone()).await {
+            Ok(s) => s,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        let mut docs: std::collections::HashMap<String, Doc> = std::collections::HashMap::new();
+        let mut last: (Option<Option<String>>, Option<Leveling>) = (None, None);
+        while let Some(Ok(part)) = stream.next().await {
+            match serde_json::from_value::<WatchEvent>(part) {
+                Ok(WatchEvent::Initial { docs: all }) => {
+                    docs = all.into_iter().map(|d| (d.id.clone(), d)).collect()
+                }
+                Ok(WatchEvent::Diff { added, changed, removed, .. }) => {
+                    for id in removed {
+                        docs.remove(&id);
+                    }
+                    for d in added.into_iter().chain(changed) {
+                        docs.insert(d.id.clone(), d);
+                    }
+                }
+                Err(_) => continue,
+            }
+            // For each key, the most recently changed document decides.
+            let value = |key: &str| {
+                docs.values()
+                    .filter(|d| d.data.get("key") == Some(&json!(key)))
+                    .max_by_key(|d| d.updated)
+                    .and_then(|d| d.data.get("value").cloned())
+            };
+            let output =
+                value(OUTPUT_KEY).and_then(|v| v.as_str().map(str::to_owned)).filter(|s| !s.is_empty());
+            let leveling = value(LEVELING_KEY).and_then(|v| serde_json::from_value::<Leveling>(v).ok());
+            if last.0.as_ref() != Some(&output) {
+                last.0 = Some(output.clone());
+                if changes.send(Setting::Output(output)).is_err() {
+                    return;
+                }
+            }
+            let leveling = leveling.unwrap_or_default();
+            if last.1 != Some(leveling) {
+                last.1 = Some(leveling);
+                if changes.send(Setting::Leveling(leveling)).is_err() {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 

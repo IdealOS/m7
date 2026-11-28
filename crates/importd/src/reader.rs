@@ -108,6 +108,12 @@ pub fn check(reply: Reply, artwork: Vec<u8>) -> Found {
     tags.disc = tags.disc.filter(|n| (1..=999).contains(n));
     tags.year = tags.year.filter(|y| (1..=9999).contains(y));
     tags.duration = tags.duration.filter(|d| d.is_finite() && *d > 0.0 && *d < 1_000_000.0);
+    for g in [&mut tags.track_gain, &mut tags.album_gain] {
+        *g = g.filter(|v| v.is_finite() && (-64.0..=64.0).contains(v));
+    }
+    for p in [&mut tags.track_peak, &mut tags.album_peak] {
+        *p = p.filter(|v| v.is_finite() && *v > 0.0 && *v <= 100.0);
+    }
     let picture = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/tiff"];
     tags.artwork = match reply.artwork_mime {
         Some(m) if !artwork.is_empty() && picture.contains(&m.as_str()) => {
@@ -353,6 +359,10 @@ mod tests {
             track: Some(70_000),
             year: Some(1991),
             duration: Some(-5.0),
+            track_gain: Some(-7.5),
+            album_gain: Some(900.0),
+            track_peak: Some(-1.0),
+            album_peak: Some(1.2),
             ..Tags::default()
         };
         let reply = Reply {
@@ -366,6 +376,11 @@ mod tests {
         let (back, art) = read_reply(wire.as_slice()).unwrap();
         assert_eq!(back, reply);
         let found = check(back, art);
+        let t = &found.tags;
+        assert_eq!(
+            (t.track_gain, t.album_gain, t.track_peak, t.album_peak),
+            (Some(-7.5), None, None, Some(1.2))
+        );
         assert_eq!(found.tags.title.as_ref().unwrap().chars().count(), MAX_TAG_CHARS);
         assert!(!found.tags.title.unwrap().contains('\u{7}'));
         assert_eq!((found.tags.artist, found.tags.track, found.tags.year), (None, None, Some(1991)));

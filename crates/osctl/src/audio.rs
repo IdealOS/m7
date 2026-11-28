@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use bus_client::Client;
-use protocol::audio::{AudioStatus, PlayState, SERVICE, method};
+use protocol::audio::{AudioStatus, OutputsResult, PlayState, SERVICE, method};
 use protocol::db::DocsResult;
 use serde_json::{Value, json};
 
@@ -23,6 +23,8 @@ pub enum Tracks {
 #[derive(Debug, PartialEq)]
 pub enum Audio {
     Status,
+    /// The sound outputs there are, the one in use marked.
+    Outputs,
     /// Print each change until interrupted.
     Watch,
     Play {
@@ -76,10 +78,14 @@ pub fn parse(sub: &str, positional: &[String], flags: &[(String, String)]) -> Re
         method::CLEAR,
     ];
     match sub {
-        "status" | "watch" => {
+        "status" | "watch" | "outputs" => {
             allowed(&[])?;
             none()?;
-            Ok(if sub == "status" { Audio::Status } else { Audio::Watch })
+            Ok(match sub {
+                "status" => Audio::Status,
+                "watch" => Audio::Watch,
+                _ => Audio::Outputs,
+            })
         }
         "play" => {
             allowed(&["album", "artist", "start"])?;
@@ -167,6 +173,19 @@ pub async fn run(bus: &Client, what: Audio, out: &mut impl Write) -> Result<(), 
     let w = |e: std::io::Error| e.to_string();
     let status = match what {
         Audio::Status => call(bus, method::STATUS, Value::Null).await?,
+        Audio::Outputs => {
+            let v = bus.request(SERVICE, method::OUTPUTS, Value::Null).await.map_err(|e| e.to_string())?;
+            let r: OutputsResult =
+                serde_json::from_value(v).map_err(|e| format!("audiod answered oddly: {e}"))?;
+            for o in &r.outputs {
+                let mark = if r.current.as_ref() == Some(&o.id) { ">" } else { " " };
+                writeln!(out, "{mark} {}  ({})", o.name, o.id).map_err(w)?;
+            }
+            if r.outputs.is_empty() {
+                writeln!(out, "no sound outputs").map_err(w)?;
+            }
+            return Ok(());
+        }
         Audio::Watch => {
             let mut stream =
                 bus.request_stream(SERVICE, method::WATCH, Value::Null).await.map_err(|e| e.to_string())?;
@@ -263,6 +282,7 @@ mod tests {
     #[test]
     fn audio_commands_parse() {
         assert_eq!(parse("status", &[], &[]), Ok(Audio::Status));
+        assert_eq!(parse("outputs", &[], &[]), Ok(Audio::Outputs));
         assert_eq!(
             parse("play", &strings(&["a", "b"]), &[]),
             Ok(Audio::Play { tracks: Tracks::Ids(strings(&["a", "b"])), start: 0 })

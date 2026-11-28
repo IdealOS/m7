@@ -10,6 +10,11 @@
 //! The queue is in play order. Turning shuffle on shuffles what comes after the
 //! current track, and turning it off puts the original order back. When a track
 //! plays to its end, audiod adds one to its `playCount` and sets `lastPlayed`.
+//!
+//! Two `Setting` documents, which Settings writes, steer it, and it follows
+//! them as they change: [`OUTPUT_KEY`] picks the sound output (one of those
+//! `outputs` lists, by id; missing or `null` for the system's default), and
+//! [`LEVELING_KEY`] how loud tracks play ([`Leveling`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +23,12 @@ pub const SERVICE: &str = "audio";
 
 /// Most tracks the queue holds.
 pub const MAX_QUEUE: usize = 10_000;
+
+/// The `Setting` whose value is the id of the sound output to play to (as
+/// `outputs` gives it), or `null` for the system's default.
+pub const OUTPUT_KEY: &str = "audio.output";
+/// The `Setting` whose value is a [`Leveling`]: `"off"`, `"track"` or `"album"`.
+pub const LEVELING_KEY: &str = "audio.leveling";
 
 /// audiod's methods.
 ///
@@ -40,6 +51,7 @@ pub const MAX_QUEUE: usize = 10_000;
 /// | `volume`   | [`VolumeParams`]  | [`AudioStatus`] |
 /// | `shuffle`  | [`ShuffleParams`] | [`AudioStatus`] |
 /// | `repeat`   | [`RepeatParams`]  | [`AudioStatus`] |
+/// | `outputs`  | none              | [`OutputsResult`]: the sound outputs there are now |
 pub mod method {
     pub const STATUS: &str = "status";
     pub const WATCH: &str = "watch";
@@ -58,6 +70,7 @@ pub mod method {
     pub const VOLUME: &str = "volume";
     pub const SHUFFLE: &str = "shuffle";
     pub const REPEAT: &str = "repeat";
+    pub const OUTPUTS: &str = "outputs";
 }
 
 /// Error codes audiod sends, besides the broker's.
@@ -94,6 +107,43 @@ pub enum Repeat {
     All,
     /// Play the current track again and again.
     One,
+}
+
+/// How audiod evens out loudness between tracks, from their ReplayGain tags. A
+/// track without them plays as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Leveling {
+    /// Every track as it was mastered.
+    Off,
+    /// Each track at the same loudness.
+    #[default]
+    Track,
+    /// Each album at the same loudness, its tracks as loud as each other as the
+    /// album has them (a track without an album gain is levelled on its own).
+    Album,
+}
+
+/// A sound output audiod can play to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OutputDevice {
+    /// What the `audio.output` setting holds to choose it.
+    pub id: String,
+    /// What to show: "Headphones", "HDMI 1", a USB device's name.
+    pub name: String,
+}
+
+/// Result of `outputs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OutputsResult {
+    pub outputs: Vec<OutputDevice>,
+    /// The id of the one playing now, if it's one of them (not the system's
+    /// default, or nowhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 /// One entry of the queue: a track and what to show for it.

@@ -96,7 +96,7 @@ const USAGE: &str = "usage: osctl [--socket PATH] bus (list | hello | call TO ME
        osctl [--socket PATH] backup (status | setup DRIVE | now DRIVE | list DRIVE | restore DRIVE NAME)
        osctl [--socket PATH] import (login HOST USER | browse SOURCE [PATH] | run SOURCE PATH... [--detach yes] | status | undo CHANGE_SET)
        osctl [--socket PATH] style (get [TARGET] | set TARGET FILE | check FILE | reset TARGET)
-       osctl [--socket PATH] audio (status | watch | play (ID... | --album NAME [--artist NAME]) [--start N] \
+       osctl [--socket PATH] audio (status | watch | outputs | play (ID... | --album NAME [--artist NAME]) [--start N] \
 | enqueue (ID... | --album NAME) [--next yes] | pause | resume | toggle | stop | next | previous | clear \
 | jump N | remove N | seek SECS | volume V | shuffle on|off | repeat off|all|one)";
 

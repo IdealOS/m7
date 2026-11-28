@@ -6,6 +6,12 @@
 //
 // Integers are 64-bit on the wire; ids and counts stay well below 2^53.
 
+/** The Setting that picks how audiod levels loudness: off, track or album. */
+export const AUDIO_LEVELING_KEY = "audio.leveling";
+
+/** The Setting that picks audiod's sound output: an id from `outputs`, or null for the default. */
+export const AUDIO_OUTPUT_KEY = "audio.output";
+
 /** The name audiod claims. */
 export const AUDIO_SERVICE = "audio";
 
@@ -587,6 +593,21 @@ export type Kind =
   /** Anything else, not imported. */
   | "other";
 
+/**
+ * How audiod evens out loudness between tracks, from their ReplayGain tags. A
+ * track without them plays as it is.
+ */
+export type Leveling =
+  /** Every track as it was mastered. */
+  | "off"
+  /** Each track at the same loudness. */
+  | "track"
+  /**
+   * Each album at the same loudness, its tracks as loud as each other as the
+   * album has them (a track without an album gain is levelled on its own).
+   */
+  | "album";
+
 /** A link out of a document. */
 export type LinkInfo = {
   /** The field holding the link, such as `from.contact` or `tracks.3`. */
@@ -769,6 +790,24 @@ export type Origin = {
   hash: string;
   /** When it was imported, in milliseconds since the Unix epoch. */
   imported: number;
+};
+
+/** A sound output audiod can play to. */
+export type OutputDevice = {
+  /** What the `audio.output` setting holds to choose it. */
+  id: string;
+  /** What to show: "Headphones", "HDMI 1", a USB device's name. */
+  name: string;
+};
+
+/** Result of `outputs`. */
+export type OutputsResult = {
+  outputs: OutputDevice[];
+  /**
+   * The id of the one playing now, if it's one of them (not the system's
+   * default, or nowhere).
+   */
+  current?: string | null;
 };
 
 /**

@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use protocol::audio::OutputDevice;
+
 /// Seconds of audio the ring holds.
 pub const RING_SECONDS: f64 = 2.0;
 /// How long a change of gain takes.
@@ -125,6 +127,8 @@ impl Mixer {
 pub struct Output {
     /// The device's name, or none when playing to nowhere.
     pub name: Option<String>,
+    /// Its id, as [`outputs`] gives it.
+    pub id: Option<String>,
     pub rate: u32,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -166,11 +170,12 @@ impl Output {
                 })
                 .expect("spawn the null output")
         };
-        Output { name: None, rate, stop, thread: Some(thread) }
+        Output { name: None, id: None, rate, stop, thread: Some(thread) }
     }
 
-    /// Play to the sound device named `device` (any whose name contains it), or
-    /// the default one. Errors if there's none.
+    /// Play to the sound device `device`: the one with that id (as [`outputs`]
+    /// gives it), or failing that any whose name contains it; or the default
+    /// one. Errors if there's none.
     pub fn device(
         device: Option<&str>,
         make: impl FnOnce(u32) -> Mixer + Send + 'static,
@@ -178,7 +183,7 @@ impl Output {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         let want = device.map(str::to_owned);
         let stop = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(String, u32), String>>();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(String, Option<String>, u32), String>>();
         let thread = {
             let stop = stop.clone();
             std::thread::Builder::new()
@@ -187,11 +192,17 @@ impl Output {
                     let host = cpal::default_host();
                     let found = match &want {
                         None => host.default_output_device(),
-                        Some(w) => host.output_devices().ok().and_then(|mut all| {
-                            all.find(|d| {
-                                d.description().map(|n| n.name().contains(w.as_str())).unwrap_or(false)
-                            })
-                        }),
+                        Some(w) => {
+                            let all: Vec<cpal::Device> =
+                                host.output_devices().map(Iterator::collect).unwrap_or_default();
+                            let by_id = all.iter().position(|d| d.id().is_ok_and(|i| i.id() == w.as_str()));
+                            let by_name = || {
+                                all.iter().position(|d| {
+                                    d.description().is_ok_and(|n| n.name().contains(w.as_str()))
+                                })
+                            };
+                            by_id.or_else(by_name).map(|i| all[i].clone())
+                        }
                     };
                     let Some(dev) = found else {
                         let _ = tx.send(Err(match &want {
@@ -200,10 +211,9 @@ impl Output {
                         }));
                         return;
                     };
-                    let name = dev
-                        .description()
-                        .map(|d| d.name().to_owned())
-                        .unwrap_or_else(|_| "sound output".into());
+                    let described = describe(&dev);
+                    let id = described.as_ref().map(|o| o.id.clone());
+                    let name = described.map_or_else(|| "sound output".into(), |o| o.name);
                     let config = match dev.default_output_config() {
                         Ok(c) => c,
                         Err(e) => {
@@ -261,7 +271,7 @@ impl Output {
                             return;
                         }
                     };
-                    let _ = tx.send(Ok((name, rate)));
+                    let _ = tx.send(Ok((name, id, rate)));
                     // The stream plays while this thread holds it.
                     while !stop.load(Ordering::Relaxed) {
                         std::thread::park();
@@ -271,7 +281,7 @@ impl Output {
                 .map_err(|e| e.to_string())?
         };
         match rx.recv() {
-            Ok(Ok((name, rate))) => Ok(Output { name: Some(name), rate, stop, thread: Some(thread) }),
+            Ok(Ok((name, id, rate))) => Ok(Output { name: Some(name), id, rate, stop, thread: Some(thread) }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -282,6 +292,92 @@ impl Output {
             }
         }
     }
+}
+
+/// The sound outputs there are now, to choose from, by name. ALSA lists each
+/// card many ways (`hw:`, `plughw:`, `dmix:`, `front:`...); of those, one per
+/// card is offered: `hdmi:` for an HDMI port, else `sysdefault:`, else
+/// `plughw:`, which convert what they're given. Elsewhere, every output device.
+pub fn outputs() -> Vec<OutputDevice> {
+    use cpal::traits::HostTrait;
+    let host = cpal::default_host();
+    let all: Vec<OutputDevice> =
+        host.output_devices().map(|ds| ds.filter_map(|d| describe(&d)).collect()).unwrap_or_default();
+    let mut picked = per_card(&all);
+    if picked.is_empty() {
+        picked = all;
+    }
+    picked.sort_by(|a, b| a.name.cmp(&b.name));
+    picked.dedup_by(|a, b| a.id == b.id);
+    picked
+}
+
+/// A device's id and the name to show for it.
+fn describe(dev: &cpal::Device) -> Option<OutputDevice> {
+    use cpal::traits::DeviceTrait;
+    let id = dev.id().ok()?.id().to_owned();
+    let desc = dev.description().ok()?;
+    Some(OutputDevice { name: friendly(&id, desc.name()), id })
+}
+
+/// Of ALSA's many names for each card, the one to offer: see [`outputs`].
+fn per_card(all: &[OutputDevice]) -> Vec<OutputDevice> {
+    let mut best: Vec<(String, usize, &OutputDevice)> = Vec::new();
+    for o in all {
+        let Some((kind, card)) = alsa_card(&o.id) else { continue };
+        let rank = match kind {
+            "hdmi" => 0,
+            "sysdefault" => 1,
+            "plughw" => 2,
+            _ => continue,
+        };
+        match best.iter_mut().find(|(c, ..)| *c == card) {
+            Some(b) if rank < b.1 => *b = (card, rank, o),
+            Some(_) => {}
+            None => best.push((card, rank, o)),
+        }
+    }
+    // cpal also lists each card by number (`plughw:CARD=0,DEV=0`): drop those
+    // that are a card already offered by name.
+    // Compared by ALSA's own name for the card ("Card, Device"'s first part).
+    let shown = |o: &OutputDevice| o.name.split(", ").next().unwrap_or(&o.name).trim().to_owned();
+    let named: Vec<String> = best.iter().filter(|(c, ..)| !is_number(c)).map(|(.., o)| shown(o)).collect();
+    best.into_iter()
+        .filter(|(c, _, o)| !is_number(c) || !named.contains(&shown(o)))
+        .map(|(.., o)| o.clone())
+        .collect()
+}
+
+fn is_number(card: &str) -> bool {
+    !card.is_empty() && card.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An ALSA device id's kind and card: `("hdmi", "vc4hdmi0")` for
+/// `hdmi:CARD=vc4hdmi0,DEV=0`.
+fn alsa_card(id: &str) -> Option<(&str, String)> {
+    let (kind, rest) = id.split_once(':')?;
+    let card = rest.split(',').find_map(|p| p.strip_prefix("CARD="))?;
+    Some((kind, card.to_owned()))
+}
+
+/// The name to show for output `id`, which its system calls `name`. ALSA
+/// describes a card as "Card, Device" (often the same twice): the card, with the
+/// Pi's own outputs named for what they are.
+fn friendly(id: &str, name: &str) -> String {
+    if let Some((_, card)) = alsa_card(id) {
+        if let Some(n) = card.strip_prefix("vc4hdmi").and_then(|n| n.parse::<u32>().ok()) {
+            return format!("HDMI {}", n + 1);
+        }
+        if card == "Headphones" {
+            return "Headphones".into();
+        }
+        let first = name.split(", ").next().unwrap_or(name).trim();
+        if !first.is_empty() {
+            return first.to_owned();
+        }
+        return card;
+    }
+    name.to_owned()
 }
 
 /// A callback for devices that take integer samples: mix as `f32`, then convert.
@@ -303,6 +399,45 @@ fn converting<T: Copy + Default>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dev(id: &str, name: &str) -> OutputDevice {
+        OutputDevice { id: id.into(), name: name.into() }
+    }
+
+    #[test]
+    fn alsa_offers_one_output_per_card_named_plainly() {
+        // As `aplay -L` lists a Pi 4 with a USB DAC.
+        let all = [
+            dev("default", "Playback/recording through the PulseAudio sound server"),
+            dev("hw:CARD=Headphones,DEV=0", "bcm2835 Headphones, bcm2835 Headphones"),
+            dev("plughw:CARD=Headphones,DEV=0", "bcm2835 Headphones, bcm2835 Headphones"),
+            dev("sysdefault:CARD=Headphones", "bcm2835 Headphones, bcm2835 Headphones"),
+            dev("dmix:CARD=Headphones,DEV=0", "bcm2835 Headphones, bcm2835 Headphones"),
+            dev("hdmi:CARD=vc4hdmi0,DEV=0", "vc4-hdmi-0, MAI PCM i2s-hifi-0"),
+            dev("sysdefault:CARD=vc4hdmi0", "vc4-hdmi-0, MAI PCM i2s-hifi-0"),
+            dev("hdmi:CARD=vc4hdmi1,DEV=0", "vc4-hdmi-1, MAI PCM i2s-hifi-0"),
+            dev("plughw:CARD=DAC,DEV=0", "USB Audio DAC, USB Audio"),
+            dev("front:CARD=DAC,DEV=0", "USB Audio DAC, USB Audio"),
+            // cpal's own entries for the cards, by number: the same cards again.
+            dev("plughw:CARD=0,DEV=0", "bcm2835 Headphones, bcm2835 Headphones"),
+            dev("plughw:CARD=3,DEV=0", "USB Audio DAC, USB Audio"),
+            // A card only listed by number stays.
+            dev("plughw:CARD=4,DEV=0", "Other Card, Other Card"),
+        ];
+        let named: Vec<(String, String)> =
+            per_card(&all).into_iter().map(|o| (friendly(&o.id, &o.name), o.id)).collect();
+        assert_eq!(
+            named,
+            [
+                ("Headphones".to_owned(), "sysdefault:CARD=Headphones".to_owned()),
+                ("HDMI 1".to_owned(), "hdmi:CARD=vc4hdmi0,DEV=0".to_owned()),
+                ("HDMI 2".to_owned(), "hdmi:CARD=vc4hdmi1,DEV=0".to_owned()),
+                ("USB Audio DAC".to_owned(), "plughw:CARD=DAC,DEV=0".to_owned()),
+                ("Other Card".to_owned(), "plughw:CARD=4,DEV=0".to_owned()),
+            ]
+        );
+        assert_eq!(friendly("BuiltInSpeakerDevice", "MacBook Air Speakers"), "MacBook Air Speakers");
+    }
 
     fn filled(n: usize) -> (rtrb::Producer<f32>, Mixer, Arc<Shared>) {
         let shared = Shared::new(1.0);

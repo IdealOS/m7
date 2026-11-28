@@ -308,3 +308,46 @@ async fn skips_what_it_cannot_play_and_refuses_what_is_not_a_track() {
     let e = call(&c, "jump", json!({"index": 99})).await.unwrap_err();
     assert_eq!(code_of(e), code::NOT_FOUND);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn follows_the_output_and_levelling_settings_without_losing_its_place() {
+    let dir = TempDir::new("settings");
+    let c = start(&dir.0, 1.0).await;
+    let t = track(&c, &dir.0, "Long", 30.0).await;
+    call(&c, "play", json!({"tracks": [t]})).await.unwrap();
+    let before = until(&c, "playing a while", |s| s.state == PlayState::Playing && s.position > 0.5).await;
+
+    // Choosing another output starts again there, from where the music was.
+    let put = |key: &str, value: Value| {
+        let c = c.clone();
+        let data = json!({"key": key, "value": value});
+        async move {
+            c.request(protocol::db::SERVICE, "create", json!({"type": "Setting", "data": data}))
+                .await
+                .unwrap()
+        }
+    };
+    put(protocol::audio::OUTPUT_KEY, json!("no such output")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = until(&c, "playing on after the switch", |s| {
+        s.state == PlayState::Playing && s.position > before.position + 0.4
+    })
+    .await;
+    assert_eq!(after.current, Some(0));
+    assert!(after.position < before.position + 3.0, "went on from where it was: {after:?}");
+
+    // Levelling another way goes on from where the music is too.
+    put(protocol::audio::LEVELING_KEY, json!("album")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let later = until(&c, "playing on after levelling", |s| {
+        s.state == PlayState::Playing && s.position > after.position + 0.2
+    })
+    .await;
+    assert!(later.position < after.position + 3.0, "{later:?}");
+
+    // The outputs there are (this machine's), with none current while silent.
+    let outputs: protocol::audio::OutputsResult =
+        serde_json::from_value(c.request(protocol::audio::SERVICE, "outputs", Value::Null).await.unwrap())
+            .unwrap();
+    assert_eq!(outputs.current, None);
+}

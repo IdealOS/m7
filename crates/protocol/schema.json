@@ -1448,6 +1448,26 @@
         }
       ]
     },
+    "Leveling": {
+      "description": "How audiod evens out loudness between tracks, from their ReplayGain tags. A\ntrack without them plays as it is.",
+      "oneOf": [
+        {
+          "const": "off",
+          "description": "Every track as it was mastered.",
+          "type": "string"
+        },
+        {
+          "const": "track",
+          "description": "Each track at the same loudness.",
+          "type": "string"
+        },
+        {
+          "const": "album",
+          "description": "Each album at the same loudness, its tracks as loud as each other as the\nalbum has them (a track without an album gain is levelled on its own).",
+          "type": "string"
+        }
+      ]
+    },
     "LinkInfo": {
       "description": "A link out of a document.",
       "properties": {
@@ -2034,6 +2054,46 @@
         "path",
         "hash",
         "imported"
+      ],
+      "type": "object"
+    },
+    "OutputDevice": {
+      "description": "A sound output audiod can play to.",
+      "properties": {
+        "id": {
+          "description": "What the `audio.output` setting holds to choose it.",
+          "type": "string"
+        },
+        "name": {
+          "description": "What to show: \"Headphones\", \"HDMI 1\", a USB device's name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "OutputsResult": {
+      "description": "Result of `outputs`.",
+      "properties": {
+        "current": {
+          "description": "The id of the one playing now, if it's one of them (not the system's\ndefault, or nowhere).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/OutputDevice"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outputs"
       ],
       "type": "object"
     },
@@ -3545,6 +3605,14 @@
   "description": "Bus frames are a 4-byte big-endian length followed by one UTF-8 JSON `Message`.",
   "title": "idealos wire protocol",
   "x-constants": {
+    "AUDIO_LEVELING_KEY": {
+      "description": "The Setting that picks how audiod levels loudness: off, track or album.",
+      "value": "audio.leveling"
+    },
+    "AUDIO_OUTPUT_KEY": {
+      "description": "The Setting that picks audiod's sound output: an id from `outputs`, or null for the default.",
+      "value": "audio.output"
+    },
     "AUDIO_SERVICE": {
       "description": "The name audiod claims.",
       "value": "audio"

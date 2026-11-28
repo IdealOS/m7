@@ -91,6 +91,8 @@ fn document() -> Value {
     g.subschema_for::<protocol::audio::VolumeParams>();
     g.subschema_for::<protocol::audio::ShuffleParams>();
     g.subschema_for::<protocol::audio::RepeatParams>();
+    g.subschema_for::<protocol::audio::Leveling>();
+    g.subschema_for::<protocol::audio::OutputsResult>();
     g.subschema_for::<backup::BackupStatus>();
     g.subschema_for::<backup::DriveParams>();
     g.subschema_for::<backup::BackedUp>();
@@ -145,6 +147,8 @@ fn document() -> Value {
         "IMPORT_SERVICE": constant(protocol::import::SERVICE.into(), "The name importd claims."),
         "AUDIO_SERVICE": constant(protocol::audio::SERVICE.into(), "The name audiod claims."),
         "MAX_QUEUE": constant(protocol::audio::MAX_QUEUE.into(), "Most tracks audiod's queue holds."),
+        "AUDIO_OUTPUT_KEY": constant(protocol::audio::OUTPUT_KEY.into(), "The Setting that picks audiod's sound output: an id from `outputs`, or null for the default."),
+        "AUDIO_LEVELING_KEY": constant(protocol::audio::LEVELING_KEY.into(), "The Setting that picks how audiod levels loudness: off, track or album."),
         "MAX_FRAME_BYTES": constant(bus::MAX_FRAME_BYTES.into(), "Largest frame the broker accepts, not counting the 4-byte length prefix."),
         "MAX_FDS_PER_MESSAGE": constant(protocol::unix::MAX_FDS_PER_MESSAGE.into(), "Most file descriptors one message may carry."),
     });

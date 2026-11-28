@@ -23,10 +23,12 @@ use crate::output::Shared;
 use crate::queue::Key;
 use crate::resample::Resampler;
 
-/// A track to play: its queue key and its open audio.
+/// A track to play: its queue key, its open audio, and what to scale its
+/// samples by (its levelling, 1 for none).
 pub struct Load {
     pub key: Key,
     pub file: File,
+    pub gain: f32,
 }
 
 pub enum Cmd {
@@ -65,6 +67,9 @@ struct Player {
     events: UnboundedSender<Event>,
     epoch: u64,
     playing: Option<(Key, Track)>,
+    /// The playing track's levelling, and its samples scaled by it.
+    gain: f32,
+    scaled: Vec<f32>,
     /// The key whose successor was asked for, when nothing is playing until it
     /// comes.
     waiting: Option<Key>,
@@ -95,6 +100,8 @@ pub fn spawn(
                 events,
                 epoch: 0,
                 playing: None,
+                gain: 1.0,
+                scaled: Vec::new(),
                 waiting: None,
                 following: Following::Unknown,
                 resampler: None,
@@ -183,7 +190,7 @@ impl Player {
 
     /// Start decoding `load` from `at` seconds, straight after what's pushed.
     fn begin(&mut self, load: Load, at: f64) {
-        let key = load.key;
+        let (key, gain) = (load.key, load.gain);
         let opened = Track::open(load.file).and_then(|mut t| {
             let start = if at > 0.0 { t.seek(at)? } else { 0.0 };
             Ok((t, start))
@@ -202,6 +209,7 @@ impl Player {
                 let frame = self.base + r.output_frame(r.taken());
                 let duration = track.duration();
                 self.playing = Some((key, track));
+                self.gain = gain;
                 self.following = Following::Unknown;
                 self.send(Event::Began { epoch: self.epoch, key, frame, start, duration });
                 self.send(Event::Want { epoch: self.epoch, after: key });
@@ -226,7 +234,12 @@ impl Player {
         match track.frames() {
             Ok(Some(frames)) => {
                 if let Some(r) = &mut self.resampler {
-                    r.process(frames, &mut self.out);
+                    if self.gain == 1.0 {
+                        r.process(frames, &mut self.out);
+                    } else {
+                        crate::gain::apply(frames, self.gain, &mut self.scaled);
+                        r.process(&self.scaled, &mut self.out);
+                    }
                 }
             }
             Ok(None) => self.ended(),
@@ -304,6 +317,8 @@ mod tests {
         events: tokio::sync::mpsc::UnboundedReceiver<Event>,
         shared: Arc<Shared>,
         stop: Arc<AtomicBool>,
+        /// The loudest sample the mixer has played, as `f32` bits.
+        peak: Arc<std::sync::atomic::AtomicU32>,
     }
 
     impl Rig {
@@ -314,15 +329,19 @@ mod tests {
             let (tx, events) = tokio::sync::mpsc::unbounded_channel();
             spawn(48_000, shared.clone(), producer, rx, tx);
             let stop = Arc::new(AtomicBool::new(false));
-            let s = stop.clone();
+            let peak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let (s, pk) = (stop.clone(), peak.clone());
             std::thread::spawn(move || {
                 let mut buf = vec![0.0; 2 * 4096];
                 while !s.load(Ordering::Relaxed) {
                     mixer.fill(&mut buf, 2);
+                    let loudest =
+                        buf.iter().fold(f32::from_bits(pk.load(Ordering::Relaxed)), |m, v| m.max(v.abs()));
+                    pk.store(loudest.to_bits(), Ordering::Relaxed);
                     std::thread::sleep(Duration::from_millis(1));
                 }
             });
-            Rig { cmds, events, shared, stop }
+            Rig { cmds, events, shared, stop, peak }
         }
 
         fn next(&mut self) -> Event {
@@ -357,22 +376,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tracks_gain_scales_what_it_plays() {
+        // The test tone peaks at 8000 of 32768.
+        let tone = 8000.0 / 32768.0;
+        for gain in [1.0, 0.5] {
+            let mut rig = Rig::new();
+            rig.cmds
+                .send(Cmd::Start {
+                    epoch: 1,
+                    load: Load { key: 1, file: wav(48_000, 2, 0.3), gain },
+                    at: 0.0,
+                })
+                .unwrap();
+            rig.cmds.send(Cmd::Last { epoch: 1, after: 1 }).unwrap();
+            while !matches!(rig.next(), Event::Finished { .. }) {}
+            // Let the mixer play what's left in the ring.
+            std::thread::sleep(Duration::from_millis(400));
+            let peak = f32::from_bits(rig.peak.load(Ordering::Relaxed));
+            assert!((peak - tone * gain).abs() < 0.01, "gain {gain}: peak {peak}, want {}", tone * gain);
+        }
+    }
+
+    #[test]
     fn tracks_join_on_the_exact_frame_even_across_rates() {
         let mut rig = Rig::new();
         rig.cmds
-            .send(Cmd::Start { epoch: 1, load: Load { key: 1, file: wav(8000, 1, 1.0) }, at: 0.0 })
+            .send(Cmd::Start { epoch: 1, load: Load { key: 1, file: wav(8000, 1, 1.0), gain: 1.0 }, at: 0.0 })
             .unwrap();
         assert_eq!(no_duration(rig.next()), began(1, 0));
         assert_eq!(rig.next(), Event::Want { epoch: 1, after: 1 });
         // The same rate: one continuous stream through the resampler.
         rig.cmds
-            .send(Cmd::Next { epoch: 1, after: 1, load: Load { key: 2, file: wav(8000, 2, 1.0) } })
+            .send(Cmd::Next { epoch: 1, after: 1, load: Load { key: 2, file: wav(8000, 2, 1.0), gain: 1.0 } })
             .unwrap();
         assert_eq!(no_duration(rig.next()), began(2, 48_000));
         assert_eq!(rig.next(), Event::Want { epoch: 1, after: 2 });
         // Another rate: a new resampler, starting exactly where the last one ended.
         rig.cmds
-            .send(Cmd::Next { epoch: 1, after: 2, load: Load { key: 3, file: wav(44_100, 2, 0.5) } })
+            .send(Cmd::Next {
+                epoch: 1,
+                after: 2,
+                load: Load { key: 3, file: wav(44_100, 2, 0.5), gain: 1.0 },
+            })
             .unwrap();
         assert_eq!(no_duration(rig.next()), began(3, 96_000));
         assert_eq!(rig.next(), Event::Want { epoch: 1, after: 3 });
@@ -398,11 +443,13 @@ mod tests {
             f.rewind().unwrap();
             f
         };
-        rig.cmds.send(Cmd::Start { epoch: 1, load: Load { key: 1, file: junk }, at: 0.0 }).unwrap();
+        rig.cmds
+            .send(Cmd::Start { epoch: 1, load: Load { key: 1, file: junk, gain: 1.0 }, at: 0.0 })
+            .unwrap();
         assert!(matches!(rig.next(), Event::Failed { key: 1, .. }));
         assert_eq!(rig.next(), Event::Want { epoch: 1, after: 1 });
         rig.cmds
-            .send(Cmd::Next { epoch: 1, after: 1, load: Load { key: 2, file: wav(8000, 1, 0.5) } })
+            .send(Cmd::Next { epoch: 1, after: 1, load: Load { key: 2, file: wav(8000, 1, 0.5), gain: 1.0 } })
             .unwrap();
         assert_eq!(no_duration(rig.next()), began(2, 0));
     }
@@ -411,12 +458,12 @@ mod tests {
     fn starting_again_drops_the_old_stream_and_seeks() {
         let mut rig = Rig::new();
         rig.cmds
-            .send(Cmd::Start { epoch: 1, load: Load { key: 1, file: wav(8000, 1, 3.0) }, at: 0.0 })
+            .send(Cmd::Start { epoch: 1, load: Load { key: 1, file: wav(8000, 1, 3.0), gain: 1.0 }, at: 0.0 })
             .unwrap();
         assert_eq!(no_duration(rig.next()), began(1, 0));
         assert_eq!(rig.next(), Event::Want { epoch: 1, after: 1 });
         rig.cmds
-            .send(Cmd::Start { epoch: 2, load: Load { key: 1, file: wav(8000, 1, 3.0) }, at: 2.0 })
+            .send(Cmd::Start { epoch: 2, load: Load { key: 1, file: wav(8000, 1, 3.0), gain: 1.0 }, at: 2.0 })
             .unwrap();
         assert_eq!(
             no_duration(rig.next()),

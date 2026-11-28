@@ -1,11 +1,14 @@
 // Settings: the network (through netd), what apps may do (through permd),
-// the display, storage (the database and its snapshots), backups to a USB drive
+// the display, sound (through audiod), storage (the database and its snapshots), backups to a USB drive
 // (through backupd) and about.
 //
 // Each section loads when it's shown. The network and backup sections follow
 // their service's status live; the rest refresh each time they're opened.
 
 import {
+  AUDIO_LEVELING_KEY,
+  AUDIO_OUTPUT_KEY,
+  AUDIO_SERVICE,
   button,
   db,
   dialog,
@@ -13,9 +16,11 @@ import {
   effect,
   hstack,
   label,
+  onCleanup,
   openWindow,
   request,
   scroll,
+  select,
   signal,
   split,
   stream,
@@ -23,6 +28,7 @@ import {
   toggle,
   vstack,
   untrack,
+  type AudioStatus,
   type AuditEntry,
   type BackedUp,
   type BackupInfo,
@@ -33,14 +39,17 @@ import {
   type InfoResult,
   type NetStatus,
   type NetworksResult,
+  type OutputDevice,
+  type OutputsResult,
   type ScreenInfo,
   type SnapshotInfo,
   type StatsResult,
   type UiNode,
   type WifiNetwork,
 } from "@idealos/sdk";
+import { AUTOMATIC, chosenOutput, LEVELINGS, levelingFrom, levelingLabel, levelingOf, outputChoices } from "./sound.ts";
 
-const SECTIONS = ["Network", "Permissions", "Display", "Storage", "Backup", "About"] as const;
+const SECTIONS = ["Network", "Permissions", "Display", "Sound", "Storage", "Backup", "About"] as const;
 type Section = (typeof SECTIONS)[number];
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -306,6 +315,69 @@ function displaySection(shown: () => boolean): UiNode {
   );
 }
 
+/** Where sound goes and how loud songs play: two settings audiod follows. */
+function soundSection(shown: () => boolean): UiNode {
+  const [outputs, setOutputs] = signal<OutputDevice[]>([]);
+  const [playingTo, setPlayingTo] = signal<string | null>(null);
+  const [message, setMessage] = signal("");
+  const load = () =>
+    request<OutputsResult>(AUDIO_SERVICE, "outputs", null).then(
+      (r) => setOutputs(r.outputs),
+      (e) => setMessage(`Can't reach the sound service: ${errorText(e)}`),
+    );
+  whenShown(shown, load);
+  // What audiod plays to now, as it changes (after a choice, or a device going away).
+  const stop = stream<AudioStatus>(AUDIO_SERVICE, "watch", {}, (s) => setPlayingTo(s.output ?? null), () => {});
+  onCleanup(stop);
+  const settings = db.live({ type: "Setting", where: { key: { $in: [AUDIO_OUTPUT_KEY, AUDIO_LEVELING_KEY] } } });
+  const setting = (key: string) => settings().find((d) => d.data.key === key);
+  const chosen = () => chosenOutput(setting(AUDIO_OUTPUT_KEY)?.data.value);
+  const choices = () => outputChoices(outputs(), chosen());
+  const save = async (key: string, value: unknown) => {
+    try {
+      const doc = setting(key);
+      if (doc) await db.update(doc.id, { value });
+      else await db.put("Setting", { key, value });
+      setMessage("");
+    } catch (e) {
+      setMessage(errorText(e));
+    }
+  };
+  return vstack(
+    { gap: 10, hidden: () => !shown() },
+    heading("Sound"),
+    hstack(
+      { gap: 10, align: "center" },
+      label({ text: "Output", w: 90 }),
+      select({
+        options: () => choices().map((c) => c.label),
+        value: () => choices().find((c) => c.id === chosen())?.label ?? AUTOMATIC,
+        onChange: (v) => {
+          const c = choices().find((x) => x.label === v);
+          if (c) void save(AUDIO_OUTPUT_KEY, c.id);
+        },
+      }),
+      button({ label: "Look again", onClick: () => void load() }),
+    ),
+    muted(() => (playingTo() ? `Playing to ${playingTo()}.` : "No sound output: music plays silently.")),
+    muted("Automatic plays to the system's default. A USB device plugged in later shows after Look again."),
+    hstack(
+      { gap: 10, align: "center", padding: [8, 0, 0, 0] },
+      label({ text: "Levelling", w: 90 }),
+      select({
+        options: LEVELINGS.map(([, name]) => name),
+        value: () => levelingLabel(levelingOf(setting(AUDIO_LEVELING_KEY)?.data.value)),
+        onChange: (v) => {
+          const l = levelingFrom(v);
+          if (l) void save(AUDIO_LEVELING_KEY, l);
+        },
+      }),
+    ),
+    muted("Plays songs at an even loudness, from the ReplayGain their files are tagged with. Each album alike keeps an album's quiet and loud songs as the album has them. Songs without it play as they are."),
+    label({ text: message, color: "$danger", size: 13, hidden: () => message() === "" }),
+  );
+}
+
 function storageSection(shown: () => boolean): UiNode {
   const [stats, setStats] = signal<StatsResult | null>(null);
   const [snapshots, setSnapshots] = signal<SnapshotInfo[]>([]);
@@ -498,6 +570,7 @@ await openWindow({ title: "Settings", width: 760, height: 520 }, () => {
     vstack({ hidden: () => section() !== "Network" }, network()),
     permissionsSection(pane("Permissions")),
     displaySection(pane("Display")),
+    soundSection(pane("Sound")),
     storageSection(pane("Storage")),
     backupSection(pane("Backup")),
     aboutSection(pane("About")),
