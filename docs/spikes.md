@@ -11,7 +11,7 @@ device images, and `make pi-report HOST=...` runs B, C and D on a board in one g
 | B | wgpu to KMS on the Pi 4 (V3DV with dmabuf import) | Blocked: needs a Pi (the image is built) |
 | C | Loro plus SQLite: writes, JSON copy, FTS5, at 10,000 docs | **Mac done**; Pi pending |
 | D | Memory and startup of 8 rquickjs app processes | **Mac done**; Pi pending |
-| E | Servo on aarch64, rendering offscreen | Not started: hours of build time (disk is no longer the blocker) |
+| E | Servo on aarch64, rendering offscreen | **Done in the build VM and the idealos QEMU image**; dmabuf export and Pi numbers pending (need a GPU) |
 | F | Gmail OAuth sign-in and one mailbox sync | Not started: needs a Google Cloud OAuth client |
 
 Unless a section says otherwise, numbers are from an Apple M3 on macOS, release build. Expect the Pi 4
@@ -252,6 +252,82 @@ Other results:
    Linux, the spike reads `VmRSS`. Proportional set size (`Pss` in
    `/proc/PID/smaps_rollup`) would give a truer per-app number when 8 apps share the
    same `app-host` binary.
+
+## Spike E: Servo on aarch64, offscreen
+
+[`spikes/servo-offscreen`](https://github.com/IdealOS/m7/blob/main/spikes/servo-offscreen/src/main.rs)
+embeds Servo 0.8.0 (from crates.io) the way `browser-host` would: no window, the page drawn
+into Servo's `SoftwareRenderingContext`, an event loop of our own woken by Servo's
+`EventLoopWaker`. It saves the page, sends a wheel event and saves the scrolled page, then
+asks EGL to export the frame as a dmabuf and checks the exported pixels against a read-back.
+It prints a Markdown report. It's outside the Cargo workspace (Servo and its dependencies are 751
+crates no other binary wants) and builds only on Linux:
+
+```
+cd spikes/servo-offscreen && cargo build --release   # in the build VM
+servo-offscreen URL [OUT_PREFIX] [WIDTHxHEIGHT]
+```
+
+To run it in the QEMU image it needs fontconfig and its few libraries beside it
+(`LD_LIBRARY_PATH`), a `fonts.conf`, and a CA bundle in `SSL_CERT_FILE`, none of which the
+image has yet.
+
+**Building.** Servo publishes official aarch64 Linux builds of servoshell (48 MB download), so
+the "hours of build time" weren't needed to try it. Our own embedder built from scratch in
+**9 minutes** in the build VM (6 cores): SpiderMonkey comes prebuilt from mozjs's releases.
+The target directory is 2.5 GB. With media (GStreamer), clipboard (X11/Wayland) and devtools
+left out, the stripped binary is **104 MB** and needs only libstdc++, zlib and fontconfig
+(FreeType and Servo's resources are built in). servoshell, by contrast, links GStreamer, X11
+and Wayland.
+
+**Results in the idealos QEMU image** (Mac M3 under HVF, 1280x800, llvmpipe from the image's
+Mesa 26.1.8; servoshell's own `-z -o` screenshots looked the same):
+
+| Page | First frame | Loaded | Wheel to frame | Resident memory |
+| --- | --- | --- | --- | --- |
+| example.com | 111 ms | 142 ms | 16 ms | 274 MB |
+| news.ycombinator.com | 219 ms | 456 ms | 19 ms | 265 MB |
+| en.wikipedia.org (Raspberry Pi) | 156 ms | 678 ms | 2 ms | 471–484 MB |
+| github.com/servo/servo | 466 ms | 948 ms | 25 ms | 407 MB |
+
+Servo itself starts in 20–40 ms (250–550 ms the first time, cold). Paints take a median of
+2–8 ms on llvmpipe; the slowest, when images first arrive, 70–180 ms. Wikipedia never stops
+painting (about 1,000 frames in the run): something on the page animates for ever.
+
+### Findings
+
+1. **Servo renders real sites on aarch64 Linux, inside our image, with our Mesa.** Wikipedia,
+   GitHub and Hacker News are readable and laid out properly. Faults seen: some icons
+   (CSS masks or SVG) come out as black squares, CJK text needs a font the image doesn't
+   have, and Wikipedia's scripts hit missing APIs (`IntersectionObserver`). So sites
+   mostly work, but not every site will.
+2. **The embedding API fits `browser-host`.** No window is needed. Servo calls us when it has
+   work (`EventLoopWaker`) and when a frame is ready; we call `paint()`. Input goes in as
+   `InputEvent`s (the wheel event scrolled the page on the next frame), and the delegate
+   reports load state, title and history. `RenderingContext` is a public trait, so
+   `browser-host` can bring its own context: one on the Pi's GPU (V3D, GLES 3.1; Servo asks for
+   GLES 3.0) whose frames go out as dmabufs, rather than Servo's software one.
+3. **The dmabuf path is unproven: it needs a GPU.** In the image, EGL advertises
+   `EGL_MESA_image_dma_buf_export` and describes the frame (linear `AB24`, one plane), but
+   llvmpipe hands back no file descriptor, since its buffers are plain memory. Ubuntu's EGL
+   in the build VM lacks the extension altogether. On the Pi, V3D buffers are real dmabufs, and
+   the compositor already imports dmabufs there (`import_dmabuf`, for direct scanout). In QEMU,
+   `browser-host` would fall back to reading frames back and sending them as a memfd.
+4. **Memory is the cost to plan for: 270–480 MB per page.** On a 2 GB Pi 4, next to the
+   compositor, db and apps, that's room for two or three heavy tabs. Keep background tabs
+   unloaded or discarded rather than all resident, and run `browser-host` with a memory
+   limit so a bad page can't take the system down.
+5. **Size.** 104 MB for the browser against 152 MB free on the QEMU root partition (512 MB,
+   with LLVM for llvmpipe in it) and about 290 MB free on the Pi 4's. It fits, without much
+   room for growth.
+6. **The image can't resolve names.** `/etc/resolv.conf` links to `/run/resolv.conf`, but
+   NetworkManager writes `/run/NetworkManager/resolv.conf`, so nothing on the device can look
+   up a host name yet (everything so far connects by address). The browser will be the first
+   thing to need it.
+
+What's left for Spike E: run the same binary on the Pi 4 (llvmpipe isn't in the Pi image,
+so it needs a GPU-backed `RenderingContext`, which is the dmabuf work above), to get Pi
+numbers and prove the export.
 
 ## What these spikes don't tell us yet
 

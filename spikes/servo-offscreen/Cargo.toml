@@ -1,0 +1,29 @@
+[package]
+name = "servo-offscreen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Spike E: Servo embedded with no window, rendering a page offscreen. Kept out of
+# the main workspace: Servo pulls in hundreds of crates and SpiderMonkey, and
+# only this binary needs them. Builds only on Linux (aarch64 in the build VM).
+
+[workspace]
+
+[dependencies]
+# Without GStreamer (media), the clipboard (X11/Wayland) and devtools: what a
+# sandboxed browser-host on the device would want. Resources and FreeType are
+# baked in, so nothing but fontconfig, EGL and GLES is needed at run time.
+servo = { version = "=0.8.0", default-features = false, features = ["bundled", "js_jit"] }
+dpi = "0.1"
+euclid = "0.22"
+gleam = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+khronos-egl = { version = "6", features = ["dynamic"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+url = "2"
+
+[profile.release]
+debug = false
+strip = true

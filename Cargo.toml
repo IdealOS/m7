@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/protocol", "crates/protocol-schema", "crates/db", "crates/dbd", "crates/permd", "crates/secretsd", "crates/ptyd", "crates/netd", "crates/backupd", "crates/importd", "crates/audiod", "crates/app-host", "crates/busd", "crates/bus-client", "crates/osctl", "crates/compositor", "crates/session", "crates/sandbox", "spikes/db-bench", "spikes/js-bench", "spikes/kms-probe"]
+# Spike E builds on its own: Servo is hundreds of crates only it needs.
+exclude = ["spikes/servo-offscreen"]
 
 [workspace.package]
 version = "0.1.0"

@@ -428,6 +428,8 @@ Later:
 - [ ] Downloads go through `importd`.
 - [ ] Runs with the network grant, in its own sandbox.
 
+Spike E ([spikes.md](spikes.md#spike-e-servo-on-aarch64-offscreen)) embedded Servo 0.8.0 from crates.io with no window and rendered real sites inside the QEMU image: a 104 MB binary without GStreamer, 270–480 MB of memory per page, scrolling by forwarded events. Still to prove on the Pi: a `RenderingContext` of our own on V3D whose frames export as dmabufs (llvmpipe can't). Before the browser, the image needs working name lookup (`/etc/resolv.conf` points where NetworkManager doesn't write), CA certificates and fontconfig.
+
 **Done when:** common sites are usable on the Pi, and history and bookmarks show up in the document browser.
 
 ### M14: Database shell, import and export, history viewer
