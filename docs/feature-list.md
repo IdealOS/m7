@@ -42,7 +42,7 @@ These choices are settled. The implementation plan builds on them.
 | App language | TypeScript on QuickJS, one process per app |
 | App UI | SolidJS-style signals |
 | App install | Apps are database documents |
-| Browser engine | Servo, shown through an external-surface node |
+| Browser engine | Servo, run by browser-host and shown through a `surface` node (built; frames go through shared memory, dmabufs on the Pi later) |
 | Shells | Both a raw Linux shell and a database-aware shell |
 | Chat | Dummy chat service for testing; real protocols later |
 | Networking | Existing network daemon, controlled by Settings over the bus |
@@ -69,7 +69,7 @@ These choices are settled. The implementation plan builds on them.
 └───────┬───────┘ └───────┬───────┘ └────────┬──────┘ └────────┬────────┘
 ┌───────┴─────────────────┴──────────────────┴─────────────────┴─────────┐
 │ Minimal Linux base                                                     │
-│ DRM/KMS · libinput · PipeWire · network daemon · CLIs · RO root, A/B   │
+│ DRM/KMS · libinput · ALSA · network daemon · CLIs · RO root, A/B       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,7 +123,7 @@ Goal: a working system where TypeScript apps run in windows, read and write the 
 - Thick widgets: window, label, button, text field, multiline text, virtual list, scroll view, image, flex and stack layout.
 - Hover, scroll, focus, text selection and editing happen in the compositor without a round trip to the app.
 - Overlapping windows, focus handling and workspaces.
-- External-surface node that imports a dmabuf, as the escape hatch for Servo.
+- A `surface` node for pixels another process draws, as the escape hatch for Servo. Built: the compositor attaches to the service as the app and copies each frame out of shared memory; importing dmabufs (zero-copy) comes with the Pi.
 
 **Shell UI**
 
@@ -142,9 +142,9 @@ Goal: the author can use the system every day for writing, mail, music, chat and
 - **Backup and snapshots:** scheduled database snapshots, full export to external storage, and restore. This comes first in the phase, because all data lives in one database.
 - **Text editor:** documents stored as CRDT text. The compositor text widget can bind straight to a document field.
 - **Email:** a sync service built on the Gmail API writes messages and labels into the database and sends mail through the same API. The mail app is a set of queries plus a composer.
-- **Music player:** an audio service on PipeWire or ALSA. Tracks and playlists are documents; audio files are blobs.
+- **Music player:** an audio service on ALSA directly (it does its own mixing; no PipeWire). Tracks and playlists are documents; audio files are blobs.
 - **Chat:** a dummy chat service that produces fake conversations, plus a chat app. A service interface leaves room for real protocols later.
-- **Browser:** Servo renders into an external surface. The browser must be granted network access. Downloads go through the importer.
+- **Browser:** Servo, in its own service (browser-host), draws into a `surface` node. The app needs only the `service:web` grant; browser-host does the fetching. Downloads will go through the importer.
 - **Database shell:** a Nushell-style shell for queries such as `emails | where from.name == "Bob"`.
 - **Import and export:** importers turn files from USB or downloads into typed records (images, audio, PDFs, contacts). Export turns records back into plain files.
 - **History viewer:** a time-travel view for any document, and the UI for global undo.
@@ -168,7 +168,7 @@ Each of these should be prototyped before the plan relies on it.
 | wgpu output to KMS | wgpu does not present to KMS directly | Render to a texture, export a dmabuf, import it as a KMS framebuffer and page-flip; fall back to copying into a dumb buffer on lavapipe |
 | GPU in QEMU on macOS | Vulkan pass-through is unreliable on macOS hosts | Confirm lavapipe works on plain virtio-gpu, then try virgl GLES through UTM |
 | Pi 4 GPU limits | V3DV is Vulkan 1.2 with low fill rate | Measure frame time at 1080p with 20 or more windows; set downlevel wgpu limits |
-| Servo on aarch64 | Servo renders with its own GL stack, separate from wgpu | Build Servo for the Pi and share its frames with the compositor as dmabufs |
+| Servo on aarch64 | Servo renders with its own GL stack, separate from wgpu | Build Servo for the Pi and share its frames with the compositor as dmabufs. **Spike E:** Servo 0.8.0 builds for aarch64 in 9 minutes and renders real sites in the QEMU image at 270–480 MB a page; frames go to the compositor through shared memory for now, since dmabuf export needs a real GPU |
 | CRDT plus SQLite | Two copies of each document must stay consistent and fast | Benchmark Loro writes plus JSON updates and FTS5 indexing on the Pi |
 | Live query cost | Re-running queries on every change can get expensive | Start by re-running queries; add incremental updates where needed |
 | QuickJS memory and speed | 8 or more app processes on the Pi | Measure resident memory per app and signal-update throughput |

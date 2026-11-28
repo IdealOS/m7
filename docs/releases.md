@@ -24,8 +24,8 @@ reports say which build they came from.
 
 ## First install
 
-The raw `sdcard.img` is about 3.3 GB, but most of it is the empty 2 GiB data
-partition and a second copy of the 512 MiB root, so it compresses to a few hundred
+The raw `sdcard.img` is about 4.4 GB, but most of it is the empty 2 GiB data
+partition and a second copy of the 1 GiB root, so it compresses to a few hundred
 MB. Testers flash it with Raspberry Pi Imager or balenaEtcher. Pi Imager can also
 read a custom OS list from a JSON URL, which could later list idealos in its menu.
 

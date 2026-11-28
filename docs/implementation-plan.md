@@ -50,7 +50,7 @@ M1 and M2 can be built in parallel after M0. Phase 1 is a single chain because e
 
 ## Repository layout
 
-One repo: a Cargo workspace for everything in Rust, a pnpm workspace for TypeScript, and a Buildroot external tree for the image.
+One repo: a Cargo workspace for everything in Rust (but browser-host and Servo's spike, which build on their own), a pnpm workspace for the TypeScript SDK and apps, and a Buildroot external tree for the image. The layout as it is now; planned crates are marked.
 
 ```
 idealos/
@@ -60,31 +60,36 @@ idealos/
 │   ├── protocol/           # message types, scene ops, query filter, grants; JSON Schema + TS codegen
 │   ├── bus-client/         # client library used by every service and the app host
 │   ├── busd/               # broker: routing, pub/sub, peer identity, permission checks
-│   ├── db-core/            # storage engine: SQLite, Loro, query compiler, blobs, history
+│   ├── protocol-schema/    # exports the protocol as JSON Schema (make protocol)
+│   ├── db/                 # storage engine: SQLite, Loro, query compiler, blobs, history
 │   ├── dbd/                # database service on the bus
 │   ├── permd/              # grants store, prompts, audit log
 │   ├── secretsd/           # encrypted secrets store
 │   ├── compositor/         # scene graph, widgets, layout, text, renderer, window manager
-│   │   └── backends/       # winit (hosted) and kms (DRM/KMS + libinput)
+│   │   └── backend/        # hosted (winit) and kms (DRM/KMS + libinput)
 │   ├── app-host/           # QuickJS runtime, one process per app
 │   ├── session/            # starts and restarts services; launches apps in sandboxes
+│   ├── sandbox/            # the app and reader sandboxes: user, netns, Landlock, seccomp, limits
 │   ├── netd/               # NetworkManager bridge
 │   ├── ptyd/               # PTYs and terminal grids for the terminal app
-│   ├── audiod/             # PipeWire playback
-│   ├── maild/              # Gmail API sync
-│   ├── chatd-dummy/        # fake chat service
-│   ├── importd/            # file importers and exporters
-│   ├── backupd/            # snapshots, backup, restore
-│   ├── browser-host/       # Servo embedding, external surfaces
+│   ├── audiod/             # music playback through ALSA, its own mixing; the queue
+│   ├── maild/              # Gmail API sync (planned, M10)
+│   ├── chatd-dummy/        # fake chat service (planned, M12)
+│   ├── importd/            # file importers (and import-reader, the sandboxed decoder)
+│   ├── backupd/            # backups to a USB drive, and restoring them
+│   ├── browser-host/       # Servo with no window, drawing pages into surfaces (own workspace)
 │   └── osctl/              # CLI: bus tracing, db queries, app install
 ├── sdk/                    # @idealos/sdk: bus, db, signals, widgets, permissions
-├── apps/                   # settings, documents, terminal, editor, mail, music, chat, browser
+├── spikes/                 # kms-probe, db-bench, js-bench, servo-offscreen (Spikes A–E)
+├── apps/                   # counter, notes, gallery, settings, browser (Documents), terminal,
+│                           #   editor, files, styles, music, web; mail and chat to come
 ├── schemas/                # system schemas: Contact, Email, Message, Track, ...
 ├── image/                  # Buildroot external tree
-│   ├── configs/            # qemu_aarch64_defconfig, rpi4_defconfig
-│   ├── board/              # partition layouts, RAUC config, overlays
-│   └── package/            # Buildroot packages for our crates and apps
-├── tools/                  # run-qemu, flash-sd, deploy-to-pi
+│   ├── configs/            # qemu_aarch64, rpi3 and rpi4 defconfigs (and the shared toolchain's)
+│   ├── board/              # partition layouts, overlays, post-build (installs browser-host)
+│   └── package/            # idealos-userspace: the workspace and the app bundles
+├── tools/                  # build-image, build-device-bins, build-browser-host, run-qemu,
+│                           #   flash-sd, deploy-to-pi, the smoke tests
 └── docs/
 ```
 
@@ -533,7 +538,7 @@ Beyond the usual effects, one aim of IdealOS is to explore new uses of GPU effec
 
 - [ ] **Night tint in the display hardware.** Set the CRTC's gamma table (and its colour matrix where the driver has one) from `backend/kms/display.rs`. It costs nothing per frame, changing it redraws nothing (so it can fade at sunset), and it covers the hardware cursor, which nothing in our renderer reaches. KMS only; on the Mac, Night Shift does this. Check what `vc4` offers (its reported gamma size) on the Pi 4.
 - [ ] **Window colour effects (level 1).** An `effect` on `Layer` (`scene.rs`), filled from a compositor-owned window prop, passed to `quad.wgsl` and `image.wgsl` as a colour matrix and opacity; text, one colour per run, gets the same matrix applied to its colour in `render.rs`. No extra passes or textures. Per-pixel colour only: no blur or movement, and opacity applies per element, so overlapping parts of a translucent window show through each other.
-- [ ] **Per-window shaders (level 2), a later phase.** Render a window's layer into its own texture, then draw that texture into the frame through a shader chosen for the window: true whole-window opacity, blur behind, scaling and warping for animations, thumbnails in the window switcher. An unchanged window reuses its texture, a step toward drawing only what changed. About 8 MB of texture per 1080p-sized window and a compositing pass each: fine on the Pi 4's GPU, heavy on the Pi 3. Design it together with region damage and M13's external surfaces (Servo's tabs arrive as GPU buffers), which need windows as textures too.
+- [ ] **Per-window shaders (level 2), a later phase.** Render a window's layer into its own texture, then draw that texture into the frame through a shader chosen for the window: true whole-window opacity, blur behind, scaling and warping for animations, thumbnails in the window switcher. An unchanged window reuses its texture, a step toward drawing only what changed. About 8 MB of texture per 1080p-sized window and a compositing pass each: fine on the Pi 4's GPU, heavy on the Pi 3. Design it together with region damage and M13's surface nodes (Servo's pages arrive as textures now, and will arrive as GPU buffers once they're dmabufs), which need windows as textures too.
 - [ ] **A setting for it.** A `Setting` document the Settings app edits and the compositor follows with a live query. A night tint on a schedule needs the clock set first: nothing sets the time yet.
 - [ ] **Who chooses.** The compositor, the window manager and the user choose effects. Apps may at most pick from a fixed set of system effects and never supply shader code: a shader would run in the trusted compositor and the GPU driver (on the Pi 3, compiled by lavapipe in the compositor's own process), outside the app sandbox, and a transparent or warped window could imitate another app or hide where clicks land.
 

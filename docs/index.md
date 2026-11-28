@@ -7,9 +7,11 @@ talks through one message bus.
 
 Phase 1 (milestones M0 to M7) is built: the bus, the database, the app runtime,
 widgets and the window manager, permissions and sandboxes, and the first apps.
-Phase 2 has begun with M8: history compaction, and backups to a USB drive. The
-compositor has style sheets with a dark theme, and transitions. It runs hosted on
-macOS, in QEMU, and on a Raspberry Pi 4 and 3B+.
+Phase 2 is under way: M8 (history compaction, and backups to a USB drive) is built,
+and the text editor, the music player, imports from other computers and a web
+browser (Servo, drawing pages into compositor windows) are working and being
+finished. The compositor has style sheets with a dark theme, and transitions. It
+runs hosted on macOS, in QEMU, and on a Raspberry Pi 4 and 3B+.
 
 ## Documentation
 
@@ -20,7 +22,8 @@ macOS, in QEMU, and on a Raspberry Pi 4 and 3B+.
 - **[Feature list](feature-list.md)**: the vision, and what the system should do.
 - **[Implementation plan](implementation-plan.md)**: milestones M0 to M14, from first
   boot to a daily driver.
-- **[Spikes](spikes.md)**: the early experiments and their measurements.
+- **[Spikes](spikes.md)**: the experiments and their measurements, Servo on aarch64
+  (Spike E) the latest.
 - **[Releases](releases.md)**: how releases will reach beta testers (a plan).
 
 The code, the build instructions and the status of each part are in the

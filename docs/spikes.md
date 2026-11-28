@@ -317,7 +317,7 @@ painting (about 1,000 frames in the run): something on the page animates for eve
    compositor, db and apps, that's room for two or three heavy tabs. Keep background tabs
    unloaded or discarded rather than all resident, and run `browser-host` with a memory
    limit so a bad page can't take the system down.
-5. **Size.** 104 MB for the browser against 152 MB free on the QEMU root partition (512 MB,
+5. **Size.** 104 MB for the browser against 152 MB free on the QEMU root partition (512 MB then, 1 GB since;
    with LLVM for llvmpipe in it) and about 290 MB free on the Pi 4's. It fits, without much
    room for growth.
 6. **The image can't resolve names.** `/etc/resolv.conf` links to `/run/resolv.conf`, but
